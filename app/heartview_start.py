@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # 心臓3Dビューア: Slicer 起動時に実行。モジュールを登録して「アプリ画面」にする。
-import os
+import os, sys
 UPDATE_TIMEOUT = 6      # 秒。ネットが無い・遅いときは待たずに今の版で起動する
 
 
@@ -128,3 +128,4 @@ except Exception:
     import traceback, slicer
     traceback.print_exc()
     slicer.util.errorDisplay("心臓3Dビューアの起動に失敗しました。\n" + traceback.format_exc())
+import sys  # Slicer が実行後に sys を使うので必ず残す

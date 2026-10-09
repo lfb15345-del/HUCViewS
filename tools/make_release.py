@@ -60,8 +60,9 @@ def build_zip(app, ver):
     man = {"version": ver, "app_zip": f"https://github.com/{REPO}/releases/download/v{ver}/HUCViewS-app.zip",
            "sha256": sha, "min_slicer": "5.8", "published": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     json.dump(man, open(os.path.join(DIST, "latest.json"), "w", encoding="utf-8"), indent=2)
-    for src, dst in (("installer/windows/install.ps1", "install.ps1"), ("installer/mac/install_mac.sh", "install_mac.sh")):
-        shutil.copy2(os.path.join(REPO_DIR, src), os.path.join(DIST, dst))
+    for src, dst, eol in (("installer/windows/install.ps1", "install.ps1", b"\r\n"), ("installer/mac/install_mac.sh", "install_mac.sh", b"\n")):
+        b = open(os.path.join(REPO_DIR, src), "rb").read().replace(b"\r\n", b"\n")       # Mac 用は LF、Windows 用は CRLF に必ずそろえる
+        open(os.path.join(DIST, dst), "wb").write(b.replace(b"\n", eol))
     return man
 
 
