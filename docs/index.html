@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HUCViewS ダウンロード</title>
+<meta name="description" content="心臓・大動脈 3D ビューア HUCViewS（研究・教育用）のダウンロード">
+<link rel="icon" href="icon.png">
+<style>
+:root{--bg:#f6f8fb;--card:#fff;--ink:#1d2433;--sub:#5b6577;--line:#e3e8f0;--accent:#2f6db5;--accent2:#1f5596;--warn:#9a5b00;--warnbg:#fff6e5}
+@media (prefers-color-scheme:dark){:root{--bg:#11151c;--card:#1a2029;--ink:#e8edf5;--sub:#a3adbd;--line:#2a3340;--accent:#5b9be6;--accent2:#7cb0ee;--warn:#f0b65a;--warnbg:#2a2214}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 "Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:32px 16px 64px}
+header{display:flex;gap:16px;align-items:center}header img{width:64px;height:64px;border-radius:14px}
+h1{font-size:28px;margin:0;line-height:1.2}.lead{color:var(--sub);margin:4px 0 0}
+.note{background:var(--warnbg);color:var(--warn);border-radius:10px;padding:12px 16px;margin:24px 0;font-size:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}@media(max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+.card.rec{border:2px solid var(--accent)}.tag{display:inline-block;font-size:12px;background:var(--accent);color:#fff;border-radius:99px;padding:1px 10px;margin-left:6px;vertical-align:middle}
+.card h2{margin:0 0 6px;font-size:20px}.card p{margin:6px 0;color:var(--sub);font-size:14px}
+.btn{display:block;text-align:center;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;font-size:18px;border-radius:10px;padding:14px;margin:14px 0 10px}
+.btn:hover{background:var(--accent2)}
+ol{padding-left:22px;margin:8px 0}ol li{margin:4px 0;font-size:14px}
+code{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12.5px;word-break:break-all;margin:6px 0}
+details{margin-top:8px;font-size:14px}summary{cursor:pointer;color:var(--accent)}
+h3{font-size:17px;margin:32px 0 8px}footer{margin-top:40px;color:var(--sub);font-size:13px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><img src="icon.png" alt=""><div><h1>HUCViewS</h1><p class="lead">心臓・大動脈 3D ビューア（3D Slicer ＋ AI）</p></div></header>
+
+<div class="note"><b>研究・教育用です。医療機器ではありません。</b>診断・治療方針の決定には使わず、必ず元の画像で確認してください。患者データはお使いの PC の中だけで扱われ、外へ送られることはありません。</div>
+
+<div class="grid">
+  <div class="card" id="win">
+    <h2>Windows 10 / 11</h2>
+    <a class="btn" href="https://github.com/lfb15345-del/HUCViewS/releases/latest/download/HUCViewS_Windows.exe">ダウンロード（Windows）</a>
+    <ol>
+      <li>ダウンロードした <b>HUCViewS_Windows.exe</b> を開く</li>
+      <li>青い画面「Windows によって PC が保護されました」が出たら、<b>「詳細情報」→「実行」</b></li>
+      <li>インストール画面が終わるまで待つ（10〜30 分）→「HUCViewS を起動」</li>
+    </ol>
+    <p>管理者権限は不要。デスクトップとスタートメニューに「HUCViewS」ができます。削除は「設定 → アプリ」から。</p>
+  </div>
+  <div class="card" id="mac">
+    <h2>Mac</h2>
+    <a class="btn" href="https://github.com/lfb15345-del/HUCViewS/releases/latest/download/HUCViewS_Mac.zip">ダウンロード（Mac）</a>
+    <ol>
+      <li>ダウンロードした <b>HUCViewS Installer</b> をダブルクリック</li>
+      <li>「開けません」と出たら：<b>システム設定 → プライバシーとセキュリティ</b> の下の方にある<b>「このまま開く」</b>を押す</li>
+      <li>ターミナルが開いてインストールが進む（10〜30 分）。終わると「アプリケーション」に HUCViewS ができます</li>
+    </ol>
+    <details><summary>うまくいかないとき（ターミナルに貼る方法）</summary>
+      <code>curl -fsSL https://github.com/lfb15345-del/HUCViewS/releases/latest/download/install_mac.sh | bash</code>
+    </details>
+    <p>Mac では AI の自動認識が遅い、または動かないことがあります。その場合は Windows で作った症例を開いて見てください。</p>
+  </div>
+</div>
+
+<h3>使い方（3 ステップ）</h3>
+<ol>
+  <li>HUCViewS を起動し、CD-R を入れて「CD-R から読み込む」（または「フォルダから…」）</li>
+  <li>★の付いたシリーズのまま「3D を作る」（初回 5〜10 分）</li>
+  <li>「見たいもの」で <b>心臓 / 大動脈 / 血管すべて / 骨と血管</b> を切り替え、マウスで回す・切る・測る</li>
+</ol>
+<p style="font-size:14px;color:var(--sub)">心腔の左右の色分けには、TotalSegmentator の無料学術ライセンスが必要です（<a href="https://backend.totalsegmentator.com/license-academic/">申請はこちら</a>）。起動後の「AI ライセンスを登録する」に番号を入れてください。新しい版は起動のたびに自動で入ります。</p>
+
+<footer>北海道大学 心臓血管外科（HUCVS） ・ <a href="https://github.com/lfb15345-del/HUCViewS">GitHub</a> ・ ライセンス：PolyForm Noncommercial 1.0.0（非営利・研究・教育用）<br>不具合・要望は <a href="https://github.com/lfb15345-del/HUCViewS/issues">Issues</a> へ（患者情報・画像は貼らないでください）。</footer>
+</div>
+<script>
+(function(){var mac=/Mac/i.test(navigator.platform||navigator.userAgent),win=/Win/i.test(navigator.platform||navigator.userAgent);
+var a=document.getElementById('win'),b=document.getElementById('mac');
+if(mac){b.classList.add('rec');b.querySelector('h2').insertAdjacentHTML('beforeend','<span class="tag">お使いの PC</span>');a.parentNode.insertBefore(b,a);}
+else if(win){a.classList.add('rec');a.querySelector('h2').insertAdjacentHTML('beforeend','<span class="tag">お使いの PC</span>');}})();
+</script>
+</body>
+</html>

@@ -11,6 +11,8 @@
 
 ## インストール
 
+**かんたんダウンロードページ：https://lfb15345-del.github.io/HUCViewS/** （ボタンを押してダウンロード → 開くだけ）
+
 ### Windows 10 / 11（管理者権限は不要）
 1. [最新リリース](https://github.com/lfb15345-del/HUCViewS/releases/latest) から **`HUCViewS_Windows.exe`** をダウンロードして実行
    - 「Windows によって PC が保護されました」と出たら「詳細情報」→「実行」（署名のない配布物のため）

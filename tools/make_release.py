@@ -76,7 +76,7 @@ Class=IEXPRESS
 SEDVersion=3
 [Options]
 PackagePurpose=InstallApp
-ShowInstallProgramWindow=0
+ShowInstallProgramWindow=1
 HideExtractAnimation=1
 UseLongFileName=1
 InsideCompressed=0
@@ -99,7 +99,7 @@ DisplayLicense=
 FinishMessage=
 TargetName={target}
 FriendlyName=HUCViewS
-AppLaunched=powershell.exe -NoProfile -ExecutionPolicy Bypass -File install.ps1
+AppLaunched=powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File install.ps1
 PostInstallCmd=<None>
 AdminQuietInstCmd=
 UserQuietInstCmd=
@@ -117,12 +117,43 @@ SourceFiles0={work}\\
     return target
 
 
+def build_mac_app():
+    """Mac 用「HUCViewS インストーラー.app」（ダブルクリックでターミナルが開き、インストールが進む）を zip にする"""
+    name = "HUCViewS Installer.app"
+    zp = os.path.join(DIST, "HUCViewS_Mac.zip")
+    plist = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>HUCViewS Installer</string>
+<key>CFBundleDisplayName</key><string>HUCViewS Installer</string>
+<key>CFBundleIdentifier</key><string>jp.hucvs.hucviews.installer</string>
+<key>CFBundleVersion</key><string>1.0</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleExecutable</key><string>install</string>
+<key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict></plist>
+"""
+    script = ("#!/bin/bash\n"
+              "# ターミナルを開いてインストールを進める（進み具合が見えるように）\n"
+              "osascript -e 'tell application \"Terminal\" to activate' "
+              "-e 'tell application \"Terminal\" to do script \"curl -fsSL https://github.com/" + REPO + "/releases/latest/download/install_mac.sh | bash\"'\n")
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
+        def add(arc, data, mode):
+            zi = zipfile.ZipInfo(arc); zi.create_system = 3; zi.external_attr = (mode & 0xFFFF) << 16; zi.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(zi, data)
+        for d in (name + "/", name + "/Contents/", name + "/Contents/MacOS/"):
+            zi = zipfile.ZipInfo(d); zi.create_system = 3; zi.external_attr = (0o40755 << 16) | 0x10; z.writestr(zi, b"")
+        add(name + "/Contents/Info.plist", plist.encode("utf-8"), 0o100644)
+        add(name + "/Contents/MacOS/install", script.encode("utf-8"), 0o100755)
+    return zp
+
+
 def publish(ver, notes):
     run(["git", "add", "-A"])
     st = run(["git", "status", "--porcelain"], check=False).stdout.strip()
     if st: run(["git", "commit", "-m", f"HUCViewS {ver}"])
     run(["git", "push", "-u", "origin", "main"])
-    assets = [os.path.join(DIST, f) for f in ("HUCViewS-app.zip", "latest.json", "install.ps1", "install_mac.sh", "HUCViewS_Windows.exe") if os.path.exists(os.path.join(DIST, f))]
+    assets = [os.path.join(DIST, f) for f in ("HUCViewS-app.zip", "latest.json", "install.ps1", "install_mac.sh", "HUCViewS_Windows.exe", "HUCViewS_Mac.zip") if os.path.exists(os.path.join(DIST, f))]
     run(["gh", "release", "create", f"v{ver}", "--repo", REPO, "--title", f"HUCViewS {ver}", "--notes", notes or f"HUCViewS {ver}", "--latest"] + assets)
 
 
@@ -132,6 +163,8 @@ def main():
     app = assemble(ver); man = build_zip(app, ver)
     try: build_exe()
     except Exception as e: print("exe:", e)
+    try: build_mac_app()
+    except Exception as e: print("mac app:", e)
     print("version", ver, "sha256", man["sha256"][:12])
     if not globals().get("REL_DRYRUN"): publish(ver, notes)
     print("[release] 完了", ver)

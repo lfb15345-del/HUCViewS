@@ -12,6 +12,10 @@ $s.Description = 'HUCViewS 心臓3Dビューア（研究・教育用）'
 $s.WindowStyle = 7
 $s.Save()
 Write-Host 'デスクトップに「HUCViewS」を作りました。'
+try {                                                   # スタートメニューにも
+  $sm = $w.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'HUCViewS.lnk'))
+  $sm.TargetPath = $s.TargetPath; $sm.WorkingDirectory = $hv; $sm.IconLocation = $s.IconLocation; $sm.Description = $s.Description; $sm.WindowStyle = 7; $sm.Save()
+} catch {}
 $srcTxt = Join-Path $hv 'update_source.txt'; $src = if (Test-Path $srcTxt) { (Get-Content $srcTxt -Raw -Encoding UTF8).Trim() } else { '' }
 if ($src -match '^https?://') { Write-Host '更新はインターネット（GitHub）から起動時に自動で行います。'; exit 0 }
 try {
