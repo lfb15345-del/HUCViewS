@@ -55,10 +55,25 @@ def _fetch(url, timeout=UPDATE_TIMEOUT):
         return r.read()
 
 
+def _resolveManifest(url):
+    """「最新リリース」の短縮 URL は国・回線によって古い版が数分〜しばらく返ることがあるので、
+    GitHub API で最新リリースを調べて、その版の latest.json の確定 URL を使う（失敗したら元の URL）"""
+    import re, json
+    m = re.match(r"https://github\.com/([^/]+/[^/]+)/releases/latest/download/([^/?#]+)$", url)
+    if not m: return url
+    try:
+        rel = json.loads(_fetch(f"https://api.github.com/repos/{m.group(1)}/releases/latest").decode("utf-8"))
+        for a in rel.get("assets", []):
+            if a.get("name") == m.group(2): return a["browser_download_url"]
+    except Exception as e:
+        print("[HUCViewS] api:", e)
+    return url
+
+
 def _updateFromWeb(HV, manifestUrl, cur):
     """latest.json = {"version": "...", "app_zip": "https://.../HUCViewS-app.zip", "sha256": "...", "min_slicer": "5.6"}"""
     import json, hashlib, zipfile, io, shutil, tempfile
-    man = json.loads(_fetch(manifestUrl).decode("utf-8"))
+    man = json.loads(_fetch(_resolveManifest(manifestUrl)).decode("utf-8"))
     new = str(man.get("version", "")).strip()
     if not new or new == cur: return
     print(f"[HUCViewS] 新しい版があります {cur or '(なし)'} → {new}。ダウンロード中…")
