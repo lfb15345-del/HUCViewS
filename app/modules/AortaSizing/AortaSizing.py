@@ -20,8 +20,9 @@ SMOOTH_MM = 3.0     # 中心線をならす強さ (mm)
 LAYOUT_ID = 5603
 LAYOUT_XML = """
 <layout type="horizontal" split="true">
- <item splitSize="380"><view class="vtkMRMLViewNode" singletontag="1"><property name="viewlabel" action="default">1</property></view></item>
- <item splitSize="170"><view class="vtkMRMLSliceNode" singletontag="Green"><property name="orientation" action="default">Coronal</property><property name="viewlabel" action="default">S</property><property name="viewcolor" action="default">#6EB04B</property></view></item>
+ <item splitSize="330"><view class="vtkMRMLViewNode" singletontag="1"><property name="viewlabel" action="default">1</property></view></item>
+ <item splitSize="160"><view class="vtkMRMLSliceNode" singletontag="Green"><property name="orientation" action="default">Coronal</property><property name="viewlabel" action="default">S</property><property name="viewcolor" action="default">#6EB04B</property></view></item>
+ <item splitSize="160"><view class="vtkMRMLSliceNode" singletontag="Orange"><property name="orientation" action="default">Coronal</property><property name="viewlabel" action="default">S2</property><property name="viewcolor" action="default">#E8A33D</property></view></item>
  <item splitSize="450">
   <layout type="vertical" split="true">
    <item splitSize="520"><view class="vtkMRMLSliceNode" singletontag="Red"><property name="orientation" action="default">Axial</property><property name="viewlabel" action="default">X</property><property name="viewcolor" action="default">#F34A33</property></view></item>
@@ -41,6 +42,53 @@ TEMPLATES = {
     "TEVAR": ["腕頭動脈", "左総頸動脈", "左鎖骨下動脈", "近位ランディング", "瘤 / エントリー", "遠位ランディング", "腹腔動脈"],
     "自由": ["マーカー"],
 }
+
+
+def _ensureDecimation():
+    """VMTK の前処理が使う Decimation（Slicer 本体の CLI）。軽量化の設定で外れていたらその場で読み込む"""
+    if hasattr(slicer.modules, "decimation"): return
+    import glob, qt
+    fm = slicer.app.moduleManager().factoryManager()
+    try:
+        ig = list(fm.modulesToIgnore)
+        if "Decimation" in ig: ig.remove("Decimation"); fm.modulesToIgnore = ig
+    except Exception as e: print("decimation ignore:", e)
+    for exe in glob.glob(os.path.join(slicer.app.slicerHome, "lib", "Slicer-*", "cli-modules", "Decimation*")):
+        if os.path.splitext(exe)[1].lower() in ("", ".exe"):
+            try: fm.registerModule(qt.QFileInfo(exe)); fm.loadModules(["Decimation"])
+            except Exception as e: print("decimation load:", e)
+            break
+
+
+def _ensureVMTK(status=print):
+    """中心線の部品（SlicerVMTK 拡張）を用意する。無ければその場でダウンロードし、再起動せずに読み込む"""
+    _ensureDecimation()
+    try:
+        import ExtractCenterline; return ExtractCenterline
+    except Exception: pass
+    import sys, glob
+    em = slicer.app.extensionsManagerModel()
+    if not em.isExtensionInstalled("SlicerVMTK"):
+        status("初回だけ: 中心線の部品（SlicerVMTK）をダウンロードしています（10 秒ほど）…")
+        try: em.interactive = False
+        except Exception: pass
+        ok = False
+        try: ok = bool(em.installExtensionFromServer("SlicerVMTK", False))
+        except Exception as e: print("vmtk install:", e)
+        if not ok: raise RuntimeError("中心線の部品（SlicerVMTK）を入れられませんでした。ネットにつながる状態でもう一度押すか、Slicer の拡張機能から SlicerVMTK を入れてください。")
+    base = em.extensionInstallPath("SlicerVMTK")
+    for lib in glob.glob(os.path.join(base, "lib", "Slicer-*")):
+        L = os.path.join(lib, "qt-loadable-modules"); S = os.path.join(lib, "qt-scripted-modules")
+        for p in (L, os.path.join(L, "Python"), S):
+            if os.path.isdir(p) and p not in sys.path: sys.path.insert(0, p)
+        if os.path.isdir(L):
+            try: os.add_dll_directory(L)
+            except Exception: pass
+            os.environ["PATH"] = L + os.pathsep + os.environ.get("PATH", "")
+    try:
+        import ExtractCenterline; return ExtractCenterline
+    except Exception as e:
+        raise RuntimeError(f"中心線の部品を入れました。Slicer を一度閉じて開き直してください（{e}）")
 
 
 def _err(where):
@@ -187,15 +235,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.baseBtn = self._btn("ここを 0 mm に", None, "ベースライン（距離の基準）にする"); r2.addWidget(self.baseBtn)
         self.editContBtn = self._btn("輪郭を直す", None, "断面の輪郭を点で手直し", checkable=True); r2.addWidget(self.editContBtn)
         self.wlBtn = self._btn("ウィンドウを戻す", None, "断面・ストレッチ像の濃さを最初（血管用 W800/L200）に戻す"); r2.addWidget(self.wlBtn)
-        hint = self._lab("断面: ホイール 1 mm（Shift 5 mm）・ストレッチ像: クリック/ドラッグで移動、ホイールで回転・"
-                         "Enter 置く・P 記録・L 外周/内腔・Ctrl+Z 戻す・Esc 中止", "muted"); hint.setWordWrap(True); c.addWidget(hint)
+        hint = self._lab("断面: ホイール 1 mm（Shift 5 mm）・ストレッチ像（直交 2 方向）: クリック/ドラッグで移動、ホイールで回転・"
+                         "Ctrl+クリック 中心線をそこへ（断面・ストレッチ像）・Enter 置く・P 記録・L 外周/内腔・Ctrl+Z 戻す・Esc 中止", "muted"); hint.setWordWrap(True); c.addWidget(hint)
 
         self.stack = qt.QStackedWidget(); v.addWidget(self.stack, 1)
 
         # ---- ページ 1: 中心線
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10); self.stack.addWidget(pg)
         card, c = self._card(pl, "中心線", "AI ラベル + VMTK")
-        self.autoButton = self._btn("自動で中心線を作る（約 30 秒）", "primary"); c.addWidget(self.autoButton)
+        self.autoButton = self._btn("自動で中心線を作る（1 分ほど）", "primary"); c.addWidget(self.autoButton)
         c.addWidget(self._lab("経路", "muted"))
         self.pathGrp, (self.rightBtn, self.leftBtn, self.aortaBtn) = self._seg(["右（橙）", "左（水色）", "大動脈のみ"], c)
         self.editButton = self._btn("中心線を直す（点をドラッグ・右クリックで削除）", None, None, True); c.addWidget(self.editButton)
@@ -204,6 +252,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.centerHereButton = self._btn("ここを中心に寄せる"); r.addWidget(self.centerHereButton)
         self.centerAllButton = self._btn("全体を中心に寄せる"); r.addWidget(self.centerAllButton)
         c.addWidget(self._lab("3D の線をクリック = 左右の切り替えとその位置へ移動", "muted"))
+        c.addWidget(self._lab("細かい修正: 断面やストレッチ像で Ctrl+クリック = その位置の中心線をクリックした所へ（Ctrl+Z で戻す）", "muted"))
         nxt = self._btn("次へ: 計測 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(1)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
@@ -305,6 +354,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         L.onListsChanged = self.refreshLists
         L.onPath = self._syncPathButtons
         L.onKey = self.onKey
+        L.onStatus = self._say
         self._step = 0; self._lastDir = ""
         inter = slicer.app.applicationLogic().GetInteractionNode()
         self._interTag = inter.AddObserver(inter.InteractionModeChangedEvent, lambda c, e: self._syncTools())
@@ -327,6 +377,20 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         except Exception: pass
         try: self.logic.resume()
         except Exception: _err("enter")
+        qt.QTimer.singleShot(300, self._autoStart)
+
+    def _autoStart(self):
+        """開いたら、中心線がまだ無ければ自動で作って計測の画面にする（ボタンを探さなくてよい）"""
+        L = self.logic
+        try:
+            if slicer.util.selectedModule() != "AortaSizing" or L.P is not None: return
+        except Exception: return
+        try: vol, seg = L._inputs()
+        except Exception as e: self._say(str(e)); return
+        if getattr(self, "_autoTried", None) == vol.GetID(): return
+        self._autoTried = vol.GetID()
+        self._say("中心線を自動で作っています（1 分ほど。開いた時に自動）…")
+        self.onAuto()
 
     def exit(self):
         try: self.logic.suspend()
@@ -775,6 +839,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     def autoCenterline(self, status=print):
         from scipy import ndimage
         vol, seg = self._inputs()
+        _ensureVMTK(status)
         status("1/4 大動脈・腸骨動脈の形を準備中…")
         aorta = self._mask(("aorta",), exact=True)
         if aorta is None or aorta.sum() < 500: raise RuntimeError("大動脈のラベルがありません")
@@ -1063,16 +1128,25 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if self.arr is None:
             self.arr = slicer.util.arrayFromVolume(self.vol).astype(np.float32)
             self.arrF = ndimage.spline_filter(self.arr, order=3, mode="nearest")      # 3次スプラインの前処理（1回だけ）
+        out = self._straightArr(self.P, self.N, self.B)
+        return self._straightNode(name, out)
+
+    def _straightArr(self, PP, NN, BB):
+        """中心線のフレーム（P, N, B）に沿って元の CT を切り出し、伸ばした画像の配列（K × nu × nu）を作る"""
+        from scipy import ndimage
         A = np.linalg.inv(self._ijk2ras())
         u = np.arange(-HALF, HALF + 1e-6, STEP); nu = len(u)
         UU, VV = np.meshgrid(u, u)
-        K = len(self.P); out = np.zeros((K, nu, nu), np.int16)
+        K = len(PP); out = np.zeros((K, nu, nu), np.int16)
         for k0 in range(0, K, 64):
             k1 = min(K, k0 + 64)
-            P = self.P[k0:k1, None, None, :]; Nn = self.N[k0:k1, None, None, :]; Bb = self.B[k0:k1, None, None, :]
+            P = PP[k0:k1, None, None, :]; Nn = NN[k0:k1, None, None, :]; Bb = BB[k0:k1, None, None, :]
             Q = P + UU[None, :, :, None] * Bb + VV[None, :, :, None] * Nn
             H = Q.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
             out[k0:k1] = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=3, prefilter=False, mode="nearest").reshape(k1 - k0, nu, nu).astype(np.int16)
+        return out
+
+    def _straightNode(self, name, out):
         node = slicer.mrmlScene.GetFirstNodeByName("SA stretched " + PATH_EN.get(name, name))
         if node is None: node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "SA stretched " + PATH_EN.get(name, name))
         slicer.util.updateVolumeFromArray(node, out)
@@ -1099,6 +1173,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         else:
             status("中心線をならして、伸ばした画像を作成中…")
             self.frames[name] = self._frames(cp); self._use(name); self._reseat(c)
+            self.frames[name] = self._frames(slicer.util.arrayFromMarkupsCurvePoints(c, world=True).astype(float)); self._use(name)   # 点を置き直した曲線そのものに合わせる（後の部分修正と一致させる）
             for key in [k for k in self.cache if name in k[:2]]: self.cache.pop(key)
             self.straight = self._straighten(name)
             self._built[name] = dict(n=c.GetNumberOfControlPoints(), cp=slicer.util.arrayFromMarkupsControlPoints(c, world=True), frames=self.frames[name], vol=self.straight)
@@ -1328,9 +1403,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     def rel(self, s):
         return float(s) - (self.baseS if self.baseS is not None else 0.0)
 
-    def _profile(self):
+    def _profile(self, reuse=None):
         K = len(self.s); ks = np.arange(0, K, 4)
         res = np.full((K, 4), np.nan)
+        if reuse is not None:                                          # 局所の修正: 変わっていない所は前の値をそのまま使う
+            old, a, b, shift = reuse
+            res[:a] = old[:a]; res[b + 1:] = old[b + 1 - shift:]
+            ks = np.arange(a - a % 4, b + 1, 4)
         for k in ks:
             m = self._metK(int(k))
             if m: res[k] = (m["area"], m["deq"], m["dmax"], m["dmin"])
@@ -1419,7 +1498,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         lm.layoutLogic().GetLayoutNode().AddLayoutDescription(LAYOUT_ID, LAYOUT_XML)
         lm.setLayout(LAYOUT_ID)
         self._editing = False
-        for nm, volNode in (("Red", self.vol), ("Yellow", self.vol), ("Green", self.straight)):
+        for nm, volNode in (("Red", self.vol), ("Yellow", self.vol), ("Green", self.straight), ("Orange", self.straight)):
             w = lm.sliceWidget(nm)
             if w is None: continue
             cn = w.sliceLogic().GetSliceCompositeNode(); cn.SetBackgroundVolumeID(volNode.GetID()); cn.SetForegroundVolumeID(None); cn.SetLabelVolumeID(None)
@@ -1428,7 +1507,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for vn in (self.vol, self.straight):
             d = vn.GetDisplayNode()
             if d is not None: d.SetInterpolate(True)
-        for nm in ("Red", "Green", "Yellow"):                                   # 画像を曲線補間でなめらかに（元が5mm厚でもカクつかない）
+        for nm in ("Red", "Green", "Orange", "Yellow"):                         # 画像を曲線補間でなめらかに（元が5mm厚でもカクつかない）
             try:
                 sl = lm.sliceWidget(nm).sliceLogic()
                 for layer in (sl.GetBackgroundLayer(), sl.GetForegroundLayer()):
@@ -1451,13 +1530,15 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for n in (self.posNode, self.mark3, self.clockNode): n.GetDisplayNode().SetVisibility(True)
         for n in [self.cursorNode, self.markG, self.baseG] + list(self.dLines or []): n.GetDisplayNode().SetVisibility(False)   # 軽い描画（_Overlay）に置き換え
         self.contNode.GetDisplayNode().SetVisibility(bool(getattr(self, "contourEdit", False)))
-        for ov in ("ovRed", "ovGreen"):
+        for ov in ("ovRed", "ovGreen", "ovOrange"):
             o = getattr(self, ov, None)
             if o is not None: o.remove()
         self.ovRed = _Overlay("Red"); self.ovGreen = _Overlay("Green")
+        self.ovOrange = _Overlay("Orange") if lm.sliceWidget("Orange") is not None else None
         self._saveCV()                                                     # 心臓の画面の 3D の状態を覚えてから変える
         rn = lm.sliceWidget("Red").mrmlSliceNode(); rn.SetSliceVisible(True)
-        for nm in ("Green", "Yellow"): lm.sliceWidget(nm).mrmlSliceNode().SetSliceVisible(False)
+        for nm in ("Green", "Orange", "Yellow"):
+            if lm.sliceWidget(nm) is not None: lm.sliceWidget(nm).mrmlSliceNode().SetSliceVisible(False)
         self._fit3D(); self._fitViews(); self._watch(); self._drawMarkers()
 
     def _fitViews(self):
@@ -1466,6 +1547,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             d = sn.GetDimensions(); asp = (d[0] / max(d[1], 1)) if d[1] else 1.0
             sn.SetFieldOfView(fy * asp, fy, 1.0); sn.SetXYZOrigin(0, 0, 0)
         fit(lm.sliceWidget("Green").mrmlSliceNode(), self.length * 1.04 + 10)
+        if lm.sliceWidget("Orange") is not None: fit(lm.sliceWidget("Orange").mrmlSliceNode(), self.length * 1.04 + 10)
         fit(lm.sliceWidget("Red").mrmlSliceNode(), 60.0)
         fit(lm.sliceWidget("Yellow").mrmlSliceNode(), 160.0)
 
@@ -1523,7 +1605,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         """断面の補間: 動かしている間は線形（速い）、止まったら 3 次（なめらか）"""
         if getattr(self, "_cubicNow", None) == cubic: return
         self._cubicNow = cubic
-        for nm in ("Red", "Green", "Yellow"):
+        for nm in ("Red", "Green", "Orange", "Yellow"):
             try:
                 sl = slicer.app.layoutManager().sliceWidget(nm).sliceLogic()
                 r = sl.GetBackgroundLayer().GetReslice()
@@ -1576,6 +1658,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self.rot = float(deg) % 360.0; th = math.radians(self.rot); c, s = math.cos(th), math.sin(th)
         gn = slicer.app.layoutManager().sliceWidget("Green").mrmlSliceNode()
         gn.SetSliceToRASByNTP(-s, c, 0, -c, -s, 0, 0, 0, -self.length / 2, 0)
+        ow = slicer.app.layoutManager().sliceWidget("Orange")                # もう 1 枚のストレッチ像は 90° 回した向き（直交 2 方向を同時に見る）
+        if ow is not None:
+            c2, s2 = math.cos(th + math.pi / 2), math.sin(th + math.pi / 2)
+            ow.mrmlSliceNode().SetSliceToRASByNTP(-s2, c2, 0, -c2, -s2, 0, 0, 0, -self.length / 2, 0)
         self._fitViews()
         self.setPosition(self.curS); self._drawMarkers()
 
@@ -1627,33 +1713,38 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if self.contNode is not None: self.contNode.GetDisplayNode().SetVisibility(self.contourEdit)
         self._showContour()
 
-    def _greenRAS(self, s, frac=1.0):
-        th = math.radians(self.rot); t = np.array([-math.cos(th), -math.sin(th), 0.0])
+    def _greenRAS(self, s, frac=1.0, rot=None):
+        th = math.radians(self.rot if rot is None else rot); t = np.array([-math.cos(th), -math.sin(th), 0.0])
         return np.array([t * (HALF - 1) * frac + np.array([0, 0, -s]), -t * (HALF - 1) * frac + np.array([0, 0, -s])])
 
     def _drawGreen(self):
         """ストレッチ像: 現在位置（赤）・ベースライン（緑）・マーカー（水色）・マウスの位置（白）を軽く描く"""
-        o = getattr(self, "ovGreen", None)
-        if o is None or self.P is None: return
+        if self.P is None: return
+        for ovn, vn, rot in (("ovGreen", "Green", self.rot), ("ovOrange", "Orange", self.rot + 90.0)):
+            o = getattr(self, ovn, None)
+            if o is not None: self._drawStretch(o, vn, rot)
+
+    def _drawStretch(self, o, vn, rot):
+        G = lambda s, frac=1.0: self._greenRAS(s, frac, rot)
         lines, labels = [], []
         if self.baseS is not None:
-            ab = self._greenRAS(self.baseS); lines.append((ab, (0.4, 1.0, 0.45), False)); labels.append((ab[0], "0", (0.4, 1.0, 0.45), 12))
+            ab = G(self.baseS); lines.append((ab, (0.4, 1.0, 0.45), False)); labels.append((ab[0], "0", (0.4, 1.0, 0.45), 12))
         try:
-            sn = slicer.app.layoutManager().sliceWidget("Green").mrmlSliceNode(); mmpp = sn.GetFieldOfView()[1] / max(sn.GetDimensions()[1], 1)
+            sn = slicer.app.layoutManager().sliceWidget(vn).mrmlSliceNode(); mmpp = sn.GetFieldOfView()[1] / max(sn.GetDimensions()[1], 1)
         except Exception: mmpp = 1.0
         lastLab = -1e9
         for mk in sorted(self.markers, key=lambda m: m["s"]):
             if not self._onPath(mk): continue
-            ab = self._greenRAS(mk["s"], 0.55); lines.append((ab, (0.3, 0.9, 0.95), False))
+            ab = G(mk["s"], 0.55); lines.append((ab, (0.3, 0.9, 0.95), False))
             sl = max(mk["s"], lastLab + 15 * mmpp); lastLab = sl                # 近いマーカーの文字が重ならないよう下へずらす
             lab = MARK_EN.get(mk["name"].replace("（推定）", ""), "Sec" + mk["name"][2:] if mk["name"].startswith("断面") else "M") + ("?" if mk.get("auto") else "")
-            labels.append((self._greenRAS(sl, 0.55)[0], f"{lab} {self.rel(mk['s']):+.0f}", (0.3, 0.9, 0.95), 12))
+            if vn == "Green": labels.append((G(sl, 0.55)[0], f"{lab} {self.rel(mk['s']):+.0f}", (0.3, 0.9, 0.95), 12))
         hs = getattr(self, "_hoverS", None)
         if hs is not None and self.prof is not None:
             kk = int(min(max(round(hs / STEP), 0), len(self.prof) - 1)); dmax, dmin = self.prof[kk, 2], self.prof[kk, 3]
-            ab = self._greenRAS(hs); lines.append((ab, (0.85, 0.85, 0.85), False))
+            ab = G(hs); lines.append((ab, (0.85, 0.85, 0.85), False))
             if np.isfinite(dmax): labels.append((ab[1], f"{self.rel(hs):+.0f} mm  {dmax:.1f}/{dmin:.1f}", (1, 1, 1), 13))
-        ab = self._greenRAS(self.curS); lines.append((ab, (1.0, 0.3, 0.25), False))
+        ab = G(self.curS); lines.append((ab, (1.0, 0.3, 0.25), False))
         o.set(lines, labels)
 
     def _annotate(self, k, m):
@@ -1669,6 +1760,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             ca.SetText(2, txt); ca.GetTextProperty().SetColor(1, 0.9, 0.3); ca.GetTextProperty().SetFontSize(16); red.scheduleRender()
             g = lm.sliceWidget("Green").sliceView(); c2 = g.cornerAnnotation()
             c2.SetText(2, f"{PATH_EN.get(self.path, '')}\n{base}\nrot {self.rot:.0f} deg"); c2.GetTextProperty().SetColor(1, 0.9, 0.3); g.scheduleRender()
+            ow = lm.sliceWidget("Orange")
+            if ow is not None:
+                c4 = ow.sliceView().cornerAnnotation(); c4.SetText(2, f"rot {(self.rot + 90) % 360:.0f} deg"); c4.GetTextProperty().SetColor(1, 0.75, 0.35); ow.sliceView().scheduleRender()
             y = lm.sliceWidget("Yellow").sliceView(); c3 = y.cornerAnnotation(); c3.SetText(2, "Axial (original)"); c3.GetTextProperty().SetColor(1, 0.9, 0.3)
         except Exception as e:
             print("annotate:", e)
@@ -1710,7 +1804,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for t in ("_settleTimer", "_prefetchTimer", "_timer", "_lcTimer"):
             try: getattr(self, t).stop()
             except Exception: pass
-        for ov in ("ovRed", "ovGreen"):
+        for ov in ("ovRed", "ovGreen", "ovOrange"):
             o = getattr(self, ov, None)
             if o is not None:
                 try: o.remove()
@@ -1732,7 +1826,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._restoreCV()                                                  # 心臓の画面の 3D（面・カメラ・切断面）を元に戻す
         try:
             lm = slicer.app.layoutManager()
-            for nm in ("Red", "Green", "Yellow"):
+            for nm in ("Red", "Green", "Orange", "Yellow"):
                 w = lm.sliceWidget(nm)
                 if w is not None: w.sliceView().cornerAnnotation().SetText(2, ""); w.sliceView().scheduleRender()
         except Exception: pass
@@ -1799,12 +1893,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             except Exception: pass
         self._iTags = []; slicer._saITags = self._iTags
         E = vtk.vtkCommand
-        for nm in ("Red", "Green", "Yellow"):
+        for nm in ("Red", "Green", "Orange", "Yellow"):
+            if lm.sliceWidget(nm) is None: continue
             sv = lm.sliceWidget(nm).sliceView(); io = sv.interactorObserver()
             io.SetActionEnabled(io.BrowseSlice, False)
             # 普通の DICOM ビューアのように、左ドラッグでウィンドウ（濃さ・コントラスト）を変えられる。
             # 断面位置を左ドラッグで動かす Green だけは切る（そのぶんウィンドウは Red / 軸位で変え、全ビューに反映）。
-            wl = (nm != "Green")
+            wl = nm not in ("Green", "Orange")
             io.SetActionEnabled(io.AdjustWindowLevelBackground, wl); io.SetActionEnabled(io.AdjustWindowLevelForeground, wl)
             try:
                 siw = sv.displayableManagerByClassName("vtkMRMLCrosshairDisplayableManager").GetSliceIntersectionWidget()
@@ -1817,14 +1912,14 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 add(E.MouseWheelForwardEvent, lambda c, e: self._wheelRed(c, -1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelRed(c, +1))
                 add(E.KeyPressEvent, lambda c, e: self._keyRed(c))
                 add(E.LeftButtonPressEvent, lambda c, e: self._clickRed(c))
-            elif nm == "Green":
+            elif nm in ("Green", "Orange"):
                 add(E.MouseWheelForwardEvent, lambda c, e: self._wheelGreen(c, +1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelGreen(c, -1))
-                add(E.LeftButtonPressEvent, lambda c, e: self._pressGreen(c)); add(E.MouseMoveEvent, lambda c, e: self._moveGreen(c))
+                add(E.LeftButtonPressEvent, lambda c, e, nm=nm: self._pressGreen(c, nm)); add(E.MouseMoveEvent, lambda c, e, nm=nm: self._moveGreen(c, nm))
                 add(E.LeftButtonReleaseEvent, lambda c, e: self._releaseGreen(c))
                 add(E.LeaveEvent, lambda c, e: self._leaveGreen(c))
             else:                                   # Yellow 軸位: ホイールは断面位置に合わせる（勝手にスクロールさせない）
                 add(E.MouseWheelForwardEvent, lambda c, e: self._wheelRed(c, -1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelRed(c, +1))
-        for nm in ("Red", "Green", "Yellow", "3D"):                       # どのビューで操作したか（計測の置き場所）と、共通のキー
+        for nm in [n for n in ("Red", "Green", "Orange", "Yellow") if lm.sliceWidget(n) is not None] + ["3D"]:   # どのビューで操作したか（計測の置き場所）と、共通のキー
             it = lm.threeDWidget(0).threeDView().interactor() if nm == "3D" else lm.sliceWidget(nm).sliceView().interactor()
             self._iTags.append((it, it.AddObserver(E.LeftButtonPressEvent, self._only(lambda c, e, nm=nm: setattr(self, "_lastView", nm)), 5.0)))
             self._iTags.append((it, it.AddObserver(E.KeyPressEvent, self._only(lambda c, e: self._keyAny(c)), 5.0)))
@@ -1892,6 +1987,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             self._queue(s=float(np.clip(self.curS + d, 0, self.length))); self._abort(it)
 
     def _clickRed(self, it):
+        if self.P is not None and it.GetControlKey() and self._clockCb is None and not self._editing and not self._placing():
+            p = self._rasAt(it, "Red"); k = self._k()                    # Ctrl+クリック: この断面の中心をクリックした所へ
+            self._abort(it); qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
         if self._clockCb is None or self.P is None: return
         x, y = it.GetEventPosition(); sn = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
         M = sn.GetXYToRAS(); ras = np.array([sum(M.GetElement(r, c) * v for c, v in enumerate((x, y, 0, 1))) for r in range(3)])
@@ -1905,19 +2003,117 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         base = self._pendingRot if self._pendingRot is not None else self.rot
         self._queue(rot=(base + d * (15.0 if it.GetShiftKey() else 5.0)) % 360.0); self._abort(it)
 
-    def _sGreen(self, it):
-        x, y = it.GetEventPosition(); sn = slicer.app.layoutManager().sliceWidget("Green").mrmlSliceNode()
-        M = sn.GetXYToRAS(); z = sum(M.GetElement(2, c) * v for c, v in enumerate((x, y, 0, 1)))
-        return float(np.clip(-z, 0, self.length))
+    def _rasAt(self, it, nm):
+        x, y = it.GetEventPosition(); M = slicer.app.layoutManager().sliceWidget(nm).mrmlSliceNode().GetXYToRAS()
+        return np.array([sum(M.GetElement(r, c) * v for c, v in enumerate((x, y, 0, 1))) for r in range(3)])
 
-    def _pressGreen(self, it):
-        if self.P is None or it.GetControlKey() or it.GetShiftKey() or self._placing(): return
-        self._drag = True; self._queue(s=self._sGreen(it)); self._abort(it)
+    def _sGreen(self, it, nm="Green"):
+        return float(np.clip(-self._rasAt(it, nm)[2], 0, self.length))
 
-    def _moveGreen(self, it):
-        if self._drag: self._queue(s=self._sGreen(it)); self._abort(it); return
+    def _pressGreen(self, it, nm="Green"):
+        if self.P is None or self._placing() or self._editing: return
+        if it.GetControlKey():                                           # Ctrl+クリック: その高さの中心線を、クリックした所へ動かす
+            q = self._rasAt(it, nm); s = float(np.clip(-q[2], 0, self.length)); k = self._k(s)
+            p = self.P[k] + q[0] * self.B[k] + q[1] * self.N[k]
+            self._abort(it); qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
+        if it.GetShiftKey(): return
+        self._drag = True; self._queue(s=self._sGreen(it, nm)); self._abort(it)
+
+    def _moveGreen(self, it, nm="Green"):
+        if self._drag: self._queue(s=self._sGreen(it, nm)); self._abort(it); return
         if self.P is not None:                                           # マウスを乗せた所の径をその場で表示（クリック不要）
-            self._hoverS = self._sGreen(it); self._drawGreen()
+            self._hoverS = self._sGreen(it, nm); self._drawGreen()
+
+    def _ctrlMove(self, k, p):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try: self.moveCenterTo(k, p, getattr(self, "onStatus", None) or print)
+        except Exception: _err("ctrlMove")
+        finally: qt.QApplication.restoreOverrideCursor()
+
+    def moveCenterTo(self, k, p, status=print):
+        """中心線のその位置（k）を点 p へ動かして作り直す。回転・位置はそのまま"""
+        c = self.curves.get(self.path)
+        if c is None or self.P is None: return
+        k = int(np.clip(k, 0, len(self.P) - 1)); P0 = self.P[k]; off = np.asarray(p, float) - P0
+        if np.linalg.norm(off) > 30: status("中心から遠すぎます（血管の中をクリック）"); return
+        cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
+        self._hist = getattr(self, "_hist", []); self._hist.append(("center", (self.path, cps.copy())))
+        d = np.linalg.norm(cps - P0, axis=1); i = int(np.argmin(d))
+        if d[i] < 3: c.SetNthControlPointPositionWorld(i, *(cps[i] + off))
+        else:
+            best, bi = 1e9, 0
+            for j in range(len(cps) - 1):
+                a, b = cps[j], cps[j + 1]; ab = b - a; t = np.clip((P0 - a) @ ab / max(ab @ ab, 1e-9), 0, 1)
+                dd = np.linalg.norm(a + t * ab - P0)
+                if dd < best: best, bi = dd, j
+            c.InsertControlPoint(bi + 1, vtk.vtkVector3d(*(P0 + off)))
+        self._rebuildKeep(status)
+        status(f"中心線を {np.linalg.norm(off):.1f} mm 動かしました（Ctrl+Z で戻す）")
+
+    def _rebuildKeep(self, status=print):
+        rot0, s0 = self.rot, self.curS
+        try: done = self._rebuildLocal(self.path, status)
+        except Exception: _err("rebuildLocal"); done = False
+        if not done: self.rebuild(self.path, status); self.curS = min(s0, self.length)
+        self.setRotation(rot0)
+        self._drawMarkers(); self._listsChanged()
+
+    def _rebuildLocal(self, name, status=print):
+        """中心線の一部だけ直した時の作り直し（数秒）。変わった範囲だけ切り出し・断面を計算し、それ以外は前の結果を使う。
+        下流のねじれ（フレームの回転）は修正範囲の中で少しずつ吸収して、下流は前と同じフレームのまま"""
+        c = self.curves.get(name); old = self.frames.get(name); vol = self.straight
+        if c is None or old is None or vol is None or self.path != name or self.prof is None or self.arr is None: return False
+        cp = slicer.util.arrayFromMarkupsCurvePoints(c, world=True).astype(float)
+        new = self._frames(cp)
+        Po, Pn = old["P"], new["P"]; Ko, Kn = len(Po), len(Pn); shift = Kn - Ko; m = min(Ko, Kn)
+        bad = np.nonzero(np.linalg.norm(Pn[:m] - Po[:m], axis=1) > 0.05)[0]
+        a = int(bad[0]) if len(bad) else m
+        j = np.arange(Kn); jo = j - shift; ok = (jo >= 0) & (jo < Ko)
+        dd = np.full(Kn, np.inf); dd[ok] = np.linalg.norm(Pn[ok] - Po[jo[ok]], axis=1)
+        far = np.nonzero(dd > 0.35)[0]
+        b = int(far[-1]) if len(far) else a
+        a = max(0, a - 8); b = min(Kn - 1, max(b, a) + 8)
+        if b - a > 0.6 * Kn or (b + 1 < Kn and b + 1 - shift < 0): return False
+        status("直した所だけ作り直しています…")
+        P, T, N, B = Pn.copy(), new["T"].copy(), new["N"].copy(), new["B"].copy()
+        if b + 1 < Kn:
+            ko = b + 1 - shift; n1, n0 = N[b + 1], old["N"][ko]
+            phi = math.atan2(np.cross(n1, n0) @ T[b + 1], n1 @ n0)
+            for k in range(a, b + 1):
+                f = phi * (k - a) / (b + 1 - a); Nk = N[k] * math.cos(f) + np.cross(T[k], N[k]) * math.sin(f)
+                N[k] = Nk / np.linalg.norm(Nk); B[k] = np.cross(T[k], N[k])
+            for arr, src in ((P, Po), (T, old["T"]), (N, old["N"]), (B, old["B"])): arr[b + 1:] = src[ko:]
+        new.update(P=P, T=T, N=N, B=B)
+        oldArr = slicer.util.arrayFromVolume(vol).copy()
+        out = np.empty((Kn,) + oldArr.shape[1:], np.int16)
+        out[:a] = oldArr[:a]; out[a:b + 1] = self._straightArr(P[a:b + 1], N[a:b + 1], B[a:b + 1])
+        if b + 1 < Kn: out[b + 1:] = oldArr[b + 1 - shift:]
+        oldProf = self.prof
+        def remap(d):
+            r = {}
+            for key, v in d.items():
+                if isinstance(key, tuple) and len(key) >= 3 and name in key[:3] and isinstance(key[-1], (int, np.integer)):
+                    k = int(key[-1])
+                    if k < a: r[key] = v
+                    elif k + shift > b: r[key[:-1] + (k + shift,)] = v
+                else: r[key] = v
+            return r
+        self.cache = remap(self.cache); self.override = remap(self.override)
+        ds = shift * STEP; lim = b * STEP
+        for mk in self.markers:
+            if mk.get("path") == name and mk["s"] > lim: mk["s"] += ds
+        if self.baseS is not None and self.baseS > lim: self.baseS += ds
+        if self.curS > lim: self.curS += ds
+        self.frames[name] = new; self._use(name)
+        d0 = vol.GetDisplayNode(); wl = (d0.GetWindow(), d0.GetLevel()) if d0 is not None else None
+        self.straight = self._straightNode(name, out)
+        if wl: self.straight.GetDisplayNode().SetWindowLevel(*wl)              # 見ていたウィンドウはそのまま
+        self._built[name] = dict(n=c.GetNumberOfControlPoints(), cp=slicer.util.arrayFromMarkupsControlPoints(c, world=True), frames=new, vol=self.straight)
+        self.sharedLen = self._sharedLength()
+        status("断面を計算中…")
+        self._profile(reuse=(oldProf, a, b, shift))
+        self.curS = float(np.clip(self.curS, 0, self.length))
+        return True
 
     def _leaveGreen(self, it):
         self._hoverS = None; self._drawGreen()
@@ -2084,7 +2280,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if not n.GetAttribute("SA.view") and n.GetNumberOfDefinedControlPoints() >= 1:
             v = getattr(self, "_lastView", "Red") or "Red"
             n.SetAttribute("SA.view", v)
-            ids = {"Green": ["vtkMRMLSliceNodeGreen"]}.get(v, ["vtkMRMLSliceNodeRed", "vtkMRMLSliceNodeYellow", "vtkMRMLViewNode1"])
+            if v == "Orange": v = "Green"; n.SetAttribute("SA.view", v)
+            ids = {"Green": ["vtkMRMLSliceNodeGreen", "vtkMRMLSliceNodeOrange"]}.get(v, ["vtkMRMLSliceNodeRed", "vtkMRMLSliceNodeYellow", "vtkMRMLViewNode1"])
             n.GetDisplayNode().SetViewNodeIDs(ids)               # ストレッチ像の上の計測は、別の座標なのでそこだけに出す
             if v == "Red": n.SetAttribute("SA.s", f"{self.curS:.2f}"); n.SetAttribute("SA.rot", f"{self.rot:.1f}"); n.SetAttribute("SA.path", self.path or "")
         if n.GetAttribute("SA.measure") == "area":
@@ -2156,6 +2353,12 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         while hist:
             kind, obj = hist.pop()
             if kind == "measure" and slicer.mrmlScene.IsNodePresent(obj): self.deleteMeasure(obj); return "計測を 1 つ戻しました"
+            if kind == "center":
+                path, cps = obj; c = self.curves.get(path)
+                if c is None or path != self.path: continue
+                c.RemoveAllControlPoints()
+                for q in cps: c.AddControlPoint(vtk.vtkVector3d(*q))
+                self._rebuildKeep(); return "中心線の修正を 1 つ戻しました"
             if kind == "marker":
                 name, prev = obj
                 self.markers = [m for m in self.markers if m["name"] != name]

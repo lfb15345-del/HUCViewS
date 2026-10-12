@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """HUCViewS の初回セットアップ（インストーラーから Slicer の中で実行される）。
   環境変数 HUCVIEWS_SETUP_PHASE:
-    ext … AI 拡張機能（TotalSegmentator と、その依存の PyTorch 拡張）を Slicer に入れる（入れたら終了。次の起動から有効）
+    ext … 拡張機能（AI: TotalSegmentator と依存の PyTorch 拡張、中心線: SlicerVMTK）を Slicer に入れる（入れたら終了。次の起動から有効）
     py  … AI の Python 部品（PyTorch・totalsegmentator）を入れる（数分〜十数分）
   結果は HUCViewS フォルダの setup_log.txt に書く。患者データは扱わない。"""
 import os, sys, time, traceback
@@ -19,7 +19,7 @@ def log(m):
     except Exception: pass
 
 
-def installExtensions(names=("TotalSegmentator",)):
+def installExtensions(names=("TotalSegmentator", "SlicerVMTK")):
     em = slicer.app.extensionsManagerModel()
     try: em.interactive = False                       # 確認の窓を出さない
     except Exception: pass
