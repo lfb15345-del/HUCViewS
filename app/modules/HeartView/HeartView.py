@@ -364,7 +364,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.openDirButton.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(casesDir())))
         self.slicerButton.connect("clicked()", self.onSlicerMode)
         self.licButton.connect("clicked()", self.onLicense)
-        self.table.connect("itemSelectionChanged()", lambda: setattr(self.buildButton, "enabled", bool(self.table.selectedItems())))
+        self.table.connect("itemSelectionChanged()", self._onSel)
 
     # ------------------------------------------------------------------ helpers
     def _say(self, msg):
@@ -398,6 +398,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             self._fill(rows)
             self.progressBar.setRange(0, 1000); self.progressBar.hide(); self.progressLabel.hide()
             self._say("シリーズを選んで「3D を作る」を押してください（★ がおすすめ）。" if rows else "CT のシリーズが見つかりませんでした。")
+            if rows and any(r.get("phases") for r in rows): self._onSel()          # 4D の時はその説明を出す
         except Exception as e:
             import traceback; traceback.print_exc(); self._say(f"読み込みエラー: {e}")
         finally:
@@ -417,6 +418,22 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.table.resizeColumnsToContents()
         best = [i for i, s in enumerate(rows) if s.get("best")]
         if best: self.table.selectRow(best[0])
+
+    def _onSel(self):
+        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        self.buildButton.enabled = bool(sel)
+        s = self.rows[sel[0].row()] if sel and sel[0].row() < len(getattr(self, "rows", [])) else None
+        ph = (s or {}).get("phases") or []
+        if len(ph) >= 2:
+            self.buildButton.setText(f"3D と 4D（動く心臓・{len(ph)} 位相）を作る（約 6〜10 分）")
+            self._say(f"このシリーズは 4D（心電図同期 {len(ph)} 位相）です。% は心拍の中のタイミング（R 波から次の R 波までを 100%）で、"
+                      "同じ心臓を少しずつ時間をずらして撮ったものです。3D は 1 つの位相から作り、4D では全部の位相を使います。"
+                      "75% 付近（拡張中期）は動きが少なく 3D 向き、35〜40% 付近は収縮期です。右の画像を見て、ぶれの少ない位相を選んでください。")
+        else:
+            self.buildButton.setText("3D を作る（初回 約5〜10分）")
+        if s is not None:
+            try: self.logic.preview(s)
+            except Exception as e: print("preview:", e)
 
     # ------------------------------------------------------------------ ②
     def onBuild(self):
@@ -446,7 +463,9 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             prog.enter("save")
             path = self.logic.saveCase(s)
             ok = True
-            self._say(cv.statusLabel.text + f"\n症例を保存しました（{os.path.basename(path)}）。")
+            n4 = cv.logic.n4D() if hasattr(cv.logic, "n4D") else 0
+            self._say(cv.statusLabel.text + f"\n症例を保存しました（{os.path.basename(path)}）。"
+                      + (f"\n4D（{n4} 位相）も準備できました。操作パネルの「4D（動く心臓）」の ▶ 再生で動きます。" if n4 >= 2 else ""))
             slicer.util.selectModule("CardiacView")
         except Exception as e:
             import traceback; traceback.print_exc(); self._say(f"エラー: {e}")
@@ -668,6 +687,49 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         vols = [v for v in vols if v is not None and v.IsA("vtkMRMLScalarVolumeNode")]
         if not vols: raise RuntimeError("位相の CT が読み込めませんでした")
         return max(vols, key=lambda v: np.prod(v.GetImageData().GetDimensions()))
+
+    def preview(self, s):
+        """選んだシリーズの真ん中の 1 枚を、右の画面にすぐ出す（シリーズ全体は読まないので一瞬）"""
+        import pydicom
+        db = slicer.dicomDatabase; files = db.filesForSeries(s["uid"]) if db else []
+        if not files: return
+        def pos(f):
+            v = db.fileValue(f, "0020,0032")
+            try: return float(v.split("\\")[2])
+            except Exception:
+                try: return float(db.fileValue(f, "0020,0013") or 0)
+                except Exception: return 0.0
+        fs = sorted(files, key=pos); d = pydicom.dcmread(fs[len(fs) // 2])
+        a = d.pixel_array
+        rgb = int(getattr(d, "SamplesPerPixel", 1) or 1) >= 3
+        if rgb: a = a[..., :3].mean(axis=-1)
+        elif a.ndim == 3: a = a[a.shape[0] // 2]
+        a = a.astype(np.float32)
+        if not rgb: a = a * float(getattr(d, "RescaleSlope", 1) or 1) + float(getattr(d, "RescaleIntercept", 0) or 0)
+        node = slicer.mrmlScene.GetFirstNodeByName("HV プレビュー")
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "HV プレビュー"); node.SetHideFromEditors(True)
+        slicer.util.updateVolumeFromArray(node, a[None])
+        try: px = [float(x) for x in d.PixelSpacing]
+        except Exception: px = [1.0, 1.0]
+        node.SetSpacing(px[1], px[0], 1.0); node.SetOrigin(0, 0, 0)
+        m = vtk.vtkMatrix4x4(); m.Identity(); m.SetElement(0, 0, -1); m.SetElement(1, 1, -1); node.SetIJKToRASDirectionMatrix(m)   # DICOM と同じ向き（右が画面の左）
+        if node.GetDisplayNode() is None: node.CreateDefaultDisplayNodes()
+        dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False)
+        try:
+            wc = float(str(d.WindowCenter).split("\\")[0].strip("[]").split(",")[0]); ww = float(str(d.WindowWidth).split("\\")[0].strip("[]").split(",")[0])
+        except Exception: wc, ww = (128.0, 255.0) if rgb else (200.0, 800.0)
+        if rgb: wc, ww = 128.0, 255.0
+        dn.SetWindowLevel(ww, wc)
+        lm = slicer.app.layoutManager()
+        if lm.layout != slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView: lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        w = lm.sliceWidget("Red"); cn = w.sliceLogic().GetSliceCompositeNode()
+        cn.SetBackgroundVolumeID(node.GetID()); cn.SetForegroundVolumeID(None); cn.SetLabelVolumeID(None)
+        w.mrmlSliceNode().SetOrientationToAxial(); w.sliceLogic().FitSliceToAll()
+        try:
+            ca = w.sliceView().cornerAnnotation(); ca.SetText(2, f"Preview  {s.get('seriesNumber', '')}  {(s.get('phaseLab') or '').replace('位相', 'Phase')}  ({s.get('n', '')} images)")
+            ca.GetTextProperty().SetColor(1, 0.9, 0.4); w.sliceView().forceRender()
+        except Exception: pass
 
     def loadPhaseArray(self, uid, ref):
         """4D の別の位相を、Slicer のボリュームを作らずに配列で直接読む（ref と同じ範囲・向きの時だけ。速い）。合わなければ None"""
