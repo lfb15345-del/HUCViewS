@@ -2304,6 +2304,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         """ウィンドウを最初の値に戻す: VR は部屋ごとの標準、断面は心臓用（脂肪〜造影血液が見える幅）"""
         if getattr(self, "vrDisplay", None) is not None:
             self.vrWin = None; self.setVRWindow()
+        if getattr(self, "on4D", False):
+            self.win4DMap = {}; self._tf4D()
         src = getattr(self, "sourceVolume", None)
         d = src.GetDisplayNode() if src is not None else None
         if d is not None:
@@ -2345,6 +2347,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._vrLabel()
 
     def _vrLabel(self):
+        if getattr(self, "on4D", False): return                               # 4D の時は 4D のウィンドウを出している
         try:
             v = self._view(); ca = v.cornerAnnotation()
             if getattr(self, "vrOn", False) and self.vrWin is not None:
@@ -3065,23 +3068,55 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception: pass
         return True
 
+    def _base4D(self, mode):
+        """4D の VR の標準の範囲（HU）。blood: 心筋の少し下〜造影血液の上、tissue: 心筋の少し下〜心筋と血液の中間"""
+        c = self._cal(); myo = float(c.get("myo", 80.0)); bl = float(c.get("blood", 350.0)); mid = (myo + bl) / 2
+        return (myo - 60, mid + 15) if mode == "tissue" else (myo - 50, bl + 150)
+
+    def _win4D(self):
+        mode = getattr(self, "mode4D", "blood"); w = (getattr(self, "win4DMap", None) or {}).get(mode)
+        if w is None:
+            lo, hi = self._base4D(mode); w = ((lo + hi) / 2, hi - lo)
+        return w
+
+    def set4DWindow(self, center=None, width=None):
+        mode = getattr(self, "mode4D", "blood"); c0, w0 = self._win4D()
+        c0 = c0 if center is None else float(center); w0 = max(20.0, w0 if width is None else float(width))
+        self.win4DMap = dict(getattr(self, "win4DMap", None) or {}); self.win4DMap[mode] = (c0, w0)
+        self._tf4D()
+
     def _tf4D(self, mode=None):
         """4D の VR の色と透明度。blood: 心筋は赤、造影された血液は明るい肌色（外から見た形・内腔）。
-        tissue: 造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。脂肪・肺はどちらも透明"""
+        tissue: 造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。脂肪・肺はどちらも透明。
+        ウィンドウ（右ドラッグ「ウィンドウ」や左右同時ドラッグ）で範囲をずらす・広げる"""
         if mode is not None: self.mode4D = mode
         mode = getattr(self, "mode4D", "blood")
+        b0, b1 = self._base4D(mode); c0, w0 = self._win4D(); lo, hi = c0 - w0 / 2, c0 + w0 / 2
+        X = lambda t: lo + (t - b0) / max(b1 - b0, 1.0) * (hi - lo)               # 標準の範囲 → 今のウィンドウ
         c = self._cal(); myo = float(c.get("myo", 80.0)); bl = float(c.get("blood", 350.0)); mid = (myo + bl) / 2
         vp = self.vr4D.GetVolumePropertyNode().GetVolumeProperty()
-        otf = vtk.vtkPiecewiseFunction(); ctf = vtk.vtkColorTransferFunction()
         if mode == "tissue":
-            pts = ((-1024, 0), (myo - 60, 0), (myo, 0.55), (mid - 25, 0.75), (mid + 15, 0), (bl + 400, 0), (bl + 401, 0.6), (3071, 0.8))
+            pts = [(-1024, 0), (X(myo - 60), 0), (X(myo), 0.55), (X(mid - 25), 0.75), (X(mid + 15), 0), (max(X(mid + 15) + 1, bl + 400), 0), (max(X(mid + 15) + 2, bl + 401), 0.6), (3071, 0.8)]
         else:
-            pts = ((-1024, 0), (myo - 50, 0), (myo + 10, 0.25), (mid, 0.6), (bl + 150, 0.85), (3071, 0.9))
-        for x, y in pts: otf.AddPoint(x, y)
-        for x, col in ((-1024, (0, 0, 0)), (myo - 50, (0.45, 0.1, 0.08)), (myo + 10, (0.75, 0.3, 0.24)), ((myo + bl) / 2, (0.95, 0.6, 0.5)),
-                       (bl + 100, (1.0, 0.9, 0.82)), (1500, (1, 1, 1)), (3071, (1, 1, 1))): ctf.AddRGBPoint(x, *col)
-        vp.SetScalarOpacity(otf); vp.SetColor(ctf); vp.ShadeOn(); vp.SetInterpolationTypeToLinear()
-        vp.SetAmbient(0.25); vp.SetDiffuse(0.8); vp.SetSpecular(0.3); vp.SetSpecularPower(20)
+            pts = [(-1024, 0), (X(myo - 50), 0), (X(myo + 10), 0.25), (X(mid), 0.6), (X(bl + 150), 0.85), (3071, 0.9)]
+        cols = [(-1024, (0, 0, 0)), (X(myo - 50), (0.45, 0.1, 0.08)), (X(myo + 10), (0.75, 0.3, 0.24)), (X(mid), (0.95, 0.6, 0.5)),
+                (X(bl + 100), (1.0, 0.9, 0.82)), (max(X(bl + 100) + 1, 1500), (1, 1, 1)), (3071, (1, 1, 1))]
+        def mono(p):                                                          # x が重なると点が減るので必ず少し増やす
+            out = []
+            for x, y in p: out.append((max(float(x), out[-1][0] + 0.01) if out else float(x), y))
+            return out
+        otf = vp.GetScalarOpacity(); ctf = vp.GetRGBTransferFunction()
+        if otf is None or getattr(self, "_otf4D", None) is not otf:
+            otf = vtk.vtkPiecewiseFunction(); ctf = vtk.vtkColorTransferFunction(); vp.SetScalarOpacity(otf); vp.SetColor(ctf)
+            vp.ShadeOn(); vp.SetInterpolationTypeToLinear(); vp.SetAmbient(0.25); vp.SetDiffuse(0.8); vp.SetSpecular(0.3); vp.SetSpecularPower(20)
+            self._otf4D = otf
+        otf.RemoveAllPoints(); ctf.RemoveAllPoints()
+        for x, y in mono(pts): otf.AddPoint(x, y)
+        for x, col in mono(cols): ctf.AddRGBPoint(x, *col)
+        try:
+            if getattr(self, "on4D", False):
+                ca = self._view().cornerAnnotation(); ca.SetText(3, f"4D window {lo:.0f} - {hi:.0f} HU\nW {w0:.0f}  L {c0:.0f}"); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
+        except Exception: pass
 
     def set4DMode(self, mode):
         if getattr(self, "vr4D", None) is None: return
@@ -3128,7 +3163,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 if d is not None and s0 is not None: d.SetAutoWindowLevel(False); d.SetWindowLevel(s0.GetWindow(), s0.GetLevel())
             except Exception: pass
             self._st4D = st; self.vr4D.SetVisibility(True); self.on4D = True
-            try: self._view().cornerAnnotation().SetText(3, "")               # 色分け VR のウィンドウ表示は 4D では出さない
+            try: self._tf4D()                                                 # 右上に 4D のウィンドウを出す
             except Exception: pass
         else:
             self.play4D(False)
@@ -3141,7 +3176,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 w = lm.sliceWidget(nm)
                 if w is not None: w.sliceLogic().GetSliceCompositeNode().SetBackgroundVolumeID(vid)
             self.on4D = False
-            try: self.updateMyoCap()
+            try: self.updateMyoCap(); self._vrLabel()
             except Exception: pass
         try: self._clipSync()
         except Exception: pass
@@ -3210,6 +3245,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             t.connect("timeout()", lambda: (self._vrFast(False), self._view().scheduleRender()))
         t.start()
 
+    def _winGet(self):
+        return self._win4D() if getattr(self, "on4D", False) else getattr(self, "vrWin", None)
+
+    def _winSet(self, win0, dx, dy):
+        """横 = 幅、縦 = 中心。4D は HU で直接、色分け VR は 0〜255 の目盛り（1 = 約 2.7 HU）"""
+        c0, w0 = win0
+        if getattr(self, "on4D", False): self.set4DWindow(center=c0 - dy * 1.5, width=w0 + dx * 2.0)
+        else: self.setVRWindow(center=c0 - dy * 0.4, width=w0 + dx * 0.6)
+
     def _mPress(self, it, b):
         if not self._mine(): return
         if not hasattr(self, "_btn"): self._btn = {"L": False, "R": False}; self._wl = None
@@ -3218,16 +3262,16 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         mode = getattr(self, "rmode", "zoom")
         inter = slicer.app.applicationLogic().GetInteractionNode()
         placing = inter.GetCurrentInteractionMode() == inter.Place
-        if b == "R" and mode == "window" and not getattr(self, "vrOn", False):
+        if b == "R" and mode == "window" and not (getattr(self, "vrOn", False) or getattr(self, "on4D", False)):
             self._flash("Window: VR or 2D views only"); mode = "zoom"          # 面の表示にはウィンドウが無い → いつもの拡大
         if b == "R" and mode == "cut" and self.cutAxis is None and not placing:
             self.setCut("VIEW", 0.0); self._syncCutUI()                          # まだ切っていなければ「正面から」で切り始める
         if b == "R" and not self._btn["L"] and mode != "zoom" and not placing:          # 右ドラッグの機能（ボタンで切替）
             cam = self._camera()
-            self._rdrag = (mode, it.GetEventPosition(), (cam.GetFocalPoint(), cam.GetPosition()), getattr(self, "vrWin", None), getattr(self, "cutFrac", 0.5))
+            self._rdrag = (mode, it.GetEventPosition(), (cam.GetFocalPoint(), cam.GetPosition()), self._winGet(), getattr(self, "cutFrac", 0.5))
             self._mAbort(it); return
-        if self._btn["L"] and self._btn["R"] and getattr(self, "vrOn", False) and self._mine():
-            self._wl = (it.GetEventPosition(), getattr(self, "vrWin", None))
+        if self._btn["L"] and self._btn["R"] and (getattr(self, "vrOn", False) or getattr(self, "on4D", False)) and self._mine():
+            self._wl = (it.GetEventPosition(), self._winGet())
             self._mAbort(it)
 
     def _mRelease(self, it, b):
@@ -3245,8 +3289,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         rd = getattr(self, "_rdrag", None)
         if rd is not None and self._mine():
             mode, (x0, y0), cam0, win0, frac0 = rd; x, y = it.GetEventPosition()
-            if mode == "window" and getattr(self, "vrOn", False) and win0 is not None:
-                self.setVRWindow(center=win0[0] - (y - y0) * 0.4, width=win0[1] + (x - x0) * 0.6)
+            if mode == "window" and win0 is not None and (getattr(self, "vrOn", False) or getattr(self, "on4D", False)):
+                self._winSet(win0, x - x0, y - y0)
             elif mode == "pan":
                 self._pan(x0, y0, x, y, cam0)
             elif mode == "cut" and self.cutAxis is not None:
@@ -3259,8 +3303,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 except Exception: pass
             self._view().scheduleRender(); self._mAbort(it); return
         if getattr(self, "_wl", None) is None or not self._mine(): return
-        (x0, y0), (c0, w0) = self._wl; x, y = it.GetEventPosition()
-        self.setVRWindow(center=c0 - (y - y0) * 0.4, width=w0 + (x - x0) * 0.6)   # 目盛り 1 = 約 2.7 HU（左心系）
+        (x0, y0), win0 = self._wl; x, y = it.GetEventPosition()
+        if win0 is not None: self._winSet(win0, x - x0, y - y0)
         self._view().scheduleRender(); self._mAbort(it)
 
     def _syncCutUI(self):
