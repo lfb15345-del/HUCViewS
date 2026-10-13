@@ -22,6 +22,60 @@ def casesDir():
     return d
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _fixText(t):
+    """DICOM の文字（日本の CT は ISO 2022 の漢字。制御文字 ESC が混ざる）を、保存できる普通の文字に直す。
+    ESC が残ると症例ファイル（.mrb）の中の XML が壊れて、開けなくなる"""
+    if not t or not _CTRL.search(t): return t
+    try: return t.encode("latin-1").decode("iso2022_jp")
+    except Exception: return _CTRL.sub("", t)
+
+
+def cleanSceneText():
+    """保存の前に、シーンの名前・属性から制御文字を取り除く"""
+    n = 0
+    try:
+        sh = slicer.mrmlScene.GetSubjectHierarchyNode()
+        ids = vtk.vtkIdList(); sh.GetItemChildren(sh.GetSceneItemID(), ids, True)
+        for i in range(ids.GetNumberOfIds()):
+            it = ids.GetId(i); nm = sh.GetItemName(it); f = _fixText(nm)
+            if f != nm: sh.SetItemName(it, f); n += 1
+            for a in list(sh.GetItemAttributeNames(it)):
+                v = sh.GetItemAttribute(it, a); f = _fixText(v)
+                if f != v: sh.SetItemAttribute(it, a, f); n += 1
+    except Exception as e: print("cleanSceneText(sh):", e)
+    for i in range(slicer.mrmlScene.GetNumberOfNodes()):
+        node = slicer.mrmlScene.GetNthNode(i)
+        try:
+            nm = node.GetName() or ""; f = _fixText(nm)
+            if f != nm: node.SetName(f); n += 1
+            for a in list(node.GetAttributeNames() or []):
+                v = node.GetAttribute(a) or ""; f = _fixText(v)
+                if f != v: node.SetAttribute(a, f); n += 1
+        except Exception: pass
+    return n
+
+
+def repairCaseFile(path):
+    """制御文字で開けなくなった症例ファイルを直す（中の .mrml の文字だけ直して、ほかはそのまま）"""
+    import zipfile
+    tmp = path + ".fix"
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", allowZip64=True) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.endswith(".mrml"):
+                txt = data.decode("utf-8", "replace")
+                txt = re.sub(r'"[^"<>]*[\x00-\x08\x0b\x0c\x0e-\x1f\x7f][^"<>]*"', lambda m: '"' + _fixText(m.group(0)[1:-1]) + '"', txt)
+                data = _CTRL.sub("", txt).encode("utf-8")
+            zout.writestr(item, data, compress_type=item.compress_type)
+    bak = path + ".bak"
+    if os.path.exists(bak): os.remove(bak)
+    os.replace(path, bak); os.replace(tmp, path)
+    return bak
+
+
 def _safe(s, n=40):
     s = re.sub(r'[\\/:*?"<>|\s%]+', "_", str(s or "")).strip("_")
     return s[:n] or "x"
@@ -353,7 +407,8 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.rows = rows
         self.table.setRowCount(len(rows))
         for r, s in enumerate(rows):
-            vals = ["★" if s.get("best") else "", s["desc"], str(s["n"]), f"{s['thick']:.1f}" if s["thick"] else "?",
+            d4 = f"  ［4D {len(s['phases'])} 位相・{s['phaseLab']}］" if s.get("phases") else ""
+            vals = ["★" if s.get("best") else "", s["desc"] + d4, str(s["n"]), f"{s['thick']:.1f}" if s["thick"] else "?",
                     "あり" if s["contrast"] else "", s["orient"]]
             for c, val in enumerate(vals):
                 it = qt.QTableWidgetItem(val)
@@ -381,6 +436,13 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             t0 = time.time()
             cv.onQuick()
             self._say(cv.statusLabel.text)
+            ph = s.get("phases") or []
+            if len(ph) >= 2:                                                  # 4D: ほかの位相も読み込んで、動く心臓を準備
+                try:
+                    vols = [(lab, vol if uid == s["uid"] else self.logic.phaseLoader(uid, vol)) for lab, uid, _ in ph]   # 1 位相ずつ読み込み→切り出し→消す
+                    cv.logic.setup4D(vols, status=lambda m: (prog.message(m), self._say(m)))
+                except Exception as e:
+                    import traceback; traceback.print_exc(); self._say(f"4D の準備に失敗しました（3D はそのまま使えます）: {e}")
             prog.enter("save")
             path = self.logic.saveCase(s)
             ok = True
@@ -555,8 +617,31 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
                         if any(k in txt for k in ("CTA", "CARDIAC", "HEART", "心")): score += 15
                         score += min(len(files), 400) / 40.0
                     pid = pid or val("0010,0020"); sdate = sdate or val("0008,0020")
+                    # 4D（心電図同期の多位相）: 同じ撮影・同じ範囲で、位相だけ違うシリーズをまとめる
+                    def fnum(tag):
+                        try: return float(val(tag))
+                        except Exception: return None
+                    pct = fnum("0020,9241")
+                    if pct is None:
+                        import re
+                        mm = re.search(r"(\d{1,3}(?:\.\d)?)\s*%", desc); pct = float(mm.group(1)) if mm else None
+                    tpi = fnum("0020,9128"); tpi = tpi if tpi is not None else fnum("0020,0100"); trig = fnum("0018,1060")
+                    phase = pct if pct is not None else (tpi if tpi is not None else trig)
+                    plab = f"{pct:.0f}%" if pct is not None else (f"位相 {int(tpi)}" if tpi is not None else (f"{trig:.0f} ms" if trig is not None else ""))
+                    gkey = (st, val("0020,0052"), len(files), round(thick, 2), val("0028,0010"), val("0028,0011"), val("0028,0030"), val("0018,1100"), kernel) if (usable and phase is not None) else None
                     rows.append(dict(uid=se, desc=f"{num}: {desc}" if num else desc, n=len(files), thick=thick, contrast=contrast,
-                                     orient=orient, usable=usable, score=score, studyDate=val("0008,0020"), seriesNumber=num, rawDesc=desc))
+                                     orient=orient, usable=usable, score=score, studyDate=val("0008,0020"), seriesNumber=num, rawDesc=desc,
+                                     gkey=gkey, phase=phase, phaseLab=plab))
+        groups = {}
+        for r in rows:
+            if r.get("gkey") is not None: groups.setdefault(r["gkey"], []).append(r)
+        for g in groups.values():
+            if len({r["phase"] for r in g}) < 2: continue
+            ph = [(r["phaseLab"], r["uid"], r["phase"]) for r in sorted(g, key=lambda r: r["phase"])]
+            pcts = [r for r in g if r["phaseLab"].endswith("%")]
+            for r in g:
+                r["phases"] = ph
+                if pcts: r["score"] -= abs(r["phase"] - 75.0) / 100.0             # 3D は拡張中期（75% 付近）で作る
         rows.sort(key=lambda r: -r["score"])
         if rows and rows[0]["usable"]: rows[0]["best"] = True
         sd = f"{sdate[:4]}/{sdate[4:6]}/{sdate[6:8]}" if len(sdate) == 8 else sdate
@@ -575,6 +660,49 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         vol.SetName(f"CT_{s.get('studyDate', '')}_{_safe(s.get('seriesNumber', ''), 6)}")
         return vol
 
+    def loadPhase(self, uid):
+        """4D の別の位相を読み込む（今の症例は消さない）"""
+        from DICOMLib import DICOMUtils
+        ids = DICOMUtils.loadSeriesByUID([uid])
+        vols = [slicer.mrmlScene.GetNodeByID(i) for i in ids]
+        vols = [v for v in vols if v is not None and v.IsA("vtkMRMLScalarVolumeNode")]
+        if not vols: raise RuntimeError("位相の CT が読み込めませんでした")
+        return max(vols, key=lambda v: np.prod(v.GetImageData().GetDimensions()))
+
+    def loadPhaseArray(self, uid, ref):
+        """4D の別の位相を、Slicer のボリュームを作らずに配列で直接読む（ref と同じ範囲・向きの時だけ。速い）。合わなければ None"""
+        import pydicom
+        from concurrent.futures import ThreadPoolExecutor
+        files = slicer.dicomDatabase.filesForSeries(uid)
+        dims = ref.GetImageData().GetDimensions()
+        if len(files) != dims[2]: return None
+        M = vtk.vtkMatrix4x4(); ref.GetIJKToRASMatrix(M); A = slicer.util.arrayFromVTKMatrix(M); Ainv = np.linalg.inv(A)
+        out = np.empty((dims[2], dims[1], dims[0]), np.int16); hit = np.zeros(dims[2], bool)
+        def one(f):
+            d = pydicom.dcmread(f)
+            ras = np.array([-float(d.ImagePositionPatient[0]), -float(d.ImagePositionPatient[1]), float(d.ImagePositionPatient[2]), 1.0])
+            ijk = Ainv @ ras
+            if abs(ijk[0]) > 0.05 or abs(ijk[1]) > 0.05 or abs(ijk[2] - round(ijk[2])) > 0.05: return None
+            a = d.pixel_array.astype(np.float32) * float(getattr(d, "RescaleSlope", 1) or 1) + float(getattr(d, "RescaleIntercept", 0) or 0)
+            if a.shape != (dims[1], dims[0]): return None
+            return int(round(ijk[2])), a
+        with ThreadPoolExecutor(8) as ex:
+            for r in ex.map(one, files):
+                if r is None: return None
+                k, a = r
+                if not 0 <= k < dims[2]: return None
+                out[k] = np.clip(a, -32768, 32767); hit[k] = True
+        return out if hit.all() else None
+
+    def phaseLoader(self, uid, ref):
+        def load():
+            try:
+                a = self.loadPhaseArray(uid, ref)
+                if a is not None: return a
+            except Exception as e: print("4D 直接読み込み:", e)
+            return self.loadPhase(uid)
+        return load
+
     def resetCardiacView(self, cv):
         """CardiacView の状態を新しい症例用にリセット"""
         import CardiacView
@@ -588,13 +716,18 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
     def saveCase(self, s):
         name = f"{s.get('studyDate', '') or time.strftime('%Y%m%d')}_{_safe(s.get('seriesNumber', ''), 6)}_{_safe(s.get('rawDesc', ''), 24)}_{time.strftime('%H%M')}.mrb"
         path = os.path.join(casesDir(), name)
+        cleanSceneText()
         slicer.util.saveScene(path)
         return path
 
     def openCase(self, path):
         import CardiacView
         slicer.mrmlScene.Clear(0)
-        slicer.util.loadScene(path)
+        try: slicer.util.loadScene(path)
+        except RuntimeError as e:
+            if "XML" not in str(e) and "Syntax" not in str(e): raise
+            print("[HeartView] 症例ファイルの文字を直して開き直します:", os.path.basename(path))
+            repairCaseFile(path); slicer.mrmlScene.Clear(0); slicer.util.loadScene(path)
         cv = slicer.modules.cardiacview.widgetRepresentation().self()
         self.resetCardiacView(cv)
         cv.logic.adoptScene()

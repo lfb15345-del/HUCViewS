@@ -114,6 +114,31 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             srow.addWidget(b, 1); self.sceneButtons[key] = b
         v.addLayout(srow)
 
+        # 4D（同じ撮影の位相が 2 つ以上ある時だけ出る）
+        self.box4D = qt.QGroupBox("4D（動く心臓）"); g4 = qt.QGridLayout(self.box4D); v.addWidget(self.box4D)
+        self.play4DButton = qt.QPushButton("▶ 再生"); self.play4DButton.setCheckable(True); self.play4DButton.setMinimumHeight(30)
+        self.play4DButton.setStyleSheet("QPushButton { font-size:13px; font-weight:bold } QPushButton:checked { background:#2f6db5; color:white }")
+        self.play4DButton.setToolTip("位相を順に表示（VR と断面が動く）。もう一度押すと止まる。切る・回す・4画面はそのまま使える")
+        g4.addWidget(self.play4DButton, 0, 0)
+        self.phaseSlider = ctk.ctkSliderWidget(); self.phaseSlider.decimals = 0; self.phaseSlider.singleStep = 1; self.phaseSlider.minimum = 0; self.phaseSlider.maximum = 1
+        self.phaseSlider.setToolTip("位相を 1 つずつ見る"); g4.addWidget(self.phaseSlider, 0, 1)
+        self.phaseLabel = qt.QLabel(""); self.phaseLabel.setStyleSheet("font-weight:bold; color:#2f6db5"); g4.addWidget(self.phaseLabel, 0, 2)
+        g4.addWidget(qt.QLabel("速さ"), 1, 0)
+        self.fpsSpin = qt.QDoubleSpinBox(); self.fpsSpin.setRange(0.5, 30.0); self.fpsSpin.setSingleStep(1.0); self.fpsSpin.setDecimals(1); self.fpsSpin.setSuffix(" 位相/秒")
+        try: self.fpsSpin.setValue(float(qt.QSettings().value("CardiacView/fps4D", 8.0)))
+        except Exception: self.fpsSpin.setValue(8.0)
+        g4.addWidget(self.fpsSpin, 1, 1)
+        self.end4DButton = qt.QPushButton("面の 3D に戻る"); self.end4DButton.setToolTip("4D をやめて、AI で作った面・色分け VR の表示に戻る"); g4.addWidget(self.end4DButton, 1, 2)
+        mrow4 = qt.QHBoxLayout(); mrow4.addWidget(qt.QLabel("見え方"))
+        self.mode4DButtons = {}; mg4 = qt.QButtonGroup(self.box4D); mg4.setExclusive(True)
+        for key, lab, tip in (("blood", "造影（形・内腔）", "造影された血液を明るく。心臓の外形や、切った時の内腔の大きさの変化を見る"),
+                              ("tissue", "心内構造（弁・壁）", "造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。切って使うと見やすい")):
+            b = qt.QPushButton(lab); b.setCheckable(True); b.setToolTip(tip); mg4.addButton(b); mrow4.addWidget(b); self.mode4DButtons[key] = b
+            b.setStyleSheet("QPushButton:checked { background:#c9785f; color:white; font-weight:bold }")
+        self.mode4DButtons["blood"].checked = True; self._mode4DGroup = mg4
+        g4.addLayout(mrow4, 2, 0, 1, 3)
+        self.box4D.hide()
+
         box = qt.QGroupBox("② 切る"); g = qt.QGridLayout(box); v.addWidget(box)
         self.cutCombo = qt.QComboBox()
         for lab, _ in CUT_MODES: self.cutCombo.addItem(lab)
@@ -331,6 +356,65 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.curveButton.connect("clicked()", lambda: self.logic.placeMarkup("vtkMRMLMarkupsClosedCurveNode", "閉曲線"))
         self.aortaButton.connect("clicked()", self.onAortaSizing)
         self.saveButton.connect("clicked()", self.onSave)
+        self.play4DButton.connect("toggled(bool)", self._onPlay4D)
+        self.phaseSlider.connect("valueChanged(double)", self._onPhase4D)
+        self.fpsSpin.connect("valueChanged(double)", self._onFps4D)
+        self.end4DButton.connect("clicked()", self._end4D)
+        for key, b in self.mode4DButtons.items(): b.connect("clicked()", lambda k=key: (self.logic.show4D(True), self.logic.set4DMode(k), self._label4D()))
+        self._t4D = qt.QTimer(); self._t4D.setInterval(100); self._t4D.connect("timeout()", self._tick4D)
+
+    # ---------------------------------------------------------------- 4D
+    def enter(self):
+        try: self._sync4D()
+        except Exception as e: print("4D sync:", e)
+
+    def exit(self):
+        try:
+            if self.play4DButton.checked: self.play4DButton.checked = False
+        except Exception: pass
+
+    def _sync4D(self):
+        L = self.logic; n = L.n4D() if hasattr(L, "n4D") else 0
+        self.box4D.setVisible(n >= 2)
+        if n < 2: return
+        self.phaseSlider.blockSignals(True); self.phaseSlider.maximum = n - 1; self.phaseSlider.value = max(0, L.phase4D()); self.phaseSlider.blockSignals(False)
+        self._label4D()
+
+    def _label4D(self):
+        L = self.logic; i = max(0, L.phase4D()); n = L.n4D(); labs = getattr(L, "labels4D", []) or []
+        lab = labs[i] if i < len(labs) and labs[i] else f"{i + 1}"
+        self.phaseLabel.setText(f"{lab}  ({i + 1}/{n})")
+        try:
+            ca = L._view().cornerAnnotation()
+            ca.SetText(1, f"4D  {lab.replace('位相', 'Phase')}  ({i + 1}/{n})" if getattr(L, "on4D", False) else ""); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
+        except Exception: pass
+
+    def _onPlay4D(self, on):
+        L = self.logic
+        if on:
+            L.show4D(True); L.play4D(True, self.fpsSpin.value); self.play4DButton.setText("❚❚ 止める"); self._t4D.start()
+            self._status("4D 再生中: 回す・切る・4画面はそのまま使えます。スライダーで 1 位相ずつ。")
+        else:
+            L.play4D(False); self.play4DButton.setText("▶ 再生"); self._t4D.stop(); self._sync4D()
+
+    def _onPhase4D(self, v):
+        L = self.logic
+        if self.play4DButton.checked: self.play4DButton.checked = False
+        L.show4D(True); L.set4DPhase(int(round(v))); self._label4D()
+
+    def _onFps4D(self, v):
+        qt.QSettings().setValue("CardiacView/fps4D", float(v))
+        if self.play4DButton.checked: self.logic.play4D(True, v)
+
+    def _tick4D(self):
+        L = self.logic
+        if not L.has4D(): self._t4D.stop(); return
+        self.phaseSlider.blockSignals(True); self.phaseSlider.value = max(0, L.phase4D()); self.phaseSlider.blockSignals(False)
+        self._label4D()
+
+    def _end4D(self):
+        if self.play4DButton.checked: self.play4DButton.checked = False
+        self.logic.show4D(False); self._label4D(); self._status("面の 3D に戻しました")
 
     # ---------------------------------------------------------------- helpers
     def _addLayerRow(self, grid, r, name, lo, hi, col, sm, vis):
@@ -387,6 +471,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def _onVR(self, mode):
         btn, other = (self.vrTissueButton, self.vrBloodButton) if mode == "tissue" else (self.vrBloodButton, self.vrTissueButton)
         on = btn.checked
+        if on and getattr(self.logic, "on4D", False): self._end4D()
         other.blockSignals(True); other.checked = False; other.blockSignals(False)
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
@@ -496,6 +581,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         L = self.logic
         for k, b in self.sceneButtons.items(): b.setChecked(k == key)
         if remember: qt.QSettings().setValue("CardiacView/scene", key)
+        if getattr(L, "on4D", False): self._end4D()
         if not L.layerModels: return
         if getattr(L, "vrOn", False): L.showVR(False)
         for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode"): d.SetVisibility(False)   # 残っている VR も必ず消す
@@ -1144,6 +1230,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: self.lastSpacing = float(min(self.workVolume.GetSpacing())) if self.workVolume else 1.2
         except Exception: self.lastSpacing = 1.2
         self.clip = slicer.mrmlScene.GetFirstNodeByName("CV clip")
+        try:
+            self.on4D = False
+            if self._adopt4D(): self.vr4D.SetVisibility(False)
+        except Exception as e: print("4D adopt:", e)
         self.cutPlane = slicer.mrmlScene.GetFirstNodeByName("切断面")
         self.cutAxis = None
         self._updateBounds()
@@ -1381,6 +1471,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         """心筋の切り口だけを正しく塗る（内腔の穴は空けたまま）。vtkCutter + vtkContourTriangulator"""
         my = self.layerModels.get("心筋")
         capNode = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
+        if getattr(self, "on4D", False):                                    # 4D 表示中は切り口の塗りを出さない（VR が動くので）
+            if capNode is not None and capNode.GetDisplayNode() is not None: capNode.GetDisplayNode().SetVisibility(False)
+            return
         show = (my is not None and self.visible.get("心筋", False) and self.cutAxis is not None and self.cutPlane is not None)
         # 切っている間は心筋の「外形」は隠す（心臓壁の内膜と重なってチラつき、内腔がべた塗りに見えるため）。
         # 心筋は切り口（実質）だけを塗る。切らないときは外形を半透明で出す。
@@ -1661,6 +1754,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         return hcNode is not None
 
     def setLayerVisible(self, name, vis):
+        if getattr(self, "on4D", False):                                    # 4D 表示中: 面は隠したまま、戻った時の表示だけ変える
+            for k in self._namesFor(name): self.visible[k] = bool(vis)
+            return
         for k in self._namesFor(name):
             self.visible[k] = bool(vis)
             src = self.layerModels.get(k)
@@ -2149,6 +2245,18 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 if m is not None and m.GetClippingPlanes() is not None and m.GetClippingPlanes().GetNumberOfItems(): m.SetClippingPlanes(self._noPlanes())
                 if clip is not None and not dn.GetClipping():
                     dn.SetAndObserveClipNodeID(clip.GetID()); dn.SetClipping(True)
+        # ---- 4D の VR（1 枚なら GPU で切る）
+        d4 = getattr(self, "vr4D", None)
+        if d4 is not None and getattr(self, "on4D", False):
+            m4 = self._mapperOf(d4)
+            if gpu or not planes:
+                if d4.GetClipping(): d4.SetClipping(False)
+                if m4 is not None:
+                    want = self._planeColl("_vr4Planes", planes) if planes else self._noPlanes()
+                    if m4.GetClippingPlanes() is not want: m4.SetClippingPlanes(want)
+            elif clip is not None:
+                if m4 is not None: m4.SetClippingPlanes(self._noPlanes())
+                if not d4.GetClipping(): d4.SetAndObserveClipNodeID(clip.GetID()); d4.SetClipping(True)
         # ---- 面のレイヤー
         try: dm = self._view().displayableManagerByClassName("vtkMRMLModelDisplayableManager")
         except Exception: dm = None
@@ -2839,6 +2947,223 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if i is it:
                 try: it.GetCommand(t).SetAbortFlag(1)
                 except Exception: pass
+
+    # ================================================================ 4D（動く心臓）
+    # 同じ撮影の各位相（心電図同期の 0〜95% など）を、心臓のまわりだけ切り出して少し粗くし、Sequence にして再生する。
+    # 3D の面・色分け VR は 1 位相（3D を作った CT）のまま。4D では元の CT 値の VR と断面が動く。
+    @staticmethod
+    def _ramBytes():
+        try:
+            import psutil; return float(psutil.virtual_memory().total)
+        except Exception: pass
+        try:
+            import ctypes
+            class MS(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_ulong), ("m", ctypes.c_ulong), ("t", ctypes.c_ulonglong), ("a", ctypes.c_ulonglong),
+                            ("tp", ctypes.c_ulonglong), ("ap", ctypes.c_ulonglong), ("tv", ctypes.c_ulonglong), ("av", ctypes.c_ulonglong), ("e", ctypes.c_ulonglong)]
+            m = MS(); m.l = ctypes.sizeof(MS); ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)); return float(m.t)
+        except Exception: return 16e9
+
+    def setup4D(self, phases, status=lambda m: None, budget=None):
+        """phases: [(ラベル, ボリューム または 読み込む関数)]。関数なら 1 位相ずつ読み込んで、使い終わったら消す（メモリを食わない）。
+        budget = 全位相合計のメモリ上限（バイト。既定は PC のメモリの 1/24、0.4〜1.6 GB）"""
+        from scipy import ndimage
+        if budget is None: budget = min(1.6e9, max(0.4e9, self._ramBytes() / 24.0))
+        src = getattr(self, "sourceVolume", None); seg = self._findSegmentation(); hc = self._findChambers()
+        if src is None or seg is None: raise RuntimeError("先に 3D を作ってください")
+        if len(phases) < 2: raise RuntimeError("位相が 1 つしかありません")
+        self.clear4D()
+        status(f"4D（{len(phases)} 位相）を準備中: 心臓の範囲…")
+        region = self._segmentMaskArray(hc, src, ("ventricle", "atrium", "aorta", "pulmonary artery", "myocardium")) if hc is not None else None
+        r2 = self._segmentMaskArray(seg, src, ("heart", "atrial appendage", "aorta", "pulmonary vein", "pulmonary artery", "superior vena cava"))
+        if r2 is not None: region = r2 if region is None else (region | r2)
+        if region is None or region.sum() < 1000: raise RuntimeError("心臓のラベルがありません")
+        sp = np.array(src.GetSpacing())[::-1]                                     # (z, y, x) mm
+        rr = [np.nonzero(region.any(axis=ax))[0] for ax in ((1, 2), (0, 2), (0, 1))]
+        m = np.ceil(15.0 / sp).astype(int)                                        # 心臓は動くので 15 mm 余裕
+        lo = np.maximum(np.array([q.min() for q in rr]) - m, 0); hi = np.minimum(np.array([q.max() for q in rr]) + m + 1, region.shape)
+        f = np.maximum(1, np.round(0.55 / sp)).astype(int)                         # まず 0.5〜0.6 mm 程度に
+        per = budget / len(phases) / 2.0
+        while np.prod(np.ceil((hi - lo) / f)) > per:                              # メモリに収まるまで、いちばん細かい向きから粗く
+            f[int(np.argmin(sp * f))] += 1
+        hi = lo + ((hi - lo) // f) * f
+        crop = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi)); shp = tuple(int(x) for x in (hi - lo) // f)
+        def pool(a):
+            a = a[crop].reshape(shp[0], f[0], shp[1], f[1], shp[2], f[2])
+            return a.mean(axis=(1, 3, 5), dtype=np.float32)
+        # 心臓の外を消す重み（骨は 1〜3 mm で消す）
+        gsp = sp * f
+        rs = pool(region.astype(np.float32)) > 0.3; del region
+        d = ndimage.distance_transform_edt(~rs, sampling=gsp)
+        wgt = np.clip((11.0 - d) / 4.0, 0.0, 1.0).astype(np.float32); del d, rs      # ラベル + 7 mm は残し、11 mm で消す（動く分の余裕）
+        bone = self._boneMaskArray(seg, src)
+        if bone is not None and bone.any():
+            bp = pool(bone.astype(np.float32)) > 0.3; del bone
+            if bp.any(): wgt *= np.clip((ndimage.distance_transform_edt(~bp, sampling=gsp) - 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+        M = vtk.vtkMatrix4x4(); src.GetIJKToRASMatrix(M); A = slicer.util.arrayFromVTKMatrix(M)
+        fx = f[::-1].astype(float); o = lo[::-1] + (fx - 1) / 2.0                      # (i, j, k) の順
+        A2 = A.copy(); A2[:3, :3] = A[:3, :3] * fx[None, :]; A2[:3, 3] = (A @ np.r_[o, 1.0])[:3]
+        M2 = slicer.util.vtkMatrixFromArray(A2)
+        seq = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode", "CV 4D 位相")
+        seq.SetIndexName("phase"); seq.SetIndexUnit(""); seq.SetIndexType(seq.NumericIndex)
+        labels = []
+        for i, (lab, vol) in enumerate(phases):
+            status(f"4D を準備中: 位相 {i + 1}/{len(phases)}（{lab}）…")
+            tmp = None; loaded = None; arr = None
+            if callable(vol): vol = loaded = vol()
+            if isinstance(vol, np.ndarray):                                   # 配列で渡された（3D を作った CT と同じ格子）
+                arr, vol, loaded = vol, src, None
+            same = (vol.GetImageData() is not None and tuple(vol.GetImageData().GetDimensions()) == tuple(src.GetImageData().GetDimensions())
+                    and np.allclose(vol.GetSpacing(), src.GetSpacing(), atol=1e-3) and np.allclose(vol.GetOrigin(), src.GetOrigin(), atol=1e-2))
+            if not same:
+                tmp = slicer.modules.volumes.logic().ResampleVolumeToReferenceVolume(vol, src); vol = tmp
+            a = pool(arr if arr is not None else slicer.util.arrayFromVolume(vol)); arr = None
+            out = np.clip(-1024.0 + (a + 1024.0) * wgt, -1024, 3071).astype(np.int16); del a
+            if tmp is not None: slicer.mrmlScene.RemoveNode(tmp)
+            if loaded is not None and loaded is not src: slicer.mrmlScene.RemoveNode(loaded)
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"CV 4D {lab}")
+            node.SetIJKToRASMatrix(M2); slicer.util.updateVolumeFromArray(node, out)
+            seq.SetDataNodeAtValue(node, str(i)); slicer.mrmlScene.RemoveNode(node); labels.append(str(lab))
+            slicer.app.processEvents()
+        seq.SetAttribute("CV.4D.labels", "|".join(labels))
+        br = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", "CV 4D 再生")
+        br.SetAndObserveMasterSequenceNodeID(seq.GetID()); br.SetPlaybackLooped(True); br.SetPlaybackRateFps(8.0)
+        slicer.modules.sequences.logic().UpdateProxyNodesFromSequences(br)
+        proxy = br.GetProxyNode(seq); proxy.SetName("CV 4D")
+        proxy.CreateDefaultDisplayNodes()
+        self._adopt4D(br)
+        self.vr4D.SetVisibility(False)
+        status(f"4D（{len(phases)} 位相・{gsp[2]:.2f}×{gsp[1]:.2f}×{gsp[0]:.2f} mm）の準備ができました")
+        return len(phases)
+
+    def _adopt4D(self, br=None):
+        """4D の部品（再生・位相・表示）を引き継ぐ。保存した症例を開いた時も"""
+        br = br or slicer.mrmlScene.GetFirstNodeByName("CV 4D 再生")
+        if br is None or not br.IsA("vtkMRMLSequenceBrowserNode"):
+            self.br4D = self.seq4D = self.proxy4D = self.vr4D = None; return False
+        self.br4D = br; self.seq4D = br.GetMasterSequenceNode(); self.proxy4D = br.GetProxyNode(self.seq4D)
+        self.labels4D = (self.seq4D.GetAttribute("CV.4D.labels") or "").split("|")
+        vrl = slicer.modules.volumerendering.logic()
+        dn = vrl.GetFirstVolumeRenderingDisplayNode(self.proxy4D)
+        if dn is None: dn = vrl.CreateDefaultVolumeRenderingNodes(self.proxy4D)
+        dn.RemoveAllViewNodeIDs(); dn.AddViewNodeID(self._viewNode().GetID())
+        self.vr4D = dn; self._tf4D()
+        try: slicer.modules.sequences.setToolBarVisible(False)                # 再生は CardiacView の欄で（Slicer 標準の再生バーは出さない）
+        except Exception: pass
+        return True
+
+    def _tf4D(self, mode=None):
+        """4D の VR の色と透明度。blood: 心筋は赤、造影された血液は明るい肌色（外から見た形・内腔）。
+        tissue: 造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。脂肪・肺はどちらも透明"""
+        if mode is not None: self.mode4D = mode
+        mode = getattr(self, "mode4D", "blood")
+        c = self._cal(); myo = float(c.get("myo", 80.0)); bl = float(c.get("blood", 350.0)); mid = (myo + bl) / 2
+        vp = self.vr4D.GetVolumePropertyNode().GetVolumeProperty()
+        otf = vtk.vtkPiecewiseFunction(); ctf = vtk.vtkColorTransferFunction()
+        if mode == "tissue":
+            pts = ((-1024, 0), (myo - 60, 0), (myo, 0.55), (mid - 25, 0.75), (mid + 15, 0), (bl + 400, 0), (bl + 401, 0.6), (3071, 0.8))
+        else:
+            pts = ((-1024, 0), (myo - 50, 0), (myo + 10, 0.25), (mid, 0.6), (bl + 150, 0.85), (3071, 0.9))
+        for x, y in pts: otf.AddPoint(x, y)
+        for x, col in ((-1024, (0, 0, 0)), (myo - 50, (0.45, 0.1, 0.08)), (myo + 10, (0.75, 0.3, 0.24)), ((myo + bl) / 2, (0.95, 0.6, 0.5)),
+                       (bl + 100, (1.0, 0.9, 0.82)), (1500, (1, 1, 1)), (3071, (1, 1, 1))): ctf.AddRGBPoint(x, *col)
+        vp.SetScalarOpacity(otf); vp.SetColor(ctf); vp.ShadeOn(); vp.SetInterpolationTypeToLinear()
+        vp.SetAmbient(0.25); vp.SetDiffuse(0.8); vp.SetSpecular(0.3); vp.SetSpecularPower(20)
+
+    def set4DMode(self, mode):
+        if getattr(self, "vr4D", None) is None: return
+        self._tf4D(mode); self._view().scheduleRender()
+
+    def has4D(self):
+        return getattr(self, "br4D", None) is not None and slicer.mrmlScene.IsNodePresent(self.br4D)
+
+    def n4D(self):
+        return self.seq4D.GetNumberOfDataNodes() if self.has4D() else 0
+
+    def clear4D(self):
+        self.show4D(False)
+        for cls in ("vtkMRMLSequenceBrowserNode", "vtkMRMLSequenceNode", "vtkMRMLScalarVolumeNode"):
+            for n in list(slicer.util.getNodesByClass(cls)):
+                if n.GetName() not in ("CV 4D 再生", "CV 4D 位相", "CV 4D"): continue
+                try:
+                    if hasattr(n, "GetNumberOfDisplayNodes"):
+                        for d in [n.GetNthDisplayNode(i) for i in range(n.GetNumberOfDisplayNodes())]:
+                            if d is not None: slicer.mrmlScene.RemoveNode(d)
+                    slicer.mrmlScene.RemoveNode(n)
+                except Exception: pass
+        self.br4D = self.seq4D = self.proxy4D = self.vr4D = None
+
+    def show4D(self, on):
+        """on: 3D の面・色分け VR を隠して、動く VR と断面に切り替える。off: 元に戻す"""
+        on = bool(on) and self.has4D()
+        if on == bool(getattr(self, "on4D", False)): return
+        lm = slicer.app.layoutManager()
+        if on:
+            st = dict(vr=bool(getattr(self, "vrOn", False)), models={}, bg={})
+            if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(False)
+            for k, n in self.layerModels.items():
+                d = n.GetDisplayNode() if n else None
+                if d is not None: st["models"][k] = d.GetVisibility(); d.SetVisibility(False)
+            cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
+            if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
+            for nm in ("Red", "Yellow", "Green"):
+                w = lm.sliceWidget(nm)
+                if w is None: continue
+                cn = w.sliceLogic().GetSliceCompositeNode(); st["bg"][nm] = cn.GetBackgroundVolumeID(); cn.SetBackgroundVolumeID(self.proxy4D.GetID())
+            try:
+                d = self.proxy4D.GetDisplayNode(); s0 = self.sourceVolume.GetDisplayNode()
+                if d is not None and s0 is not None: d.SetAutoWindowLevel(False); d.SetWindowLevel(s0.GetWindow(), s0.GetLevel())
+            except Exception: pass
+            self._st4D = st; self.vr4D.SetVisibility(True); self.on4D = True
+        else:
+            self.play4D(False)
+            st = getattr(self, "_st4D", None) or {}
+            if getattr(self, "vr4D", None) is not None: self.vr4D.SetVisibility(False)
+            for k, n in self.layerModels.items():                            # 面は「見せたい状態」（self.visible）に戻す
+                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(self.visible.get(k, False)))
+            if st.get("vr") and getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(True)
+            for nm, vid in st.get("bg", {}).items():
+                w = lm.sliceWidget(nm)
+                if w is not None: w.sliceLogic().GetSliceCompositeNode().SetBackgroundVolumeID(vid)
+            self.on4D = False
+            try: self.updateMyoCap()
+            except Exception: pass
+        try: self._clipSync()
+        except Exception: pass
+        self._view().scheduleRender()
+
+    def play4D(self, on, fps=None):
+        if not self.has4D(): return
+        if fps is not None: self.br4D.SetPlaybackRateFps(float(fps))
+        self.br4D.SetPlaybackActive(bool(on))
+
+    def set4DPhase(self, i):
+        if not self.has4D(): return
+        self.br4D.SetPlaybackActive(False); self.br4D.SetSelectedItemNumber(int(i))
+
+    def phase4D(self):
+        return self.br4D.GetSelectedItemNumber() if self.has4D() else -1
+
+    def _mapperOf(self, dn):
+        """その VR 表示の GPU マッパー（4D 表示中は、見えている VR が 4D のもの）"""
+        try:
+            dm = self._view().displayableManagerByClassName("vtkMRMLVolumeRenderingDisplayableManager")
+            a = dm.GetVolumeActor(dn) if hasattr(dm, "GetVolumeActor") else None
+            if a is not None and a.GetMapper() is not None: return a.GetMapper()
+        except Exception: pass
+        try:
+            ren = self._view().renderWindow().GetRenderers().GetFirstRenderer(); vs = ren.GetVolumes(); vs.InitTraversal()
+            dims = tuple(self.proxy4D.GetImageData().GetDimensions()) if getattr(self, "proxy4D", None) is not None else None
+            for _ in range(vs.GetNumberOfItems()):
+                v = vs.GetNextVolume(); m = v.GetMapper()
+                if m is None or not v.GetVisibility(): continue
+                try:
+                    inp = m.GetInput()
+                    if dims is not None and inp is not None and tuple(inp.GetDimensions()) != dims: continue
+                except Exception: pass
+                return m
+        except Exception: pass
+        return None
 
     def _vrMapper(self):
         try:
