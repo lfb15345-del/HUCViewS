@@ -136,6 +136,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             b = qt.QPushButton(lab); b.setCheckable(True); b.setToolTip(tip); mg4.addButton(b); mrow4.addWidget(b); self.mode4DButtons[key] = b
             b.setStyleSheet("QPushButton:checked { background:#c9785f; color:white; font-weight:bold }")
         self.mode4DButtons["blood"].checked = True; self._mode4DGroup = mg4
+        self.wl4DButton = qt.QPushButton("ウィンドウを戻す"); self.wl4DButton.setToolTip("4D の VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す")
+        mrow4.addWidget(self.wl4DButton)
         g4.addLayout(mrow4, 2, 0, 1, 3)
         self.box4D.hide()
 
@@ -361,6 +363,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.fpsSpin.connect("valueChanged(double)", self._onFps4D)
         self.end4DButton.connect("clicked()", self._end4D)
         for key, b in self.mode4DButtons.items(): b.connect("clicked()", lambda k=key: (self.logic.show4D(True), self.logic.set4DMode(k), self._label4D()))
+        self.wl4DButton.connect("clicked()", lambda: (self.logic.resetWindow(), self._status("ウィンドウを最初の値に戻しました")))
         self._t4D = qt.QTimer(); self._t4D.setInterval(100); self._t4D.connect("timeout()", self._tick4D)
 
     # ---------------------------------------------------------------- 4D
@@ -2306,6 +2309,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self.vrWin = None; self.setVRWindow()
         if getattr(self, "on4D", False):
             self.win4DMap = {}; self._tf4D()
+            try:
+                d = self.proxy4D.GetDisplayNode(); c = self._cal(); lo = float(c.get("fat", -80)) - 60; hi = float(c.get("blood", 350)) + 250
+                d.SetAutoWindowLevel(False); d.SetWindowLevel(hi - lo, (hi + lo) / 2)
+            except Exception: pass
         src = getattr(self, "sourceVolume", None)
         d = src.GetDisplayNode() if src is not None else None
         if d is not None:
