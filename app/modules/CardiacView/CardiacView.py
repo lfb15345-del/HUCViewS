@@ -318,7 +318,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         for key, b in self.viewButtons.items():
             b.connect("clicked()", lambda k=key: self.logic.setView(k, self.fovSlider.value))
         for name, cb in self.layerChecks.items():
-            cb.connect("toggled(bool)", lambda v, n=name: self.logic.setLayerVisible(n, v))
+            cb.connect("toggled(bool)", lambda v, n=name: self._onLayerCheck(n, v))
         self.heartOnlyButton.connect("clicked()", self.onHeartOnly)
         self.lumenButton.connect("clicked()", self.onLumen)
         self.vsdButton.connect("clicked()", self.onVSD)
@@ -388,6 +388,11 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             ca = L._view().cornerAnnotation()
             ca.SetText(1, f"4D  {lab.replace('位相', 'Phase')}  ({i + 1}/{n})" if getattr(L, "on4D", False) else ""); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
         except Exception: pass
+
+    def _onLayerCheck(self, name, on):
+        L = self.logic; L.setLayerVisible(name, on)
+        if getattr(L, "on4D", False) and on and not any(k in L.STATIC_4D for k in L._namesFor(name)):
+            self._status(f"4D 中は「{name}」の面は出しません（動く心臓と重なるため）。「面の 3D に戻る」で表示されます。骨・軟部組織・人工物は 4D でも一緒に出せます。")
 
     def _onPlay4D(self, on):
         L = self.logic
@@ -1753,9 +1758,17 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         m.Modified()
         return hcNode is not None
 
+    STATIC_4D = ("骨", "軟部組織", "人工物")                                 # 4D でも一緒に出せる面（心臓と一緒に動かないもの）
+
     def setLayerVisible(self, name, vis):
-        if getattr(self, "on4D", False):                                    # 4D 表示中: 面は隠したまま、戻った時の表示だけ変える
-            for k in self._namesFor(name): self.visible[k] = bool(vis)
+        if getattr(self, "on4D", False):                                    # 4D 表示中: 動かない骨・軟部組織・人工物だけ面を出す（心臓・血管の面は動く VR と重なるので戻った時に）
+            for k in self._namesFor(name):
+                self.visible[k] = bool(vis)
+                n = self.layerModels.get(k)
+                if k in self.STATIC_4D and n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(vis))
+            try: self._clipSync()
+            except Exception: pass
+            self._view().scheduleRender()
             return
         for k in self._namesFor(name):
             self.visible[k] = bool(vis)
@@ -3103,7 +3116,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(False)
             for k, n in self.layerModels.items():
                 d = n.GetDisplayNode() if n else None
-                if d is not None: st["models"][k] = d.GetVisibility(); d.SetVisibility(False)
+                if d is not None: d.SetVisibility(k in self.STATIC_4D and bool(self.visible.get(k, False)))
             cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
             if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
             for nm in ("Red", "Yellow", "Green"):
@@ -3115,6 +3128,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 if d is not None and s0 is not None: d.SetAutoWindowLevel(False); d.SetWindowLevel(s0.GetWindow(), s0.GetLevel())
             except Exception: pass
             self._st4D = st; self.vr4D.SetVisibility(True); self.on4D = True
+            try: self._view().cornerAnnotation().SetText(3, "")               # 色分け VR のウィンドウ表示は 4D では出さない
+            except Exception: pass
         else:
             self.play4D(False)
             st = getattr(self, "_st4D", None) or {}
