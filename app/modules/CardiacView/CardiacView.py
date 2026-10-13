@@ -372,8 +372,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         except Exception as e: print("4D sync:", e)
 
     def exit(self):
-        try:
+        try:                                                                  # ほかの画面（大動脈サイジングなど）へ行く時は 4D を終える（動く VR が残らない）
             if self.play4DButton.checked: self.play4DButton.checked = False
+            if getattr(self.logic, "on4D", False): self.logic.show4D(False)
         except Exception: pass
 
     def _sync4D(self):
@@ -652,6 +653,10 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self._status("大動脈サイジング完了（CSV は slicer_input に出力）")
 
     def onSave(self):
+        if getattr(self.logic, "on4D", False): self._end4D()                  # 4D 表示のまま保存すると、開いた時に面が隠れたままになる
+        return self._onSave()
+
+    def _onSave(self):
         path = qt.QFileDialog.getSaveFileName(None, "シーンを保存", "", "Medical Reality Bundle (*.mrb)")
         if path:
             if not path.lower().endswith(".mrb"): path += ".mrb"

@@ -843,6 +843,11 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         status("1/4 大動脈・腸骨動脈の形を準備中…")
         aorta = self._mask(("aorta",), exact=True)
         if aorta is None or aorta.sum() < 500: raise RuntimeError("大動脈のラベルがありません")
+        zz = self._pts(aorta)[:, 2]
+        dims = vol.GetImageData().GetDimensions(); fov = min(dims[0] * vol.GetSpacing()[0], dims[1] * vol.GetSpacing()[1])
+        if float(zz.max() - zz.min()) < 80 or fov < 220:                      # 心臓だけの撮影（FOV が小さい）では大動脈が少ししか写っていない
+            raise RuntimeError(f"この CT は心臓だけの撮影です（撮影範囲 {fov:.0f} mm・大動脈 {zz.max() - zz.min():.0f} mm 分）。"
+                               "大動脈サイジングは、胸部〜腹部まで撮った造影 CT で使ってください。")
         ilR = self._mask(("iliac artery right",)); ilL = self._mask(("iliac artery left",))
         status("1/4 鼠径部まで血管をたどっています…")
         ext = {}
@@ -915,8 +920,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for k, p in ends.items():
             q, d = snap(p)
             if d > 25:                                    # 表面から大きく外れた端点は信用しない（延長失敗）
-                status(f"注意: {k} の端点が血管表面から {d:.0f} mm 離れていたため、腸骨ラベルの下端を使います")
-                base = self._pts(ilR if "右" in k else ilL)
+                lab = ilR if "右" in k else (ilL if "左" in k else None)
+                base = self._pts(lab) if lab is not None and lab.any() else apts         # 腸骨が無い時は大動脈ラベルの下端
+                status(f"注意: {k} の端点が血管表面から {d:.0f} mm 離れていたため、{'腸骨' if lab is not None else '大動脈'}ラベルの下端を使います")
                 near = sp_surf[_KD(base).query(sp_surf)[0] < 8.0]               # その側の腸骨ラベルに沿った表面だけ
                 if len(near): q = near[np.argmin(near[:, 2])]                 # その中で一番下 = 取れている範囲の末端
                 else: q, _ = snap(base[base[:, 2] < base[:, 2].min() + 6].mean(0))
