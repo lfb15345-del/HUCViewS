@@ -182,6 +182,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def _lab(self, text, role=None):
         l = qt.QLabel(text)
         if role: l.setProperty("role", role)
+        if role == "muted" and len(text) > 24: l.setWordWrap(True)           # 長い説明は折り返す（パネルが狭くてもはみ出さない）
         return l
 
     def _seg(self, items, lay, exclusive=True):
@@ -202,6 +203,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         try:
             import CardiacView; _sc.setStyleSheet(CardiacView.SC_STYLE); root.setStyleSheet(STYLE + CardiacView._iconCSS().replace("cvRoot", "saRoot"))
         except Exception: pass
+        _sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.layout.addWidget(_sc); self.layout.setContentsMargins(0, 0, 0, 0)
         v = qt.QVBoxLayout(root); v.setContentsMargins(10, 10, 10, 10); v.setSpacing(10); self.root = root
 
@@ -236,6 +238,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         r2 = qt.QHBoxLayout(); c.addLayout(r2)
         self.pinBtn = self._btn("📌 この断面を記録  P", "primary", "今の断面（外周・内腔の径）をマーカーとして残す"); r2.addWidget(self.pinBtn)
         self.baseBtn = self._btn("ここを 0 mm に", None, "ベースライン（距離の基準）にする"); r2.addWidget(self.baseBtn)
+        r2 = qt.QHBoxLayout(); c.addLayout(r2)                              # 2 段に（パネルが狭くてもはみ出さない）
         self.editContBtn = self._btn("輪郭を直す", None, "断面の輪郭を点で手直し", checkable=True); r2.addWidget(self.editContBtn)
         self.wlBtn = self._btn("ウィンドウを戻す", None, "断面・ストレッチ像の濃さを最初（血管用 W800/L200）に戻す"); r2.addWidget(self.wlBtn)
         hint = self._lab("断面: ホイール 1 mm（Shift 5 mm）・ストレッチ像（直交 2 方向）: クリック/ドラッグで移動、ホイールで回転・"

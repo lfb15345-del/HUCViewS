@@ -165,6 +165,143 @@ HELP_TEXT = ("3D 画面の操作\n"
              "・ダブルクリック: 1 画面に拡大")
 
 
+WL_PRESETS = [("心臓・血管（造影）", 800, 200), ("縦隔・軟部", 400, 40), ("石灰化・ステント", 1500, 450), ("骨", 2000, 500), ("肺", 1500, -600)]
+
+TB_STYLE = """
+QToolBar#HUCViewSToolBar { background:#15171c; border:none; border-bottom:1px solid #2b3039; spacing:1px; padding:3px 8px; }
+QToolBar#HUCViewSToolBar::separator { background:#2b3039; width:1px; margin:6px 7px; }
+QToolBar#HUCViewSToolBar QToolButton { color:#c9ced6; background:transparent; border:1px solid transparent; border-radius:7px; padding:3px 5px 2px 5px; font-size:11px; min-width:44px; }
+QToolBar#HUCViewSToolBar QToolButton:hover { background:#232730; color:#ffffff; }
+QToolBar#HUCViewSToolBar QToolButton:pressed { background:#2b303a; }
+QToolBar#HUCViewSToolBar QToolButton:checked { background:#173f57; border:1px solid #4cc8f0; color:#ffffff; }
+QToolBar#HUCViewSToolBar QToolButton::menu-indicator { image:none; width:0; }
+QToolBar#HUCViewSToolBar QLabel#tbBrand { color:#ffffff; font-size:14px; font-weight:bold; padding:0 10px 0 2px; }
+QMenu { background:#1e2128; color:#e6e8ec; border:1px solid #343a46; padding:4px; }
+QMenu::item { padding:6px 18px 6px 12px; border-radius:5px; }
+QMenu::item:selected { background:#1f4d69; }
+QMenu::separator { height:1px; background:#2b3039; margin:4px 6px; }
+"""
+
+HELP_HTML = ("<div style='font-size:12px; line-height:150%'>"
+             "<b style='color:#4cc8f0'>3D 画面</b><br>"
+             "左ドラッグ：回転　／　中ドラッグ：移動<br>"
+             "右ドラッグ：上のバーで選んだ機能（拡大・ウィンドウ・移動・切る位置）<br>"
+             "ホイール：切る位置（1 mm、Shift で 5 mm）。切っていない時は拡大縮小<br>"
+             "Ctrl＋ホイール：拡大縮小　／　左右ボタン同時ドラッグ：VR のウィンドウ<br><br>"
+             "<b style='color:#4cc8f0'>断面</b><br>"
+             "ホイール：スライス送り　／　左ドラッグ：ウィンドウ<br>"
+             "Shift＋マウス：3 断面の十字が追従　／　ダブルクリック：1 画面に拡大<br>"
+             "線の真ん中をドラッグ：位置　／　線の端の丸をドラッグ：斜めの断面<br><br>"
+             "<b style='color:#4cc8f0'>計測</b><br>"
+             "計測にマウスを乗せて Delete：1 つ消す　／　「消去」：すべて消す</div>")
+
+
+def _toolIcons():
+    """ツールバーのアイコン（線画の SVG を一時フォルダに書いて使う）"""
+    s = "stroke='#d6dae1' stroke-width='1.7' fill='none' stroke-linecap='round' stroke-linejoin='round'"
+    F = "#d6dae1"
+    body = {
+        "zoom": f"<circle cx='10.5' cy='10.5' r='6.2'/><path d='M15.2 15.2L20.5 20.5M8 10.5h5M10.5 8v5'/>",
+        "window": f"<circle cx='12' cy='12' r='8'/><path d='M12 4a8 8 0 0 0 0 16z' fill='{F}'/>",
+        "pan": "<path d='M12 3v18M3 12h18M9.5 5.5L12 3l2.5 2.5M9.5 18.5L12 21l2.5-2.5M5.5 9.5L3 12l2.5 2.5M18.5 9.5L21 12l-2.5 2.5'/>",
+        "cut": "<path d='M3 15.5l5-4h13l-5 4z'/><path d='M12 9V3M9.8 5.2L12 3l2.2 2.2M12 17.5V21'/>",
+        "line": f"<path d='M5.5 18.5l13-13'/><circle cx='5' cy='19' r='1.9' fill='{F}'/><circle cx='19' cy='5' r='1.9' fill='{F}'/>",
+        "curve": f"<path d='M4 18c4.5 0 3.5-12 8-12s3.5 12 8 12'/><circle cx='4' cy='18' r='1.7' fill='{F}'/><circle cx='20' cy='18' r='1.7' fill='{F}'/>",
+        "area": f"<path d='M5 9l6-4.5 8 4.5-2 10H7z' fill='{F}' fill-opacity='0.18'/>",
+        "angle": "<path d='M4 19h16M4 19L14.5 5.5'/><path d='M10.5 19a6.5 6.5 0 0 0-2.4-5'/>",
+        "clear": "<path d='M5 7h14M9.5 7V4.5h5V7M7 7l1 13h8l1-13M10.5 11v5.5M13.5 11v5.5'/>",
+        "one": "<rect x='4' y='4' width='16' height='16' rx='2.5'/>",
+        "two": "<rect x='4' y='4' width='16' height='16' rx='2.5'/><path d='M12 4v16'/>",
+        "four": "<rect x='4' y='4' width='16' height='16' rx='2.5'/><path d='M12 4v16M4 12h16'/>",
+        "fit": "<path d='M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5'/><rect x='8.5' y='8.5' width='7' height='7' rx='1.5'/>",
+        "wl": f"<path d='M4 7h9M17 7h3M4 17h3M11 17h9'/><circle cx='15' cy='7' r='2.2'/><circle cx='9' cy='17' r='2.2'/>",
+        "reset": "<path d='M4.5 12a7.5 7.5 0 1 0 2.3-5.4'/><path d='M4.5 4v4.5H9'/>",
+        "camera": "<rect x='3' y='7' width='18' height='13' rx='2.5'/><path d='M8.5 7l1.8-3h3.4l1.8 3'/><circle cx='12' cy='13.5' r='3.5'/>",
+        "help": f"<circle cx='12' cy='12' r='9'/><path d='M9.6 9.6a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .8-1 1.6'/><circle cx='12' cy='16.8' r='.8' fill='{F}'/>",
+    }
+    out = {}
+    try:
+        d = os.path.join(qt.QDir.tempPath(), "hucviews_ui"); os.makedirs(d, exist_ok=True)
+        for k, b in body.items():
+            f = os.path.join(d, f"tb_{k}.svg")
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(f"<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><g {s}>{b}</g></svg>")
+            out[k] = f
+    except Exception as e: print("tool icons:", e)
+    return out
+
+
+class _Hud:
+    """画面の上の小さな表示（日本語・半透明の帯）。VTK の文字ではなく Qt のラベルで描く"""
+    BOX = "QLabel{background:rgba(14,16,20,178); color:#e6e8ec; border-radius:6px; padding:3px 8px; font-size:12px;}"
+    EDGE = "QLabel{background:transparent; color:rgba(245,205,95,230); font-size:13px; font-weight:bold; padding:0;}"
+
+    def __init__(self):
+        self.items = {}; self.on = True
+
+    def _view(self, key):
+        lm = slicer.app.layoutManager()
+        if key == "3d": return lm.threeDWidget(0).threeDView()
+        w = lm.sliceWidget(key); return w.sliceView() if w is not None else None
+
+    def set(self, key, pos, html):
+        lab = self.items.get((key, pos))
+        if not html:
+            if lab is not None:
+                try: lab.setText(""); lab.hide()
+                except Exception: self.items.pop((key, pos), None)
+            return
+        try:
+            v = self._view(key)
+            if v is None: return
+            if lab is not None and lab.parentWidget() is not v:                # 画面割りを変えると断面の部品が作り直されることがある
+                try: lab.hide(); lab.setParent(None); lab.deleteLater()
+                except Exception: pass
+                lab = None
+            if lab is None:
+                lab = qt.QLabel(v); lab.setAttribute(qt.Qt.WA_TransparentForMouseEvents, True); lab.setTextFormat(qt.Qt.RichText)
+                lab.setStyleSheet(self.EDGE if len(pos) == 1 else self.BOX); self.items[(key, pos)] = lab
+            if lab.text != html: lab.setText(html); lab.adjustSize()
+            if self.on:
+                if not lab.visible: lab.show()
+                lab.raise_()
+            self._place(pos, lab, key)
+        except Exception: self.items.pop((key, pos), None)
+
+    def _place(self, pos, lab, key=None):
+        p = lab.parentWidget(); W, H = p.width, p.height; w, h = lab.width, lab.height; m = 8
+        x, y = {"tl": (m, m), "tr": (W - w - m, m), "bl": (m, H - h - m), "br": (W - w - m, H - h - m),
+                "L": (7, (H - h) // 2), "R": (W - w - 7, (H - h) // 2), "T": ((W - w) // 2, 6), "B": ((W - w) // 2, H - h - 30)}[pos]
+        if pos == "T":                                                        # 左上の帯と重なる時は、その下へ
+            tl = self.items.get((key, "tl"))
+            try:
+                if tl is not None and tl.visible and tl.x + tl.width + 4 > x: y = tl.y + tl.height + 3
+            except Exception: pass
+        lab.move(int(x), int(y))
+
+    def placeAll(self):
+        for (k, pos), lab in list(self.items.items()):
+            try:
+                if lab.visible: self._place(pos, lab, k)
+            except Exception: self.items.pop((k, pos), None)
+
+    def show(self, on):
+        self.on = bool(on)
+        for key, lab in list(self.items.items()):
+            try: lab.setVisible(self.on and bool(lab.text))
+            except Exception: self.items.pop(key, None)
+
+
+def _hud():
+    h = getattr(slicer, "_cvHud", None)
+    if h is not None and not isinstance(h, _Hud):                        # モジュールを読み直した時は古い表示を片づけて作り直す
+        try: h.show(False)
+        except Exception: pass
+        h = None
+    if h is None: h = slicer._cvHud = _Hud()
+    return h
+
+
 # =============================================================================== Widget
 class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
@@ -189,9 +326,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             back.connect("clicked()", lambda: slicer.util.selectModule("HeartView"))
         h.addWidget(Lb("CardiacView", "title")); h.addStretch(1)
         self.helpButton = B("？ 操作", "ghost", HELP_TEXT); h.addWidget(self.helpButton)
-        self.helpButton.connect("clicked()", lambda: qt.QToolTip.showText(qt.QCursor.pos(), HELP_TEXT))
+        self.helpButton.connect("clicked()", lambda: self._showHelp(self.helpButton)); self.helpButton.hide()      # 操作の一覧は上のバーへ
         if app:
-            png = B("画像保存", "ghost", "今の画面を PNG で保存"); h.addWidget(png)
+            png = B("画像保存", "ghost", "今の画面を PNG で保存"); h.addWidget(png); png.hide()
             def _png():
                 import HeartView
                 p = HeartView.HeartViewLogic().savePNG(); self._status(f"画像を保存しました: {p}")
@@ -217,7 +354,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             self.quickButton.setText("3D を作り直す（同じ CT）")
 
         # ---------------- 見たいもの（ワンクリック。最後に選んだものが次の症例の最初の表示）
-        card, c, _ = self._card(v, "見たいもの", "次の症例もこの表示から")
+        card, c, _ = self._card(v, "見たいもの", "次の症例もこの表示から"); self._sceneLay = c
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
         self.sceneButtons = {}
         for key, text, tip in (("heart", "心臓", "四腔断面で心臓の中を見る"),
@@ -249,7 +386,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         except Exception: self.fpsSpin.setValue(8.0)
         r.addWidget(self.fpsSpin)
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
-        self.wl4DButton = B("ウィンドウを戻す", None, "4D の VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す"); r.addWidget(self.wl4DButton)
+        self.wl4DButton = B("ウィンドウを戻す", None, "4D の VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す"); r.addWidget(self.wl4DButton); self.wl4DButton.hide()
         r.addStretch(1)
         self.end4DButton = B("4D を終了", None, "4D をやめて、AI で作った面・色分け VR の表示に戻る"); r.addWidget(self.end4DButton)
         self.box4D.hide()
@@ -264,13 +401,15 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         for key, lab in CardiacViewLogic.RMODES:
             b = B(lab, "seg", rtips.get(key), checkable=True); rg.addButton(b); r.addWidget(b, 1); self.rmodeButtons[key] = b
         self.rmodeButtons["zoom"].checked = True; self._rmodeGroup = rg
+        card.hide()                                                           # 右ドラッグの切り替えは画像の上のバーへ
 
         # ---------------- タブ
         tb = qt.QHBoxLayout(); tb.setSpacing(0); v.addLayout(tb)
         self.stack = qt.QWidget(); _stl = qt.QVBoxLayout(self.stack); _stl.setContentsMargins(0, 0, 0, 0); _stl.setSpacing(0); v.addWidget(self.stack)
         self.tabBtns = []; self.pages = []; tg = qt.QButtonGroup(root); tg.setExclusive(True); self._tabGroup = tg
         pages = {}
-        for i, name in enumerate(("表示", "切る", "断面", "計測", "設定")):
+        self._hidden = qt.QWidget(); self._hidden.hide(); pages["計測"] = qt.QVBoxLayout(self._hidden)   # 計測は画像の上のバーへ（ここは使わない部品の置き場）
+        for i, name in enumerate(("表示", "切る", "断面", "設定")):
             b = B(name, "step", None, checkable=True); tg.addButton(b, i); tb.addWidget(b, 1); self.tabBtns.append(b)
             b.connect("clicked()", lambda i=i: self._showTab(i))
             p = qt.QWidget(); pl = qt.QVBoxLayout(p); pl.setContentsMargins(0, 4, 0, 0); pl.setSpacing(8)
@@ -292,7 +431,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.vrBloodButton = B("VR 造影", "vr", "造影された血液を立体に（ボリュームレンダリング）", checkable=True)
         r.addWidget(self.vrTissueButton, 1); r.addWidget(self.vrBloodButton, 1)
 
-        card, c, _ = self._card(P, "レイヤー")
+        card, c, hdL = self._card(P, "レイヤー")
         g = qt.QGridLayout(); g.setHorizontalSpacing(10); g.setVerticalSpacing(4); c.addLayout(g)
         self.layerChecks = {}
         for k, name in enumerate(("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化")):
@@ -301,7 +440,12 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         _it = lambda n, cc: f'<span style="white-space:nowrap"><span style="color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)})">■</span>{n}</span>'
         leg = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND)
         leg2 = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND_WALL)
-        self.legend = Lb("血液: " + leg + "<br>断面: " + leg2, "muted"); self.legend.setWordWrap(True); c.addWidget(self.legend)
+        self.legend = Lb("血液: " + leg + "<br>断面: " + leg2, "muted"); self.legend.setWordWrap(True); c.addWidget(self.legend); self.legend.hide()
+        _sq = lambda cc: f"<span style='color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)}); font-size:15px'>■</span>"
+        _rows = lambda L: "".join(f"<tr><td>{_sq(cc)}</td><td style='padding-left:6px'>{n}</td></tr>" for n, cc in L)
+        self._legendHtml = ("<div style='font-size:12px'><b style='color:#4cc8f0'>血液・血管の色</b><table>" + _rows(LEGEND) + "</table><br>"
+                            "<b style='color:#4cc8f0'>断面（壁）の色</b><table>" + _rows(LEGEND_WALL) + "</table></div>")
+        lgb = B("色の見方", "ghost", "色分けの意味"); hdL.addWidget(lgb); lgb.connect("clicked()", lambda: self._popup(lgb, self._legendHtml))
 
         card, c, _ = self._card(P, "心筋・壁")
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
@@ -364,6 +508,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.layoutButtons["3d"].checked = True; self._layoutGroup = lg
         self.scaleCheck = qt.QCheckBox("目盛り（平行投影）"); self.scaleCheck.checked = True; self.scaleCheck.setToolTip("3D を平行投影にして長さの目盛りを出す（断面にも）")
         c.addWidget(self.scaleCheck)
+        card.hide()                                                           # 画面割りは画像の上のバーへ
 
         card, c, hd = self._card(P, "MPR")
         self.mprResetButton = B("リセット", "ghost", "斜めにした断面を、軸位・矢状断・冠状断に戻す"); hd.addWidget(self.mprResetButton)
@@ -424,7 +569,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         grid.setColumnStretch(1, 1)
         self.buildButton = B("この設定で作り直す", None, "上のレイヤー設定で面を作り直す"); c.addWidget(self.buildButton)
 
-        card, c, _ = self._card(P, "見た目")
+        card, c, _ = self._card(P, "見た目"); self._lookLay = c
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
         self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow(Lb("背景", "muted"), self.bgCombo)
         self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow(Lb("光沢", "muted"), self.glossSlider)
@@ -432,13 +577,22 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow(Lb("視野角", "muted"), self.fovSlider)
         self.ssaoCheck = qt.QCheckBox("陰影で奥行きを出す（環境光遮蔽）"); self.ssaoCheck.checked = True; c.addWidget(self.ssaoCheck)
 
-        card, c, _ = self._card(P, "その他")
+        card, c, _ = self._card(P, "その他"); self._otherLay = c
         self.freePlaneButton = B("自由な切断面を追加", None, "3D 上のハンドルで向き・位置を操作する切断面"); c.addWidget(self.freePlaneButton)
-        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r); r.addWidget(Lb("印", "muted"))
+        r = qt.QHBoxLayout(); r.setSpacing(4); pages["計測"].addLayout(r)
         self.distButton = B("距離", "tool", "Slicer 標準の距離マーカー"); self.angleButton = B("角度", "tool", "Slicer 標準の角度マーカー"); self.curveButton = B("閉曲線", "tool", "Slicer 標準の閉曲線マーカー")
         for b in (self.distButton, self.angleButton, self.curveButton): r.addWidget(b, 1)
         self.saveButton = B("シーンを保存（.mrb）", None, "表示・計測をまとめて 1 ファイルに保存"); c.addWidget(self.saveButton)
 
+        # ---- 置き場所の整理（同じものを 2 か所に置かない。専門的な設定は「設定」へ）
+        r = qt.QHBoxLayout(); r.setSpacing(6); self._sceneLay.addLayout(r)
+        self.aortaButton.setProperty("kind", ""); self.aortaButton.setText("大動脈サイジング  ›"); r.addWidget(self.aortaButton, 1)
+        self.aortaButton.style().unpolish(self.aortaButton); self.aortaButton.style().polish(self.aortaButton)
+        self._lookLay.addWidget(self.scaleCheck)
+        card, c, _ = self._card(pages["設定"], "壁の補正"); c.addWidget(self.fillCheck); c.addWidget(self.synthCheck)
+        self._otherLay.addWidget(self.flyButton)
+        rr = qt.QHBoxLayout(); rr.setSpacing(6); rr.addWidget(Lb("中心線上の位置", "muted")); rr.addWidget(self.flySlider, 1); self._otherLay.addLayout(rr)
+        self._otherLay.addWidget(self.saveButton)
         v.addStretch(1)
         try: t0 = int(qt.QSettings().value("CardiacView/tab", 0))
         except Exception: t0 = 0
@@ -507,16 +661,144 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         for key, b in self.mode4DButtons.items(): b.connect("clicked()", lambda k=key: (self.logic.show4D(True), self.logic.set4DMode(k), self._label4D()))
         self.wl4DButton.connect("clicked()", lambda: (self.logic.resetWindow(), self._status("ウィンドウを最初の値に戻しました")))
         self._t4D = qt.QTimer(); self._t4D.setInterval(100); self._t4D.connect("timeout()", self._tick4D)
+        self._uiTimer = qt.QTimer(); self._uiTimer.setInterval(200); self._uiTimer.connect("timeout()", self._uiTick)
+        self._buildToolbar()
 
     # ---------------------------------------------------------------- 4D
+    # ---------------------------------------------------------------- 画像の上のツールバー（商用ビューアと同じく、よく使う操作は画像のすぐ上）
+    def _buildToolbar(self):
+        mw = slicer.util.mainWindow()
+        for old in mw.findChildren(qt.QToolBar):
+            if old.objectName == "HUCViewSToolBar":
+                try: mw.removeToolBar(old); old.setParent(None); old.deleteLater()
+                except Exception: pass
+        tb = qt.QToolBar("HUCViewS"); tb.setObjectName("HUCViewSToolBar"); tb.setMovable(False); tb.setFloatable(False)
+        tb.setIconSize(qt.QSize(22, 22)); tb.setStyleSheet(TB_STYLE); tb.setContextMenuPolicy(qt.Qt.PreventContextMenu)
+        mw.addToolBarBreak(qt.Qt.TopToolBarArea); mw.addToolBar(qt.Qt.TopToolBarArea, tb); self.tb = tb; self.tbButtons = {}   # 1 段まるごと使う
+        ic = _toolIcons()
+        brand = qt.QLabel(getattr(slicer, "heartviewAppTitle", "HUCViewS")); brand.setObjectName("tbBrand"); tb.addWidget(brand)
+
+        def add(key, text, tip, cb=None, checkable=False, group=None):
+            b = qt.QToolButton(); b.setText(text); b.setToolTip(tip); b.setCheckable(checkable); b.setAutoRaise(True)
+            if key in ic: b.setIcon(qt.QIcon(ic[key]))
+            b.setToolButtonStyle(qt.Qt.ToolButtonTextUnderIcon); b.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+            if group is not None: group.addButton(b)
+            if cb is not None: b.connect("clicked()", cb)
+            tb.addWidget(b); self.tbButtons[key] = b; return b
+
+        g = qt.QButtonGroup(tb); g.setExclusive(True); self._tbModeGroup = g
+        for key, (k, text, tip) in zip(("zoom", "window", "pan", "cut"),
+                                       (("zoom", "拡大", "右ドラッグで拡大・縮小"), ("window", "ウィンドウ", "右ドラッグで濃さ（横=幅、縦=中心）。VR と断面"),
+                                        ("pan", "移動", "右ドラッグで画面を動かす"), ("cut", "切る位置", "右ドラッグで切る面を前後に動かす"))):
+            add("m_" + k, text, tip, lambda k=k: self._setMode(k), True, g).setIcon(qt.QIcon(ic.get(key, "")))
+        tb.addSeparator()
+        msgs = {"line": "始点と終点をクリック", "curve": "点をクリックで追加、終わったら右クリック",
+                "area": "輪郭を囲むようにクリック、終わったら右クリック", "angle": "3 点クリック（2 点目が角の頂点）"}
+        for k, text, tip in (("line", "直線", "2 点クリックで長さ"), ("curve", "カーブ", "曲線に沿った長さ（血管・弁輪など）"),
+                             ("area", "面積", "囲んだ面積と周長"), ("angle", "角度", "3 点で角度")):
+            add(k, text, tip, lambda k=k: (self.logic.startMeasure(k), self._status(msgs[k] + "（3D の面・VR の上、または断面）")))
+        add("clear", "消去", "計測をすべて消す（1 つだけ消す時は、マウスを乗せて Delete）", self.logic.clearRulers)
+        tb.addSeparator()
+        lg = qt.QButtonGroup(tb); lg.setExclusive(True); self._tbLayoutGroup = lg
+        for key, k, text, tip in (("one", "3d", "1画面", "3D だけを大きく"), ("two", "cut", "2画面", "左に 3D、右に今切っている面の断面"),
+                                  ("four", "four", "4画面", "3D ＋ 軸位・矢状断・冠状断")):
+            add("l_" + k, text, tip, lambda k=k: self._setLayoutTb(k), True, lg).setIcon(qt.QIcon(ic.get(key, "")))
+        tb.addSeparator()
+        add("fit", "全体表示", "見えているもの全体が画面に収まるように", lambda: (self.logic._fitParallel(recenter=True), self.logic._view().scheduleRender()))
+        b = add("wl", "W/L", "断面のウィンドウをよく使う値に")
+        m = qt.QMenu(b); m.setStyleSheet(TB_STYLE)
+        for name, w, l in WL_PRESETS:
+            a = m.addAction(f"{name}　　W {w} / L {l}")
+            a.connect("triggered()", lambda w=w, l=l, name=name: (self.logic.applyWL(w, l), self._status(f"断面のウィンドウ: {name}（W {w} / L {l}）")))
+        m.addSeparator(); a = m.addAction("最初の値に戻す"); a.connect("triggered()", self._wlReset)
+        b.setMenu(m); b.setPopupMode(qt.QToolButton.InstantPopup)
+        add("reset", "戻す", "VR と断面のウィンドウを最初の値に戻す", self._wlReset)
+        sp = qt.QWidget(); sp.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred); tb.addWidget(sp)
+        add("camera", "画像保存", "今の画面を PNG で保存", self._savePNG)
+        add("help", "操作", "マウス・キーの操作の一覧", lambda: self._showHelp(self.tbButtons["help"]))
+        tb.hide()
+
+    def _setMode(self, k):
+        self.logic.setRightMode(k)
+        b = self.rmodeButtons.get(k)
+        if b is not None: b.checked = True
+
+    def _setLayoutTb(self, k):
+        b = self.layoutButtons.get(k)
+        if b is not None: b.checked = True
+        self.logic.setLayout(k)
+
+    def _wlReset(self):
+        self.logic.resetWindow(); self._status("ウィンドウを最初の値に戻しました")
+
+    def _savePNG(self):
+        try:
+            import HeartView
+            p = HeartView.HeartViewLogic().savePNG(); self._status(f"画像を保存しました: {p}")
+        except Exception as e:
+            self._status(f"画像の保存に失敗しました: {e}")
+
+    def _showHelp(self, anchor):
+        self._popup(anchor, HELP_HTML)
+
+    def _popup(self, anchor, html):
+        p = qt.QLabel(html); p.setWindowFlags(qt.Qt.Popup); p.setTextFormat(qt.Qt.RichText)
+        p.setStyleSheet("QLabel{background:#1e2128; color:#e6e8ec; border:1px solid #343a46; border-radius:8px; padding:12px 14px;}")
+        p.adjustSize()
+        g = anchor.mapToGlobal(qt.QPoint(anchor.width, anchor.height + 4))
+        p.move(max(0, g.x() - p.width), g.y()); p.show(); self._helpPop = p
+
+    def _tbSync(self):
+        """ツールバーの押された状態を、今のモード・画面割りに合わせる"""
+        L = self.logic; tbb = getattr(self, "tbButtons", {})
+        b = tbb.get("m_" + getattr(L, "rmode", "zoom"))
+        if b is not None and not b.checked: b.checked = True
+        b = tbb.get("l_" + getattr(L, "layoutKind", "3d"))
+        if b is not None and not b.checked: b.checked = True
+
+    def cleanup(self):
+        """モジュールを読み直す時: タイマーを止め、ツールバーと画面上の表示を片づける"""
+        for t in ("_uiTimer", "_t4D"):
+            try: getattr(self, t).stop()
+            except Exception: pass
+        try: _hud().show(False)
+        except Exception: pass
+        try:
+            mw = slicer.util.mainWindow(); mw.removeToolBar(self.tb); self.tb.setParent(None); self.tb.deleteLater()
+        except Exception: pass
+
+    def _uiTick(self):
+        if getattr(self, "tb", None) is None: return
+        try:
+            if slicer.util.selectedModule() != "CardiacView": return
+            self._tbSync(); self.logic._hudUpdate()
+            sb = getattr(self, "_seqBar", None)
+            if sb is None:
+                sb = self._seqBar = next((t for t in slicer.util.mainWindow().findChildren(qt.QToolBar) if t.objectName == "SequenceBrowserToolBar"), False)
+            if sb and sb.visible: sb.hide()
+        except Exception as e:
+            if "destroyed" in str(e): self._uiTimer.stop()                    # 古い画面（読み直し前）のタイマー
+            else: print("ui tick:", e)
+
     def enter(self):
         try: self._sync4D()
         except Exception as e: print("4D sync:", e)
+        try:
+            if getattr(self, "tb", None) is not None: self.tb.show()
+            _hud().show(True); self.logic._applyChrome()
+            self._uiTimer.start(); self._uiTick()
+        except Exception as e: print("ui enter:", e)
 
     def exit(self):
         try:                                                                  # ほかの画面（大動脈サイジングなど）へ行く時は 4D を終える（動く VR が残らない）
             if self.play4DButton.checked: self.play4DButton.checked = False
             if getattr(self.logic, "on4D", False): self.logic.show4D(False)
+        except Exception: pass
+        try:
+            if getattr(self, "tb", None) is not None: self.tb.hide()
+            self._uiTimer.stop(); _hud().show(False)
+            if not getattr(slicer, "heartviewAppMode", False):                # Slicer の通常画面では 3D のバーを戻す
+                slicer.app.layoutManager().threeDWidget(0).threeDController().setVisible(True)
         except Exception: pass
 
     def _sync4D(self):
@@ -531,7 +813,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         lab = labs[i] if i < len(labs) and labs[i] else f"{i + 1}"
         self.phaseLabel.setText(f"{lab}  ({i + 1}/{n})")
         try:
-            L._setUL("1_4d", f"4D  {lab.replace('位相', 'Phase')}  ({i + 1}/{n})" if getattr(L, "on4D", False) else "")
+            L._setUL("1_4d", f"<span style='color:#f5cd5f'><b>4D</b>　{lab}（{i + 1}/{n}）</span>" if getattr(L, "on4D", False) else "")
         except Exception: pass
 
     def _onLayerCheck(self, name, on):
@@ -2539,8 +2821,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if getattr(self, "vrOn", False) and self.vrWin is not None:
                 c0, w0 = self.vrWin
                 lo, hi = self._vrHU(c0 - w0 / 2), self._vrHU(c0 + w0 / 2)
-                ca.SetText(3, f"VR  W {hi - lo:.0f} / L {(lo + hi) / 2:.0f}\n{lo:.0f} - {hi:.0f} HU")
-            else: ca.SetText(3, "")
+                self._setUR(f"<b>VR</b>　W {hi - lo:.0f} / L {(lo + hi) / 2:.0f}\n<span style='color:#9aa3ad'>{lo:.0f} – {hi:.0f} HU</span>")
+            else: self._setUR("")
             ca.GetTextProperty().SetColor(1, 0.9, 0.5); v.scheduleRender()
         except Exception: pass
 
@@ -2846,10 +3128,73 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _setUL(self, key, text):
         """左上の表示（4D の位相・一言メッセージ）をまとめて出す"""
         d = self.__dict__.setdefault("_ulTexts", {}); d[key] = text or ""
-        try:
-            ca = self._view().cornerAnnotation(); ca.SetText(2, "\n".join(t for k, t in sorted(d.items()) if t))
-            ca.GetTextProperty().SetColor(1.0, 0.88, 0.45); self._view().scheduleRender()
+        _hud().set("3d", "tl", "<br>".join(t for k, t in sorted(d.items()) if t))
+        try: self._view().cornerAnnotation().SetText(2, "")
         except Exception: pass
+
+    def _setUR(self, text):
+        """右上の表示（ウィンドウの値）"""
+        _hud().set("3d", "tr", (text or "").replace("\n", "<br>"))
+        try: self._view().cornerAnnotation().SetText(3, ""); self._view().scheduleRender()
+        except Exception: pass
+
+    SLICE_JA = {"Red": "軸位", "Yellow": "矢状断", "Green": "冠状断"}
+
+    def applyWL(self, w, l):
+        """断面のウィンドウを決まった値に（いま断面に出ている CT すべて）"""
+        lm = slicer.app.layoutManager(); done = set()
+        vols = [getattr(self, "sourceVolume", None)]
+        for nm in lm.sliceViewNames():
+            try:
+                cn = lm.sliceWidget(nm).mrmlSliceCompositeNode(); vols.append(slicer.mrmlScene.GetNodeByID(cn.GetBackgroundVolumeID() or ""))
+            except Exception: pass
+        for v in vols:
+            d = v.GetDisplayNode() if v is not None else None
+            if d is None or d.GetID() in done: continue
+            d.SetAutoWindowLevel(False); d.SetWindowLevel(float(w), float(l)); done.add(d.GetID())
+        self._mprWL = True
+
+    def _applyChrome(self):
+        """断面の上の Slicer のバー（細かい数字・ピン）を隠し、日本語の小さな表示に置き換える"""
+        lm = slicer.app.layoutManager()
+        for nm in ("Red", "Yellow", "Green"):
+            w = lm.sliceWidget(nm)
+            if w is not None:
+                try: w.sliceController().setVisible(False)
+                except Exception: pass
+        try: lm.threeDWidget(0).threeDController().setVisible(False)
+        except Exception: pass
+        try:                                                                  # 4D の再生は左のパネルで操作するので、Slicer の再生バーは隠す
+            for t in slicer.util.mainWindow().findChildren(qt.QToolBar):
+                if t.objectName == "SequenceBrowserToolBar": t.hide()
+        except Exception: pass
+        self._hudUpdate()
+
+    def _hudUpdate(self):
+        h = _hud(); lm = slicer.app.layoutManager(); kind = getattr(self, "layoutKind", "3d")
+        for nm in ("Red", "Yellow", "Green"):
+            w = lm.sliceWidget(nm)
+            vis = w is not None and kind in ("four", "cut") and w.isVisible()
+            if not vis:
+                for pos in ("tl", "L", "R", "T", "B"): h.set(nm, pos, None)
+                continue
+            try:
+                M = w.mrmlSliceNode().GetSliceToRAS()
+                x = np.array([M.GetElement(i, 0) for i in range(3)]); y = np.array([M.GetElement(i, 1) for i in range(3)])
+                name = "切断面" if (kind == "cut" and nm == "Red") else self.SLICE_JA[nm]
+                if kind == "four" and (np.abs(x).max() < 0.995 or np.abs(y).max() < 0.995): name += "（斜め）"
+                wl = ""
+                cn = w.mrmlSliceCompositeNode(); vol = slicer.mrmlScene.GetNodeByID(cn.GetBackgroundVolumeID() or "")
+                d = vol.GetDisplayNode() if vol is not None else None
+                if d is not None: wl = f"　<span style='color:#9aa3ad'>W {d.GetWindow():.0f} / L {d.GetLevel():.0f}</span>"
+                slab = getattr(self, "slabMM", 0) or 0
+                if slab: wl += f"　<span style='color:#9aa3ad'>MIP {slab:g} mm</span>"
+                h.set(nm, "tl", f"<b>{name}</b>{wl}")
+                let = lambda v: ("RL", "AP", "SI")[int(np.argmax(np.abs(v)))][0 if v[int(np.argmax(np.abs(v)))] > 0 else 1]
+                h.set(nm, "R", let(x)); h.set(nm, "L", let(-x)); h.set(nm, "T", let(y)); h.set(nm, "B", let(-y))
+            except Exception as e: print("hud:", e)
+        h.placeAll()
+
 
     def _viewSizeWatch(self):
         """3D 画面の大きさが変わったら（画面割り・パネルの開閉・ウィンドウの大きさ）: 細い向きの見える範囲を保ち、全体図と文字を画面に合わせる"""
@@ -2910,7 +3255,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try:
             names = dict(self.RMODES); ca = self._view().cornerAnnotation()
             ca.SetText(1, "")
-            self._setUL("2_rmode", f"右ドラッグ: {names.get(getattr(self, 'rmode', 'zoom'), '拡大')}".replace("右ドラッグ", "R-drag").replace("拡大", "Zoom").replace("ウィンドウ", "Window").replace("移動", "Pan").replace("切る位置", "Cut"))
+            self._setUL("2_rmode", "")                                          # 今の機能は上のバーで分かるので画面には出さない（すっきり）
         except Exception: pass
 
     def _pan(self, x0, y0, x1, y1, cam0):
@@ -2961,7 +3306,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self.setOutlines2D(getattr(self, "outlines2D", False))
             for nm in ("Red", "Yellow", "Green"):
                 w = lm.sliceWidget(nm)
-                if w is not None: w.sliceController().setVisible(True)
+                if w is not None: w.sliceController().setVisible(False)
             self._sliceInteraction(kind)
         try:                                                                  # 4 画面の 3D に 3 断面の交点（今細かく見ている所）
             mk = getattr(slicer, "_cvMprMark", None)
@@ -2979,7 +3324,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if reg: reg["v"] = 0                                                  # 断面ビューが増えたので付け直す
         self.installMouse(); self._installPerfMon()
         self._viewSizeWatch()
-        qt.QTimer.singleShot(250, lambda: (self._fitParallel(recenter=True), self._view().scheduleRender()))
+        qt.QTimer.singleShot(250, lambda: (self._fitParallel(recenter=True), self._view().scheduleRender(), self._hudUpdate()))
 
     def _cutFov(self):
         lo, hi = self._visibleBounds() if self.bounds is not None else (np.zeros(3), np.ones(3) * 200)
@@ -3089,6 +3434,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     def setSlab(self, mm):
         """断面に厚み（最大値投影 MIP）。0 = なし"""
+        self.slabMM = mm
         for nm in ("Red", "Yellow", "Green"):
             w = slicer.app.layoutManager().sliceWidget(nm)
             if w is None: continue
@@ -3419,7 +3765,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         for x, col in mono(cols): ctf.AddRGBPoint(x, *col)
         try:
             if getattr(self, "on4D", False):
-                ca = self._view().cornerAnnotation(); ca.SetText(3, f"4D  W {w0:.0f} / L {c0:.0f}\n{lo:.0f} - {hi:.0f} HU"); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
+                self._setUR(f"<b>4D</b>　W {w0:.0f} / L {c0:.0f}\n<span style='color:#9aa3ad'>{lo:.0f} – {hi:.0f} HU</span>")
         except Exception: pass
 
     def set4DMode(self, mode):
@@ -3567,7 +3913,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         inter = slicer.app.applicationLogic().GetInteractionNode()
         placing = inter.GetCurrentInteractionMode() == inter.Place
         if b == "R" and mode == "window" and not (getattr(self, "vrOn", False) or getattr(self, "on4D", False)):
-            self._flash("Window: VR or 2D views only"); mode = "zoom"          # 面の表示にはウィンドウが無い → いつもの拡大
+            self._flash("ウィンドウは VR か断面で使えます"); mode = "zoom"          # 面の表示にはウィンドウが無い → いつもの拡大
         if b == "R" and mode == "cut" and self.cutAxis is None and not placing:
             self.setCut("VIEW", 0.0); self._syncCutUI()                          # まだ切っていなければ「正面から」で切り始める
         if b == "R" and not self._btn["L"] and mode != "zoom" and not placing:          # 右ドラッグの機能（ボタンで切替）
@@ -3687,7 +4033,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if sa is not None and hasattr(sa, "deleteMeasure"): sa.deleteMeasure(target)
         else: slicer.mrmlScene.RemoveNode(target)
         self.rulers = [n for n in getattr(self, "rulers", []) if slicer.mrmlScene.IsNodePresent(n)]
-        self._flash(f"Deleted: {name}")
+        self._flash(f"消しました：{name}")
         try:
             for i, t in (getattr(slicer, "_cvMouse", None) or {}).get("tags", []):
                 if i is it:
