@@ -74,235 +74,377 @@ class CardiacView(ScriptedLoadableModule):
         parent.acknowledgementText = "Built on 3D Slicer, VMTK, TotalSegmentator."
 
 
+CV_STYLE = """
+QWidget#cvRoot { background:#15171c; }
+QWidget#cvRoot QLabel { color:#e6e8ec; background:transparent; font-size:12px; }
+QWidget#cvRoot QLabel[role="muted"] { color:#8a909b; font-size:11px; }
+QWidget#cvRoot QLabel[role="h"] { color:#f2f4f7; font-size:12px; font-weight:bold; }
+QWidget#cvRoot QLabel[role="title"] { color:#ffffff; font-size:16px; font-weight:bold; }
+QWidget#cvRoot QLabel[role="accent"] { color:#4cc8f0; font-size:12px; font-weight:bold; }
+QWidget#cvRoot QLabel[role="colh"] { color:#7d8590; font-size:10px; }
+QWidget#cvRoot QFrame[role="card"] { background:#1e2128; border:1px solid #2b3039; border-radius:10px; }
+QWidget#cvRoot QPushButton { background:#262a33; color:#e6e8ec; border:1px solid #343a46; border-radius:7px; padding:5px 8px; font-size:12px; }
+QWidget#cvRoot QPushButton:hover { background:#2e333e; border-color:#4a5263; }
+QWidget#cvRoot QPushButton:pressed { background:#363c49; }
+QWidget#cvRoot QPushButton:checked { background:#173f57; border:1px solid #4cc8f0; color:#ffffff; font-weight:bold; }
+QWidget#cvRoot QPushButton:disabled { color:#5d636e; border-color:#2a2e36; }
+QWidget#cvRoot QPushButton[kind="primary"] { background:#2f7bf6; border:1px solid #2f7bf6; color:white; font-weight:bold; padding:8px 12px; font-size:13px; }
+QWidget#cvRoot QPushButton[kind="primary"]:hover { background:#4a8dff; }
+QWidget#cvRoot QPushButton[kind="primary"]:disabled { background:#2a3a55; border-color:#2a3a55; color:#8a909b; }
+QWidget#cvRoot QPushButton[kind="ghost"] { background:transparent; border:none; color:#8a909b; padding:4px 6px; }
+QWidget#cvRoot QPushButton[kind="ghost"]:hover { color:#ffffff; }
+QWidget#cvRoot QPushButton[kind="step"] { background:transparent; border:none; border-bottom:2px solid #2b3039; border-radius:0; color:#8a909b; font-weight:bold; padding:7px 2px; }
+QWidget#cvRoot QPushButton[kind="step"]:hover { color:#cfd3da; }
+QWidget#cvRoot QPushButton[kind="step"]:checked { color:#ffffff; border-bottom:2px solid #4cc8f0; background:transparent; }
+QWidget#cvRoot QPushButton[kind="seg"] { border-radius:6px; padding:5px 4px; }
+QWidget#cvRoot QPushButton[kind="tool"] { padding:6px 2px; }
+QWidget#cvRoot QPushButton[kind="vr"] { padding:5px 4px; }
+QWidget#cvRoot QPushButton[kind="vr"]:checked { background:#4a2a20; border:1px solid #e8916f; color:#ffffff; }
+QWidget#cvRoot QPushButton[kind="play"] { font-weight:bold; font-size:13px; }
+QWidget#cvRoot QPushButton[kind="play"]:checked { background:#2f7bf6; border:1px solid #2f7bf6; }
+QWidget#cvRoot QCheckBox { color:#e6e8ec; background:transparent; spacing:6px; font-size:12px; }
+QWidget#cvRoot QCheckBox:disabled { color:#5d636e; }
+QWidget#cvRoot QCheckBox::indicator { width:14px; height:14px; border:1px solid #5a6273; border-radius:4px; background:#262a33; }
+QWidget#cvRoot QCheckBox::indicator:hover { border-color:#4cc8f0; }
+QWidget#cvRoot QCheckBox::indicator:checked { background:#2f7bf6; border:1px solid #4a8dff; }
+QWidget#cvRoot QAbstractSpinBox::up-button, QWidget#cvRoot QAbstractSpinBox::down-button { subcontrol-origin:border; width:16px; background:#2e333e; border:none; }
+QWidget#cvRoot QAbstractSpinBox::up-button { subcontrol-position:top right; border-top-right-radius:6px; }
+QWidget#cvRoot QAbstractSpinBox::down-button { subcontrol-position:bottom right; border-bottom-right-radius:6px; }
+QWidget#cvRoot QAbstractSpinBox::up-button:hover, QWidget#cvRoot QAbstractSpinBox::down-button:hover { background:#3a404c; }
+QWidget#cvRoot QComboBox::drop-down { border:none; width:18px; }
+QWidget#cvRoot QComboBox { background:#262a33; color:#e6e8ec; border:1px solid #343a46; border-radius:7px; padding:4px 8px; font-size:12px; }
+QWidget#cvRoot QComboBox QAbstractItemView { background:#1e2128; color:#e6e8ec; selection-background-color:#1f4d69; }
+QWidget#cvRoot QSpinBox, QWidget#cvRoot QDoubleSpinBox, QWidget#cvRoot QLineEdit { background:#262a33; color:#e6e8ec; border:1px solid #343a46; border-radius:6px; padding:2px 4px; selection-background-color:#1f4d69; font-size:12px; }
+QWidget#cvRoot QSlider::groove:horizontal { height:4px; background:#343a46; border-radius:2px; }
+QWidget#cvRoot QSlider::sub-page:horizontal { background:#2f7bf6; border-radius:2px; }
+QWidget#cvRoot QSlider::handle:horizontal { background:#e6e8ec; width:14px; height:14px; margin:-5px 0; border-radius:7px; }
+QWidget#cvRoot QScrollBar:vertical { background:transparent; width:8px; }
+QWidget#cvRoot QScrollBar::handle:vertical { background:#3a404c; border-radius:4px; min-height:24px; }
+QWidget#cvRoot QScrollBar::add-line, QWidget#cvRoot QScrollBar::sub-line { height:0; }
+"""
+
+def _iconCSS():
+    """スピン・コンボの矢印とチェックの印（SVG を一時フォルダに書いて使う）"""
+    try:
+        d = os.path.join(qt.QDir.tempPath(), "hucviews_ui"); os.makedirs(d, exist_ok=True)
+        svg = {"up": "<path d='M1 6 L5 1 L9 6' stroke='#c3c8d1' stroke-width='1.6' fill='none'/>",
+               "down": "<path d='M1 1 L5 6 L9 1' stroke='#c3c8d1' stroke-width='1.6' fill='none'/>",
+               "check": "<path d='M2 6 L5 9 L10 2' stroke='#ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/>"}
+        size = {"up": (10, 7), "down": (10, 7), "check": (12, 11)}
+        u = {}
+        for k, body in svg.items():
+            w, h = size[k]; f = os.path.join(d, k + ".svg")
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(f"<svg xmlns='http://www.w3.org/2000/svg' width='{w}' height='{h}' viewBox='0 0 {w} {h}'>{body}</svg>")
+            u[k] = f.replace("\\", "/")
+        return (f"QWidget#cvRoot QAbstractSpinBox::up-arrow {{ image:url({u['up']}); width:10px; height:7px; }}\n"
+                f"QWidget#cvRoot QAbstractSpinBox::down-arrow {{ image:url({u['down']}); width:10px; height:7px; }}\n"
+                f"QWidget#cvRoot QComboBox::down-arrow {{ image:url({u['down']}); width:10px; height:7px; }}\n"
+                f"QWidget#cvRoot QCheckBox::indicator:checked {{ image:url({u['check']}); }}\n")
+    except Exception as e:
+        print("ui icons:", e); return ""
+
+
+SC_STYLE = ("QScrollArea{background:#15171c; border:none}"
+            "QScrollBar:vertical{background:#15171c; width:10px; margin:0}"
+            "QScrollBar::handle:vertical{background:#3a404c; border-radius:4px; min-height:30px; margin:2px}"
+            "QScrollBar::handle:vertical:hover{background:#4a5263}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0}"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{background:none}")
+
+HELP_TEXT = ("3D 画面の操作\n"
+             "・左ドラッグ: 回転\n"
+             "・右ドラッグ: 「右ドラッグ」で選んだ機能（拡大・ウィンドウ・移動・切る位置）\n"
+             "・中ボタンドラッグ: 移動\n"
+             "・ホイール: 切る位置（1 mm、Shift で 5 mm）。切っていない時は拡大縮小\n"
+             "・Ctrl+ホイール: 拡大縮小\n"
+             "・左右ボタン同時ドラッグ: VR のウィンドウ\n"
+             "4画面\n"
+             "・Shift+マウス移動: 3 断面の十字が追従\n"
+             "・断面の左ドラッグ: ウィンドウ\n"
+             "・ダブルクリック: 1 画面に拡大")
+
+
 # =============================================================================== Widget
 class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
-        _outer = self.layout; _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame)   # パネルを狭くしても使える（横は必要ならスクロール）
-        _inner = qt.QWidget(); self.layout = qt.QVBoxLayout(_inner); self.layout.setContentsMargins(0, 0, 0, 0); _sc.setWidget(_inner); _outer.addWidget(_sc)
         self.logic = CardiacViewLogic()
         self.layerRows = []
+        app = getattr(slicer, "heartviewAppMode", False)
+        B, Lb = self._btn, self._lab
 
-        # ================= A. かんたん操作
-        sec = ctk.ctkCollapsibleButton(); sec.text = "かんたん操作"; self.layout.addWidget(sec)
-        v = qt.QVBoxLayout(sec)
+        root = qt.QWidget(); root.setObjectName("cvRoot"); root.setStyleSheet(CV_STYLE + _iconCSS()); root.setAttribute(qt.Qt.WA_StyledBackground, True)
+        _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame); _sc.setWidget(root)
+        _sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)                      # 横スクロールなし（はみ出さない配置にする）
+        _sc.setStyleSheet(SC_STYLE)
+        self.layout.addWidget(_sc); self.layout.setContentsMargins(0, 0, 0, 0)
+        v = qt.QVBoxLayout(root); v.setContentsMargins(10, 8, 10, 10); v.setSpacing(8); self.root = root
 
+        # ---------------- ヘッダー
+        h = qt.QHBoxLayout(); h.setSpacing(4); v.addLayout(h)
+        if app:
+            back = B("‹ 入口", "ghost", "症例の読み込み（入口）へ戻る"); h.addWidget(back)
+            back.connect("clicked()", lambda: slicer.util.selectModule("HeartView"))
+        h.addWidget(Lb("CardiacView", "title")); h.addStretch(1)
+        self.helpButton = B("？ 操作", "ghost", HELP_TEXT); h.addWidget(self.helpButton)
+        self.helpButton.connect("clicked()", lambda: qt.QToolTip.showText(qt.QCursor.pos(), HELP_TEXT))
+        if app:
+            png = B("画像保存", "ghost", "今の画面を PNG で保存"); h.addWidget(png)
+            def _png():
+                import HeartView
+                p = HeartView.HeartViewLogic().savePNG(); self._status(f"画像を保存しました: {p}")
+            png.connect("clicked()", _png)
+
+        # ---------------- 症例（CT・作成・状態）
+        card, c, _ = self._card(v)
+        r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r)
+        r.addWidget(Lb("CT", "muted"))
         self.volumeSelector = slicer.qMRMLNodeComboBox()
         self.volumeSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
         self.volumeSelector.addEnabled = False; self.volumeSelector.removeEnabled = False
         self.volumeSelector.noneEnabled = False; self.volumeSelector.showHidden = False
         self.volumeSelector.setMRMLScene(slicer.mrmlScene)
-        row = qt.QHBoxLayout(); row.addWidget(qt.QLabel("CT:")); row.addWidget(self.volumeSelector, 1)
-        self.loadButton = qt.QPushButton("開く…"); row.addWidget(self.loadButton)
-        self.dicomButton = qt.QPushButton("DICOMフォルダ…"); self.dicomButton.setToolTip("1シリーズ分の DICOM フォルダを選ぶ（院内 PC 内で読み込むだけ。外部送信なし）"); row.addWidget(self.dicomButton)
-        v.addLayout(row)
+        self.volumeSelector.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed); self.volumeSelector.setMinimumWidth(80)
+        r.addWidget(self.volumeSelector, 1)
+        self.loadButton = B("開く", None, "ファイルを開く（.nrrd / .nii / .mrb など）"); r.addWidget(self.loadButton)
+        self.dicomButton = B("DICOM", None, "1シリーズ分の DICOM フォルダを選ぶ（院内 PC 内で読み込むだけ。外部送信なし）"); r.addWidget(self.dicomButton)
+        self.quickButton = B("3D を自動で作る", "primary", "AI で心臓・血管を分けて 3D を作ります。初回 約5〜8分・2回目から約1分"); c.addWidget(self.quickButton)
+        self.statusLabel = Lb("CT を選んで「3D を自動で作る」を押してください。", "muted"); self.statusLabel.setWordWrap(True); c.addWidget(self.statusLabel)
+        if app:
+            for b in (self.loadButton, self.dicomButton): b.hide()
+            self.quickButton.setText("3D を作り直す（同じ CT）")
 
-        self.quickButton = qt.QPushButton("① 3D を自動で作る（初回 約5〜8分・2回目から約1分）")
-        self.quickButton.setStyleSheet("font-weight:bold; padding:8px; font-size:13px"); v.addWidget(self.quickButton)
-        self.statusLabel = qt.QLabel(""); self.statusLabel.setStyleSheet("color:#777"); self.statusLabel.setWordWrap(True); v.addWidget(self.statusLabel)
-
-        # 見たいもの（ワンクリックで切り替え。最後に選んだものが次の症例の最初の表示になる）
-        srow = qt.QHBoxLayout(); lab = qt.QLabel("見たいもの:"); lab.setStyleSheet("font-weight:bold"); srow.addWidget(lab)
+        # ---------------- 見たいもの（ワンクリック。最後に選んだものが次の症例の最初の表示）
+        card, c, _ = self._card(v, "見たいもの", "次の症例もこの表示から")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
         self.sceneButtons = {}
         for key, text, tip in (("heart", "心臓", "四腔断面で心臓の中を見る"),
-                               ("aorta", "大動脈", "大動脈（弓部の分枝・腸骨動脈まで、撮影範囲の分）を切らずに全体で見る。人工物・石灰化も表示"),
-                               ("vessels", "血管すべて", "動脈・静脈・肺血管をすべて切らずに見る"),
-                               ("body", "骨と血管", "骨と血管を一緒に（位置関係・術前のオリエンテーション）")):
-            b = qt.QPushButton(text); b.setCheckable(True); b.setToolTip(tip); b.setMinimumHeight(30)
-            b.setStyleSheet("QPushButton { font-size:13px; padding:4px 10px } QPushButton:checked { background:#2f6db5; color:white; font-weight:bold }")
-            srow.addWidget(b, 1); self.sceneButtons[key] = b
-        v.addLayout(srow)
+                               ("aorta", "大動脈", "大動脈（弓部分枝〜腸骨動脈、撮影範囲の分）を切らずに全体で。人工物・石灰化も表示"),
+                               ("vessels", "全血管", "動脈・静脈・肺血管をすべて切らずに見る"),
+                               ("body", "骨＋血管", "骨と血管を一緒に（位置関係・術前のオリエンテーション）")):
+            b = B(text, "seg", tip, checkable=True); b.setMinimumHeight(30); r.addWidget(b, 1); self.sceneButtons[key] = b
 
-        # 4D（同じ撮影の位相が 2 つ以上ある時だけ出る）
-        self.box4D = qt.QGroupBox("4D（動く心臓）"); g4 = qt.QGridLayout(self.box4D); v.addWidget(self.box4D)
-        self.play4DButton = qt.QPushButton("▶ 再生"); self.play4DButton.setCheckable(True); self.play4DButton.setMinimumHeight(30)
-        self.play4DButton.setStyleSheet("QPushButton { font-size:13px; font-weight:bold } QPushButton:checked { background:#2f6db5; color:white }")
-        self.play4DButton.setToolTip("位相を順に表示（VR と断面が動く）。もう一度押すと止まる。切る・回す・4画面はそのまま使える")
-        g4.addWidget(self.play4DButton, 0, 0)
+        # ---------------- 4D（同じ撮影の位相が 2 つ以上ある時だけ出る）
+        self.box4D, c, hd = self._card(v, "4D", None)
+        self.phaseLabel = Lb("", "accent"); hd.addWidget(self.phaseLabel)
+        r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r)
+        self.play4DButton = B("▶ 再生", "play", "位相を順に表示（VR と断面が動く）。もう一度押すと止まる。切る・回す・4画面はそのまま使える", checkable=True)
+        self.play4DButton.setMinimumWidth(78); r.addWidget(self.play4DButton)
         self.phaseSlider = ctk.ctkSliderWidget(); self.phaseSlider.decimals = 0; self.phaseSlider.singleStep = 1; self.phaseSlider.minimum = 0; self.phaseSlider.maximum = 1
-        self.phaseSlider.setToolTip("位相を 1 つずつ見る"); g4.addWidget(self.phaseSlider, 0, 1)
-        self.phaseLabel = qt.QLabel(""); self.phaseLabel.setStyleSheet("font-weight:bold; color:#2f6db5"); g4.addWidget(self.phaseLabel, 0, 2)
-        g4.addWidget(qt.QLabel("速さ"), 1, 0)
-        self.fpsSpin = qt.QDoubleSpinBox(); self.fpsSpin.setRange(0.5, 30.0); self.fpsSpin.setSingleStep(1.0); self.fpsSpin.setDecimals(1); self.fpsSpin.setSuffix(" 位相/秒")
+        try: self.phaseSlider.spinBoxVisible = False
+        except Exception: pass
+        self.phaseSlider.setToolTip("位相を 1 つずつ見る"); r.addWidget(self.phaseSlider, 1)
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.mode4DButtons = {}; mg4 = qt.QButtonGroup(self.box4D); mg4.setExclusive(True)
+        for key, lab, tip in (("blood", "造影", "造影された血液を明るく。心臓の外形や、切った時の内腔の大きさの変化を見る"),
+                              ("tissue", "心内構造", "造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。切って使うと見やすい")):
+            b = B(lab, "vr", tip, checkable=True); mg4.addButton(b); r.addWidget(b); self.mode4DButtons[key] = b
+        self.mode4DButtons["blood"].checked = True; self._mode4DGroup = mg4
+        r.addStretch(1)
+        self.fpsSpin = qt.QDoubleSpinBox(); self.fpsSpin.setRange(0.5, 30.0); self.fpsSpin.setSingleStep(1.0); self.fpsSpin.setDecimals(1); self.fpsSpin.setSuffix(" /秒")
+        self.fpsSpin.setToolTip("再生の速さ（1 秒あたりの位相数）")
         try: self.fpsSpin.setValue(float(qt.QSettings().value("CardiacView/fps4D", 8.0)))
         except Exception: self.fpsSpin.setValue(8.0)
-        g4.addWidget(self.fpsSpin, 1, 1)
-        self.end4DButton = qt.QPushButton("面の 3D に戻る"); self.end4DButton.setToolTip("4D をやめて、AI で作った面・色分け VR の表示に戻る"); g4.addWidget(self.end4DButton, 1, 2)
-        mrow4 = qt.QHBoxLayout(); mrow4.addWidget(qt.QLabel("見え方"))
-        self.mode4DButtons = {}; mg4 = qt.QButtonGroup(self.box4D); mg4.setExclusive(True)
-        for key, lab, tip in (("blood", "造影（形・内腔）", "造影された血液を明るく。心臓の外形や、切った時の内腔の大きさの変化を見る"),
-                              ("tissue", "心内構造（弁・壁）", "造影された血液を透明にして、弁・乳頭筋・壁の動きを見る。切って使うと見やすい")):
-            b = qt.QPushButton(lab); b.setCheckable(True); b.setToolTip(tip); mg4.addButton(b); mrow4.addWidget(b); self.mode4DButtons[key] = b
-            b.setStyleSheet("QPushButton:checked { background:#c9785f; color:white; font-weight:bold }")
-        self.mode4DButtons["blood"].checked = True; self._mode4DGroup = mg4
-        self.wl4DButton = qt.QPushButton("ウィンドウを戻す"); self.wl4DButton.setToolTip("4D の VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す")
-        mrow4.addWidget(self.wl4DButton)
-        g4.addLayout(mrow4, 2, 0, 1, 3)
+        r.addWidget(self.fpsSpin)
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.wl4DButton = B("ウィンドウを戻す", None, "4D の VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す"); r.addWidget(self.wl4DButton)
+        r.addStretch(1)
+        self.end4DButton = B("4D を終了", None, "4D をやめて、AI で作った面・色分け VR の表示に戻る"); r.addWidget(self.end4DButton)
         self.box4D.hide()
 
-        box = qt.QGroupBox("② 切る"); g = qt.QGridLayout(box); v.addWidget(box)
+        # ---------------- 右ドラッグ（マウスの機能）
+        card, c, hd = self._card(v, "右ドラッグ", None)
+        self.wlResetButton = B("ウィンドウを戻す", "ghost", "VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す"); hd.addWidget(self.wlResetButton)
+        self.wlResetButton.connect("clicked()", lambda: self.logic.resetWindow())
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.rmodeButtons = {}; rg = qt.QButtonGroup(card); rg.setExclusive(True)
+        rtips = {"zoom": "右ドラッグで拡大・縮小", "window": "右ドラッグでウィンドウ（横=幅、縦=中心）", "pan": "右ドラッグで画面を移動", "cut": "右ドラッグで切る位置を動かす"}
+        for key, lab in CardiacViewLogic.RMODES:
+            b = B(lab, "seg", rtips.get(key), checkable=True); rg.addButton(b); r.addWidget(b, 1); self.rmodeButtons[key] = b
+        self.rmodeButtons["zoom"].checked = True; self._rmodeGroup = rg
+
+        # ---------------- タブ
+        tb = qt.QHBoxLayout(); tb.setSpacing(0); v.addLayout(tb)
+        self.stack = qt.QWidget(); _stl = qt.QVBoxLayout(self.stack); _stl.setContentsMargins(0, 0, 0, 0); _stl.setSpacing(0); v.addWidget(self.stack)
+        self.tabBtns = []; self.pages = []; tg = qt.QButtonGroup(root); tg.setExclusive(True); self._tabGroup = tg
+        pages = {}
+        for i, name in enumerate(("表示", "切る", "断面", "計測", "設定")):
+            b = B(name, "step", None, checkable=True); tg.addButton(b, i); tb.addWidget(b, 1); self.tabBtns.append(b)
+            b.connect("clicked()", lambda i=i: self._showTab(i))
+            p = qt.QWidget(); pl = qt.QVBoxLayout(p); pl.setContentsMargins(0, 4, 0, 0); pl.setSpacing(8)
+            _stl.addWidget(p); self.pages.append(p); p.hide(); pages[name] = pl
+
+        # ===== 表示
+        P = pages["表示"]
+        card, c, _ = self._card(P, "視点")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.viewButtons = {}
+        vtips = {"A": "正面から", "L": "左から", "R": "右から", "S": "頭側から", "P": "背側から", "SURG": "術者の視点（胸骨正中切開）"}
+        for lab, key in [("前", "A"), ("左", "L"), ("右", "R"), ("上", "S"), ("後", "P"), ("術者", "SURG")]:
+            b = B(lab, "tool", vtips[key]); r.addWidget(b, 1); self.viewButtons[key] = b
+
+        card, c, _ = self._card(P, "描画")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.heartOnlyButton = B("色分け面", None, "心臓・血管を AI の面で表示（血液を部位ごとに色分け）"); r.addWidget(self.heartOnlyButton, 1)
+        self.vrTissueButton = B("VR 心内", "vr", "元の CT をそのまま立体に（ボリュームレンダリング）。弁・乳頭筋・肉柱・中隔が見える。\n左右ボタン同時ドラッグでウィンドウを調整", checkable=True)
+        self.vrBloodButton = B("VR 造影", "vr", "造影された血液を立体に（ボリュームレンダリング）", checkable=True)
+        r.addWidget(self.vrTissueButton, 1); r.addWidget(self.vrBloodButton, 1)
+
+        card, c, _ = self._card(P, "レイヤー")
+        g = qt.QGridLayout(); g.setHorizontalSpacing(10); g.setVerticalSpacing(4); c.addLayout(g)
+        self.layerChecks = {}
+        for k, name in enumerate(("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化")):
+            cb = qt.QCheckBox("心筋（AI）" if name == "心筋" else name); cb.checked = True; g.addWidget(cb, k // 2, k % 2); self.layerChecks[name] = cb
+            if name == "心筋": cb.setToolTip("心筋は AI（TotalSegmentator）のラベルから作っています。欠損を塗りつぶすことがあるので、外すと CT 値だけの壁が見えます")
+        _it = lambda n, cc: f'<span style="white-space:nowrap"><span style="color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)})">■</span>{n}</span>'
+        leg = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND)
+        leg2 = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND_WALL)
+        self.legend = Lb("血液: " + leg + "<br>断面: " + leg2, "muted"); self.legend.setWordWrap(True); c.addWidget(self.legend)
+
+        card, c, _ = self._card(P, "心筋・壁")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.vsdButton = B("心筋の断面", None, "心筋を断面で見る（VSD・中隔）"); r.addWidget(self.vsdButton, 1)
+        self.fourChButton = B("四腔断面", None, "左室・右室・中隔・両心房が一度に見える面で切る"); r.addWidget(self.fourChButton, 1)
+        self.lumenButton = B("内腔を見る", None, "壁だけ・中は空洞"); r.addWidget(self.lumenButton); self.lumenButton.hide()
+        r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r); r.addWidget(Lb("濃さ", "muted"))
+        self.capSlider = ctk.ctkSliderWidget(); self.capSlider.minimum = 0; self.capSlider.maximum = 100; self.capSlider.suffix = " %"
+        self.capSlider.setToolTip("心筋の断面の濃さ")
+        try: self.capSlider.value = float(qt.QSettings().value("CardiacView/capOpacityV2", 30))   # 初期値 30%
+        except Exception: self.capSlider.value = 30
+        r.addWidget(self.capSlider, 1)
+        self.fillCheck = qt.QCheckBox("薄い壁の穴を補う"); self.fillCheck.checked = True
+        self.fillCheck.setToolTip("ON: 部分容積で欠けた薄い壁（心房・大血管）を内腔の外側に約2.4mm足して閉じる。補った所はグレー。\n"
+                                  "OFF: CT 値（-20〜175HU）だけで壁を作る。本物の欠損もアーチファクトの穴もそのまま見える。")
+        c.addWidget(self.fillCheck)
+        self.synthCheck = qt.QCheckBox("補った所をグレーで示す"); self.synthCheck.checked = True
+        self.synthCheck.setToolTip("OFF にすると補った壁も同じ色で表示（見た目重視・発表用）。感染などの本物の穴との区別には ON で確認。")
+        c.addWidget(self.synthCheck)
+
+        # ===== 切る
+        P = pages["切る"]
+        card, c, _ = self._card(P, "切断面")
+        f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
         self.cutCombo = qt.QComboBox()
         for lab, _ in CUT_MODES: self.cutCombo.addItem(lab)
-        g.addWidget(qt.QLabel("向き"), 0, 0); g.addWidget(self.cutCombo, 0, 1, 1, 2)
+        f.addRow(Lb("向き", "muted"), self.cutCombo)
         self.cutSlider = ctk.ctkSliderWidget(); self.cutSlider.minimum = 0; self.cutSlider.maximum = 100; self.cutSlider.value = 50
         self.cutSlider.suffix = " %"
-        g.addWidget(qt.QLabel("位置"), 1, 0); g.addWidget(self.cutSlider, 1, 1)
-        self.flipButton = qt.QPushButton("反転"); g.addWidget(self.flipButton, 1, 2)
-        self.lockCheck = qt.QCheckBox("この断面で固定（回しても切り口はそのまま）")
-        self.lockCheck.setToolTip("いい断面ができたらチェック。3D をくるくる回しても切る面は体に固定されたまま。ホイールで面に垂直に平行移動")
-        self.lockCheck.setStyleSheet("QCheckBox{font-weight:bold; padding:3px}"); g.addWidget(self.lockCheck, 3, 0, 1, 3)
-        self.insetCheck = qt.QCheckBox("左下に全体図（どこを切っているか）"); self.insetCheck.checked = True
-        self.insetCheck.setToolTip("左下の小さな図はいつも正面から。オレンジ枠 = 切断面、黄色い線 = 切り口、水色の矢印 = 今見ている向き")
-        g.addWidget(self.insetCheck, 4, 0, 1, 3)
-        self.cutStep = qt.QHBoxLayout()
+        f.addRow(Lb("位置", "muted"), self.cutSlider)
+        self.cutStep = qt.QHBoxLayout(); self.cutStep.setSpacing(4)
         st = qt.QSettings()
         self.stepSpin = qt.QDoubleSpinBox(); self.stepSpin.setRange(0.5, 20.0); self.stepSpin.setSingleStep(0.5); self.stepSpin.setDecimals(1)
         self.stepSpin.setSuffix(" mm"); self.stepSpin.setToolTip("◀ ▶ で動かす幅")
         try: self.stepSpin.setValue(float(st.value("CardiacView/stepMM", 5.0)))
         except Exception: self.stepSpin.setValue(5.0)
-        self.cutMinus = qt.QPushButton(); self.cutPlus = qt.QPushButton()
-        self.cutStep.addWidget(self.cutMinus); self.cutStep.addWidget(qt.QLabel("刻み")); self.cutStep.addWidget(self.stepSpin); self.cutStep.addWidget(self.cutPlus)
-        g.addLayout(self.cutStep, 2, 1, 1, 2)
+        self.cutMinus = B("◀", "tool"); self.cutPlus = B("▶", "tool")
+        for b in (self.cutMinus, self.cutPlus): b.setMinimumWidth(40)
+        self.cutStep.addWidget(self.cutMinus); self.cutStep.addWidget(self.stepSpin); self.cutStep.addWidget(self.cutPlus); self.cutStep.addStretch(1)
+        self.flipButton = B("反転", None, "残す側を反対にする"); self.cutStep.addWidget(self.flipButton)
+        f.addRow(Lb("移動", "muted"), self.cutStep)
         self._updateStepLabels()
+        self.lockCheck = qt.QCheckBox("この断面で固定")
+        self.lockCheck.setToolTip("いい断面ができたらチェック。3D をくるくる回しても切る面は体に固定されたまま。ホイールで面に垂直に平行移動")
+        c.addWidget(self.lockCheck)
+        self.insetCheck = qt.QCheckBox("左下に全体図（どこを切っているか）"); self.insetCheck.checked = True
+        self.insetCheck.setToolTip("左下の小さな図はいつも正面から。オレンジ枠 = 切断面、黄色い線 = 切り口、水色の矢印 = 今見ている向き")
+        c.addWidget(self.insetCheck)
+        hn = Lb("ホイール: 切る位置 1 mm（Shift 5 mm）", "muted"); hn.setWordWrap(True); c.addWidget(hn)
 
-        box = qt.QGroupBox("③ 見る"); g = qt.QGridLayout(box); v.addWidget(box)
-        self.viewButtons = {}
-        for k, (lab, key) in enumerate([("前", "A"), ("左", "L"), ("右", "R"), ("上", "S"), ("後", "P"), ("術者", "SURG")]):
-            b = qt.QPushButton(lab); g.addWidget(b, k // 3, k % 3); self.viewButtons[key] = b
-        self.layerChecks = {}
-        row = qt.QHBoxLayout()
-        for name in ("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化"):
-            cb = qt.QCheckBox("心筋(AI)" if name == "心筋" else name); cb.checked = True; row.addWidget(cb); self.layerChecks[name] = cb
-            if name == "心筋": cb.setToolTip("心筋は AI（TotalSegmentator）のラベルから作っています。欠損を塗りつぶすことがあるので、外すと CT 値だけの壁が見えます")
-        g.addLayout(row, 2, 0, 1, 3)
-        self.heartOnlyButton = qt.QPushButton("心臓・血管（血液を色分け）"); g.addWidget(self.heartOnlyButton, 3, 0, 1, 3)
-        self.vsdButton = qt.QPushButton("心筋の断面（VSD・中隔を見る）"); self.vsdButton.setStyleSheet("font-weight:bold"); g.addWidget(self.vsdButton, 4, 0, 1, 2)
-        self.fourChButton = qt.QPushButton("四腔断面"); self.fourChButton.setToolTip("左室・右室・中隔・両心房が一度に見える面で切る"); g.addWidget(self.fourChButton, 4, 2)
-        self.lumenButton = qt.QPushButton("内腔を見る（壁だけ・中は空洞）"); g.addWidget(self.lumenButton, 5, 0, 1, 3); self.lumenButton.hide()
-        self.capSlider = ctk.ctkSliderWidget(); self.capSlider.minimum = 0; self.capSlider.maximum = 100; self.capSlider.suffix = " %"
-        try: self.capSlider.value = float(qt.QSettings().value("CardiacView/capOpacityV2", 30))   # 初期値 30%
-        except Exception: self.capSlider.value = 30
-        g.addWidget(qt.QLabel("心筋の濃さ"), 7, 0); g.addWidget(self.capSlider, 7, 1, 1, 2)
-        self.fillCheck = qt.QCheckBox("薄い壁の穴を補う（グレー＝補った所）"); self.fillCheck.checked = True
-        self.fillCheck.setToolTip("ON: 部分容積で欠けた薄い壁（心房・大血管）を内腔の外側に約2.4mm足して閉じる。補った所はグレー。\n"
-                                  "OFF: CT 値（-20〜175HU）だけで壁を作る。本物の欠損もアーチファクトの穴もそのまま見える。")
-        g.addWidget(self.fillCheck, 8, 0, 1, 2)
-        self.synthCheck = qt.QCheckBox("補った所をグレーで示す"); self.synthCheck.checked = True
-        self.synthCheck.setToolTip("OFF にすると補った壁も同じ色で表示（見た目重視・発表用）。感染などの本物の穴との区別にはON で確認。")
-        g.addWidget(self.synthCheck, 8, 2)
-        self.vrTissueButton = qt.QPushButton("VR：心内構造（弁・乳頭筋・中隔）"); self.vrTissueButton.setCheckable(True)
-        self.vrBloodButton = qt.QPushButton("VR：造影（血液）"); self.vrBloodButton.setCheckable(True)
-        for b in (self.vrTissueButton, self.vrBloodButton): b.setStyleSheet("QPushButton:checked { background:#c9785f; color:white; font-weight:bold }")
-        self.vrTissueButton.setToolTip("元の CT をそのまま立体に（ボリュームレンダリング）。弁・乳頭筋・肉柱・中隔が見える。\n左右ボタン同時ドラッグでウィンドウを調整")
-        g.addWidget(self.vrTissueButton, 9, 0, 1, 2); g.addWidget(self.vrBloodButton, 9, 2)
-        # 画面の分け方（マルチビュー）
-        row = qt.QHBoxLayout(); row.addWidget(qt.QLabel("画面"))
-        self.layoutButtons = {}
-        lg = qt.QButtonGroup(box); lg.setExclusive(True)
-        for key, lab, tip in (("3d", "3D", "3D だけを大きく"), ("four", "4画面", "3D ＋ 軸位・矢状断・冠状断（元の CT）。線をドラッグで位置・回して斜め断面。Shift＋マウスで 3 断面をその点へ。ダブルクリックで 1 画面に拡大"),
-                              ("cut", "3D＋切断面", "左に 3D、右に 3D で切っている面そのものの断面（元の CT）。どちらでホイールを回しても一緒に動く")):
-            b = qt.QPushButton(lab); b.setCheckable(True); b.setToolTip(tip); lg.addButton(b); row.addWidget(b); self.layoutButtons[key] = b
+        # ===== 断面（画面の分け方・MPR）
+        P = pages["断面"]
+        card, c, _ = self._card(P, "画面")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.layoutButtons = {}; lg = qt.QButtonGroup(card); lg.setExclusive(True)
+        for key, lab, tip in (("3d", "3D", "3D だけを大きく"),
+                              ("four", "4画面", "3D ＋ 軸位・矢状断・冠状断（元の CT）。線をドラッグで位置・回して斜め断面。Shift＋マウスで 3 断面をその点へ。ダブルクリックで 1 画面に拡大"),
+                              ("cut", "3D＋断面", "左に 3D、右に 3D で切っている面そのものの断面（元の CT）。どちらでホイールを回しても一緒に動く")):
+            b = B(lab, "seg", tip, checkable=True); lg.addButton(b); r.addWidget(b, 1); self.layoutButtons[key] = b
         self.layoutButtons["3d"].checked = True; self._layoutGroup = lg
-        self.scaleCheck = qt.QCheckBox("目盛り"); self.scaleCheck.checked = True; self.scaleCheck.setToolTip("3D を平行投影にして長さの目盛りを出す（断面にも）"); row.addWidget(self.scaleCheck)
-        mrow = qt.QHBoxLayout(); mrow.addWidget(qt.QLabel("MPR"))
-        self.obliqueCheck = qt.QCheckBox("線で斜めに（端の丸をドラッグで回転）"); self.obliqueCheck.checked = True
+        self.scaleCheck = qt.QCheckBox("目盛り（平行投影）"); self.scaleCheck.checked = True; self.scaleCheck.setToolTip("3D を平行投影にして長さの目盛りを出す（断面にも）")
+        c.addWidget(self.scaleCheck)
+
+        card, c, hd = self._card(P, "MPR")
+        self.mprResetButton = B("リセット", "ghost", "斜めにした断面を、軸位・矢状断・冠状断に戻す"); hd.addWidget(self.mprResetButton)
+        self.obliqueCheck = qt.QCheckBox("線で斜めに（端の丸をドラッグ）"); self.obliqueCheck.checked = True
         self.obliqueCheck.setToolTip("4画面の色つきの線をドラッグ: 真ん中 = 位置、端の丸 = 回して斜めの断面（好きな MPR）")
-        mrow.addWidget(self.obliqueCheck)
-        mrow.addWidget(qt.QLabel("MIP"))
+        c.addWidget(self.obliqueCheck)
+        self.outlineCheck = qt.QCheckBox("3D の輪郭を重ねる"); self.outlineCheck.setToolTip("3D の面（心臓・血管）の切り口の線を断面に重ねる")
+        c.addWidget(self.outlineCheck)
+        r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r); r.addWidget(Lb("MIP 厚さ", "muted"))
         self.slabCombo = qt.QComboBox()
         for lab in ("なし", "5 mm", "10 mm", "20 mm", "40 mm"): self.slabCombo.addItem(lab)
-        self.slabCombo.setToolTip("断面に厚みを持たせて最大値投影（血管・冠動脈を追いやすい）"); mrow.addWidget(self.slabCombo)
-        self.outlineCheck = qt.QCheckBox("輪郭"); self.outlineCheck.setToolTip("3D の面（心臓・血管）の切り口の線を断面に重ねる")
-        mrow.addWidget(self.outlineCheck)
-        self.mprResetButton = qt.QPushButton("MPR を戻す"); self.mprResetButton.setToolTip("斜めにした断面を、軸位・矢状断・冠状断に戻す"); mrow.addWidget(self.mprResetButton)
-        rrow = qt.QHBoxLayout(); rrow.addWidget(qt.QLabel("斜め微調整"))
+        self.slabCombo.setToolTip("断面に厚みを持たせて最大値投影（血管・冠動脈を追いやすい）"); r.addWidget(self.slabCombo); r.addStretch(1)
+
+        card, c, _ = self._card(P, "斜めの微調整")
         self.rotView = qt.QComboBox()
-        for lab in ("軸位で回す", "矢状断で回す", "冠状断で回す"): self.rotView.addItem(lab)
+        for lab in ("軸位の中で回す", "矢状断の中で回す", "冠状断の中で回す"): self.rotView.addItem(lab)
         self.rotView.setToolTip("選んだ断面の中で、ほかの断面の線（向き）を回す。断面の上で [ ] キーでも 1°（Shift で 5°）")
-        rrow.addWidget(self.rotView)
+        c.addWidget(self.rotView)
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
         self.rotButtons = []
         for lab, deg in (("↺5°", 5.0), ("↺1°", 1.0), ("↻1°", -1.0), ("↻5°", -5.0)):
-            b = qt.QPushButton(lab); b.setMaximumWidth(48); rrow.addWidget(b); self.rotButtons.append((b, deg))
-        self.mprAngleLabel = qt.QLabel("0°"); self.mprAngleLabel.setStyleSheet("color:#4a78c2; font-weight:bold"); rrow.addWidget(self.mprAngleLabel)
-        rrow.addStretch(1)
-        vb = qt.QVBoxLayout(); vb.addLayout(row); vb.addLayout(mrow); vb.addLayout(rrow); g.addLayout(vb, 10, 0, 1, 3)
-        row = qt.QHBoxLayout(); row.addWidget(qt.QLabel("計測"))
+            b = B(lab, "tool"); r.addWidget(b, 1); self.rotButtons.append((b, deg))
+        self.mprAngleLabel = Lb("0°", "accent"); self.mprAngleLabel.setWordWrap(True); c.addWidget(self.mprAngleLabel)
+
+        # ===== 計測
+        P = pages["計測"]
+        card, c, hd = self._card(P, "計測")
+        self.rulerClearButton = B("すべて消す", "ghost", "測った線・面積・角度をすべて消す（1 つだけ消す時は、その計測にマウスを乗せて Delete キー）"); hd.addWidget(self.rulerClearButton)
+        g = qt.QGridLayout(); g.setHorizontalSpacing(4); g.setVerticalSpacing(4); c.addLayout(g)
         self.measureButtons = {}
         tips = {"line": "2 点クリックで長さ", "poly": "クリックで点を追加、右クリックで終了。折れ線の長さ",
                 "curve": "クリックで点を追加、右クリックで終了。なめらかな曲線に沿った長さ（血管・弁輪など）",
                 "area": "輪郭をクリックで囲み、右クリックで終了。面積と周長", "angle": "3 点クリックで角度"}
-        for key, lab, cls, pre in CardiacViewLogic.MEASURES:
-            b = qt.QPushButton(lab); b.setToolTip(tips[key]); row.addWidget(b); self.measureButtons[key] = b
-        self.rulerClearButton = qt.QPushButton("消す"); self.rulerClearButton.setToolTip("測った線・面積・角度をすべて消す（1 つだけ消す時は、その計測にマウスを乗せて Delete キー）")
-        row.addWidget(self.rulerClearButton); g.addLayout(row, 12, 0, 1, 3)
-        # 右ドラッグの機能
-        row = qt.QHBoxLayout(); row.addWidget(qt.QLabel("右ドラッグ"))
-        self.rmodeButtons = {}
-        rg = qt.QButtonGroup(box); rg.setExclusive(True)
-        for key, lab in CardiacViewLogic.RMODES:
-            b = qt.QPushButton(lab); b.setCheckable(True); rg.addButton(b); row.addWidget(b); self.rmodeButtons[key] = b
-            b.setStyleSheet("QPushButton:checked { background:#4a78c2; color:white; font-weight:bold }")
-        self.rmodeButtons["zoom"].checked = True; self._rmodeGroup = rg
-        self.wlResetButton = qt.QPushButton("ウィンドウを戻す"); self.wlResetButton.setToolTip("VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す")
-        row.addWidget(self.wlResetButton)
-        self.wlResetButton.connect("clicked()", lambda: self.logic.resetWindow())
-        g.addLayout(row, 11, 0, 1, 3)
-        leg = " ".join(f'<span style="color:rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})">■</span>{n}' for n, c in LEGEND)
-        leg2 = " ".join(f'<span style="color:rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})">■</span>{n}' for n, c in LEGEND_WALL)
-        self.legend = qt.QLabel("血液: " + leg + "<br>断面: " + leg2); self.legend.setWordWrap(True); self.legend.setStyleSheet("font-size:11px"); g.addWidget(self.legend, 6, 0, 1, 3)
+        for k, (key, lab, cls, pre) in enumerate(CardiacViewLogic.MEASURES):
+            b = B(lab, "tool", tips[key]); g.addWidget(b, k // 3, k % 3); self.measureButtons[key] = b
+        hn = Lb("3D の面・VR の上、または断面の上でクリック。1 つ消す: マウスを乗せて Delete", "muted"); hn.setWordWrap(True); c.addWidget(hn)
 
-        hint = qt.QLabel("3D 画面の操作: 左ドラッグ=回転 / 右ドラッグ=上のボタンで選んだ機能（拡大・ウィンドウ・移動・切る位置） / 中ボタンドラッグ=移動"
-                         " / ホイール=切る位置（1mm、Shift で 5mm。切っていない時は拡大縮小） / Ctrl+ホイール=拡大縮小 / 左右同時ドラッグ=VR のウィンドウ"
-                         " / 4画面では Shift+マウス移動で十字が追従、断面の左ドラッグ=ウィンドウ")
-        hint.setWordWrap(True); hint.setStyleSheet("color:#777; font-size:11px"); v.addWidget(hint)
+        card, c, _ = self._card(P, "大動脈")
+        self.aortaButton = B("大動脈サイジングへ  ›", "primary", "中心線 → 径の表 → CSV（ステントグラフトのサイジング）"); c.addWidget(self.aortaButton)
+        self.flyButton = B("大動脈の中に入る", None, "中心線に沿って大動脈の中から見る（先に大動脈サイジングで中心線を作る）"); c.addWidget(self.flyButton)
+        r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r); r.addWidget(Lb("位置", "muted"))
+        self.flySlider = ctk.ctkSliderWidget(); self.flySlider.minimum = 0; self.flySlider.maximum = 100; self.flySlider.value = 20
+        self.flySlider.setToolTip("中心線上の位置"); r.addWidget(self.flySlider, 1)
 
-        # ================= B. 詳細設定（折りたたみ）
-        adv = ctk.ctkCollapsibleButton(); adv.text = "詳細設定"; adv.collapsed = True; self.layout.addWidget(adv)
-        av = qt.QVBoxLayout(adv)
-
-        f = qt.QFormLayout()
+        # ===== 設定
+        P = pages["設定"]
+        card, c, _ = self._card(P, "3D の作り方")
+        f = qt.QFormLayout(); f.setHorizontalSpacing(8); c.addLayout(f)
         self.resSpin = qt.QDoubleSpinBox(); self.resSpin.setRange(0.4, 3.0); self.resSpin.setSingleStep(0.1); self.resSpin.value = 1.2; self.resSpin.suffix = " mm"
-        f.addRow("メッシュ解像度:", self.resSpin)
-        self.boneCheck = qt.QCheckBox("骨を別レイヤーにする（TotalSegmentator の骨ラベル）"); self.boneCheck.checked = True; f.addRow(self.boneCheck)
-        av.addLayout(f)
-
-        grid = qt.QGridLayout(); av.addLayout(grid)
-        for c, h in enumerate(["", "名前", "下限 HU", "上限 HU", "色", "平滑化"]):
-            lab = qt.QLabel(h); lab.setStyleSheet("color:#888; font-size:10px"); grid.addWidget(lab, 0, c)
+        f.addRow(Lb("メッシュ解像度", "muted"), self.resSpin)
+        self.boneCheck = qt.QCheckBox("骨を別レイヤーにする"); self.boneCheck.checked = True
+        self.boneCheck.setToolTip("TotalSegmentator の骨ラベルで骨を分ける"); c.addWidget(self.boneCheck)
+        grid = qt.QGridLayout(); grid.setHorizontalSpacing(4); grid.setVerticalSpacing(3); c.addLayout(grid)
+        for col, hh in enumerate(["", "名前", "下限 HU", "上限 HU", "色", "平滑"]):
+            grid.addWidget(Lb(hh, "colh"), 0, col)
         for i, (name, lo, hi, col, sm, vis) in enumerate(DEFAULT_LAYERS):
             self._addLayerRow(grid, i + 1, name, lo, hi, col, sm, vis)
-        self.buildButton = qt.QPushButton("この設定でレイヤーを作り直す"); grid.addWidget(self.buildButton, len(DEFAULT_LAYERS) + 1, 0, 1, 6)
+        grid.setColumnStretch(1, 1)
+        self.buildButton = B("この設定で作り直す", None, "上のレイヤー設定で面を作り直す"); c.addWidget(self.buildButton)
 
-        f = qt.QFormLayout(); av.addLayout(f)
-        self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow("背景:", self.bgCombo)
-        self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow("光沢:", self.glossSlider)
-        self.opacitySlider = ctk.ctkSliderWidget(); self.opacitySlider.minimum = 0; self.opacitySlider.maximum = 100; self.opacitySlider.value = 100; f.addRow("血液層の不透明度:", self.opacitySlider)
-        self.ssaoCheck = qt.QCheckBox("環境光遮蔽（奥行き）"); self.ssaoCheck.checked = True; f.addRow(self.ssaoCheck)
-        self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow("視野角:", self.fovSlider)
-        self.freePlaneButton = qt.QPushButton("自由な切断面を追加（3D 上のハンドルで操作）"); f.addRow(self.freePlaneButton)
-        self.flyButton = qt.QPushButton("大動脈の中に入る（中心線が必要）"); f.addRow(self.flyButton)
-        self.flySlider = ctk.ctkSliderWidget(); self.flySlider.minimum = 0; self.flySlider.maximum = 100; self.flySlider.value = 20; f.addRow("中心線上の位置:", self.flySlider)
-        row = qt.QHBoxLayout()
-        self.distButton = qt.QPushButton("距離"); self.angleButton = qt.QPushButton("角度"); self.curveButton = qt.QPushButton("閉曲線")
-        for b in (self.distButton, self.angleButton, self.curveButton): row.addWidget(b)
-        f.addRow("計測:", row)
-        self.aortaButton = qt.QPushButton("大動脈サイジング（中心線→径の表→CSV）"); f.addRow(self.aortaButton)
-        self.saveButton = qt.QPushButton("シーンを保存 (.mrb)"); f.addRow(self.saveButton)
-        self.layout.addStretch(1)
+        card, c, _ = self._card(P, "見た目")
+        f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
+        self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow(Lb("背景", "muted"), self.bgCombo)
+        self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow(Lb("光沢", "muted"), self.glossSlider)
+        self.opacitySlider = ctk.ctkSliderWidget(); self.opacitySlider.minimum = 0; self.opacitySlider.maximum = 100; self.opacitySlider.value = 100; f.addRow(Lb("血液の不透明度", "muted"), self.opacitySlider)
+        self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow(Lb("視野角", "muted"), self.fovSlider)
+        self.ssaoCheck = qt.QCheckBox("陰影で奥行きを出す（環境光遮蔽）"); self.ssaoCheck.checked = True; c.addWidget(self.ssaoCheck)
+
+        card, c, _ = self._card(P, "その他")
+        self.freePlaneButton = B("自由な切断面を追加", None, "3D 上のハンドルで向き・位置を操作する切断面"); c.addWidget(self.freePlaneButton)
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r); r.addWidget(Lb("印", "muted"))
+        self.distButton = B("距離", "tool", "Slicer 標準の距離マーカー"); self.angleButton = B("角度", "tool", "Slicer 標準の角度マーカー"); self.curveButton = B("閉曲線", "tool", "Slicer 標準の閉曲線マーカー")
+        for b in (self.distButton, self.angleButton, self.curveButton): r.addWidget(b, 1)
+        self.saveButton = B("シーンを保存（.mrb）", None, "表示・計測をまとめて 1 ファイルに保存"); c.addWidget(self.saveButton)
+
+        v.addStretch(1)
+        try: t0 = int(qt.QSettings().value("CardiacView/tab", 0))
+        except Exception: t0 = 0
+        self._showTab(t0 if 0 <= t0 < len(self.pages) else 0)
 
         # ---- signals
-        if getattr(slicer, "heartviewAppMode", False):
-            bar = qt.QHBoxLayout()
-            back = qt.QPushButton("◀ 症例の読み込みへ"); back.connect("clicked()", lambda: slicer.util.selectModule("HeartView")); bar.addWidget(back)
-            png = qt.QPushButton("画像で保存"); bar.addWidget(png)
-            def _png():
-                import HeartView
-                p = HeartView.HeartViewLogic().savePNG(); self._status(f"画像を保存しました: {p}")
-            png.connect("clicked()", _png)
-            self.layout.insertLayout(0, bar)
-            for b in (self.loadButton, self.dicomButton): b.hide()
-            self.quickButton.setText("① 3D を作り直す（同じ CT で）")
         self.loadButton.connect("clicked()", self.onLoad)
         self.dicomButton.connect("clicked()", self.onLoadDicom)
         self.quickButton.connect("clicked()", self.onQuick)
@@ -425,14 +567,42 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         if self.play4DButton.checked: self.play4DButton.checked = False
         self.logic.show4D(False); self._label4D(); self._status("面の 3D に戻しました")
 
+    # ---------------------------------------------------------------- UI 部品（AortaSizing と同じ見た目）
+    def _card(self, parent_layout, title=None, sub=None):
+        f = qt.QFrame(); f.setProperty("role", "card"); lay = qt.QVBoxLayout(f); lay.setContentsMargins(10, 8, 10, 10); lay.setSpacing(6)
+        h = None
+        if title:
+            h = qt.QHBoxLayout(); h.setSpacing(4); t = qt.QLabel(title); t.setProperty("role", "h"); h.addWidget(t); h.addStretch(1)
+            if sub: s = qt.QLabel(sub); s.setProperty("role", "muted"); h.addWidget(s)
+            lay.addLayout(h)
+        parent_layout.addWidget(f); return f, lay, h
+
+    def _btn(self, text, kind=None, tip=None, checkable=False):
+        b = qt.QPushButton(text)
+        if kind: b.setProperty("kind", kind)
+        if tip: b.setToolTip(tip)
+        b.setCheckable(checkable); b.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        b.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed); return b
+
+    def _lab(self, text, role=None):
+        l = qt.QLabel(text)
+        if role: l.setProperty("role", role)
+        return l
+
+    def _showTab(self, i):
+        for j, p in enumerate(self.pages): p.setVisible(j == i)              # 見えているページの高さだけ取る（空白を作らない）
+        self.tabBtns[i].checked = True
+        try: qt.QSettings().setValue("CardiacView/tab", int(i))
+        except Exception: pass
+
     # ---------------------------------------------------------------- helpers
     def _addLayerRow(self, grid, r, name, lo, hi, col, sm, vis):
         visCb = qt.QCheckBox(); visCb.checked = vis; grid.addWidget(visCb, r, 0)
-        nameEdit = qt.QLineEdit(name); grid.addWidget(nameEdit, r, 1)
-        loSpin = qt.QSpinBox(); loSpin.setRange(-1024, 3000); loSpin.value = lo; grid.addWidget(loSpin, r, 2)
-        hiSpin = qt.QSpinBox(); hiSpin.setRange(-1024, 3000); hiSpin.value = hi; grid.addWidget(hiSpin, r, 3)
-        colBtn = ctk.ctkColorPickerButton(); colBtn.color = qt.QColor.fromRgbF(*col); colBtn.displayColorName = False; grid.addWidget(colBtn, r, 4)
-        smCombo = qt.QComboBox(); smCombo.addItems(["なし", "弱", "強"]); smCombo.currentIndex = sm; grid.addWidget(smCombo, r, 5)
+        nameEdit = qt.QLineEdit(name); nameEdit.setMinimumWidth(50); nameEdit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed); nameEdit.setToolTip(name); grid.addWidget(nameEdit, r, 1)
+        loSpin = qt.QSpinBox(); loSpin.setRange(-1024, 3000); loSpin.value = lo; loSpin.setMaximumWidth(62); grid.addWidget(loSpin, r, 2)
+        hiSpin = qt.QSpinBox(); hiSpin.setRange(-1024, 3000); hiSpin.value = hi; hiSpin.setMaximumWidth(62); grid.addWidget(hiSpin, r, 3)
+        colBtn = ctk.ctkColorPickerButton(); colBtn.color = qt.QColor.fromRgbF(*col); colBtn.displayColorName = False; colBtn.setMaximumWidth(34); grid.addWidget(colBtn, r, 4)
+        smCombo = qt.QComboBox(); smCombo.addItems(["なし", "弱", "強"]); smCombo.currentIndex = sm; smCombo.setMaximumWidth(64); grid.addWidget(smCombo, r, 5)
         self.layerRows.append(dict(vis=visCb, name=nameEdit, lo=loSpin, hi=hiSpin, col=colBtn, sm=smCombo))
 
     def _layerSpecs(self):
@@ -470,8 +640,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def _updateStepLabels(self):
         mm = self.stepSpin.value
-        t = f"{mm:g}mm"
-        self.cutMinus.setText(f"◀ {t}"); self.cutPlus.setText(f"{t} ▶")
+        self.cutMinus.setText("◀"); self.cutPlus.setText("▶")
+        self.cutMinus.setToolTip(f"{mm:g} mm 戻す"); self.cutPlus.setToolTip(f"{mm:g} mm 進める")
 
     def _onStepChanged(self, v):
         self._updateStepLabels()

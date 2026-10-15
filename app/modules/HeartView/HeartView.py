@@ -302,56 +302,97 @@ class HeartView(ScriptedLoadableModule):
         parent.acknowledgementText = ""
 
 
+HV_STYLE_EXTRA = """
+QWidget#cvRoot QTableWidget { background:#181b21; alternate-background-color:#1c2027; color:#e6e8ec; border:1px solid #2b3039; border-radius:8px;
+  selection-background-color:#1f4d69; selection-color:#ffffff; font-size:12px; }
+QWidget#cvRoot QHeaderView::section { background:#181b21; color:#7d8590; border:none; border-bottom:1px solid #2b3039; padding:4px 6px; font-size:11px; }
+QWidget#cvRoot QProgressBar { background:#262a33; border:1px solid #343a46; border-radius:6px; text-align:center; color:#e6e8ec; min-height:18px; }
+QWidget#cvRoot QProgressBar::chunk { background:#2f7bf6; border-radius:5px; }
+"""
+
+
 class HeartViewWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
-        _outer = self.layout; _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame)   # パネルを狭くしても使える（横は必要ならスクロール）
-        _inner = qt.QWidget(); self.layout = qt.QVBoxLayout(_inner); self.layout.setContentsMargins(0, 0, 0, 0); _sc.setWidget(_inner); _outer.addWidget(_sc)
         self.logic = HeartViewLogic()
-        v = self.layout
-        big = "font-size:15px; font-weight:bold; padding:10px"
+        try:
+            import CardiacView; css = CardiacView.CV_STYLE + CardiacView._iconCSS()
+        except Exception: css = ""
+        css += HV_STYLE_EXTRA
+        root = qt.QWidget(); root.setObjectName("cvRoot"); root.setStyleSheet(css); root.setAttribute(qt.Qt.WA_StyledBackground, True)
+        _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame); _sc.setWidget(root)
+        _sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff); _sc.setStyleSheet(getattr(CardiacView, "SC_STYLE", "QScrollArea{background:#15171c; border:none}") if "CardiacView" in dir() else "QScrollArea{background:#15171c; border:none}")
+        self.layout.addWidget(_sc); self.layout.setContentsMargins(0, 0, 0, 0)
+        v = qt.QVBoxLayout(root); v.setContentsMargins(10, 10, 10, 10); v.setSpacing(10); self.root = root
 
-        t = qt.QLabel(f"<b style='font-size:20px'>{APP_TITLE}</b>　<span style='font-size:13px'>{APP_SUBTITLE}</span><br><span style='color:#888'>研究・教育用。診断・治療方針は必ず元画像で確認してください。</span>")
-        t.setWordWrap(True); v.addWidget(t)
+        def card(title=None, sub=None):
+            f = qt.QFrame(); f.setProperty("role", "card"); lay = qt.QVBoxLayout(f); lay.setContentsMargins(10, 8, 10, 10); lay.setSpacing(6)
+            if title:
+                h = qt.QHBoxLayout(); t = qt.QLabel(title); t.setProperty("role", "h"); h.addWidget(t); h.addStretch(1)
+                if sub: s = qt.QLabel(sub); s.setProperty("role", "muted"); h.addWidget(s)
+                lay.addLayout(h)
+            v.addWidget(f); return lay
+        def btn(text, kind=None, tip=None):
+            b = qt.QPushButton(text)
+            if kind: b.setProperty("kind", kind)
+            if tip: b.setToolTip(tip)
+            b.setCursor(qt.QCursor(qt.Qt.PointingHandCursor)); return b
+        def lab(text, role=None):
+            l = qt.QLabel(text)
+            if role: l.setProperty("role", role)
+            l.setWordWrap(True); return l
 
-        # ---------------- ①
-        box = qt.QGroupBox("① 画像を読み込む"); g = qt.QVBoxLayout(box); v.addWidget(box)
-        self.cdButton = qt.QPushButton("CD-R から読み込む"); self.cdButton.setStyleSheet(big); g.addWidget(self.cdButton)
-        row = qt.QHBoxLayout(); g.addLayout(row)
-        self.folderButton = qt.QPushButton("フォルダから…"); row.addWidget(self.folderButton)
-        self.caseButton = qt.QPushButton("保存した症例を開く…"); row.addWidget(self.caseButton)
-        self.infoLabel = qt.QLabel(""); self.infoLabel.setWordWrap(True); g.addWidget(self.infoLabel)
-        self.table = qt.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["", "シリーズ", "枚数", "厚さ", "造影", "断面"])
+        # ---------------- ヘッダー
+        h = qt.QHBoxLayout(); v.addLayout(h)
+        h.addWidget(lab(APP_TITLE, "title")); h.addWidget(lab(APP_SUBTITLE, "muted")); h.addStretch(1)
+        v.addWidget(lab("研究・教育用。診断・治療方針は必ず元画像で確認してください。", "muted"))
+
+        # ---------------- 1
+        g = card("1  画像を読み込む")
+        self.cdButton = btn("CD-R から読み込む", "primary", "CD-R（または USB）の DICOM を PC に取り込む"); g.addWidget(self.cdButton)
+        row = qt.QHBoxLayout(); row.setSpacing(6); g.addLayout(row)
+        self.folderButton = btn("フォルダから", None, "DICOM のフォルダ（CD の中身など）を選ぶ"); row.addWidget(self.folderButton, 1)
+        self.caseButton = btn("保存した症例", None, "保存した症例（.mrb）を開く"); row.addWidget(self.caseButton, 1)
+        self.infoLabel = lab("", "muted"); g.addWidget(self.infoLabel); self.infoLabel.hide()
+        self.table = qt.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["", "シリーズ", "4D", "枚", "厚さ", "造影", "断面"])
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setMinimumHeight(180)
+        self.table.verticalHeader().setVisible(False); self.table.setShowGrid(False); self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False); self.table.setTextElideMode(qt.Qt.ElideRight)
+        self.table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        hh = self.table.horizontalHeader(); hh.setStretchLastSection(False)
+        try:
+            for c in range(7): hh.setSectionResizeMode(c, qt.QHeaderView.Stretch if c == 1 else qt.QHeaderView.ResizeToContents)
+        except Exception: pass
+        self.table.setMinimumHeight(190)
         g.addWidget(self.table)
-        hint = qt.QLabel("★ = 自動で選んだおすすめ（造影・軸位・薄いスライス・心臓用を優先）。別のものを選んでも構いません。")
-        hint.setWordWrap(True); hint.setStyleSheet("color:#888; font-size:11px"); g.addWidget(hint)
+        g.addWidget(lab("★ = おすすめ（造影・軸位・薄いスライス・心臓用を優先）。行を選ぶと右に画像が出ます。", "muted"))
 
-        # ---------------- ②
-        box = qt.QGroupBox("② 3D を作る"); g = qt.QVBoxLayout(box); v.addWidget(box)
-        self.buildButton = qt.QPushButton("3D を作る（初回 約5〜10分）"); self.buildButton.setStyleSheet(big); self.buildButton.enabled = False
+        # ---------------- 2
+        g = card("2  3D を作る")
+        self.buildButton = btn("3D を作る", "primary", "初回 約5〜10分（2回目から速くなります）"); self.buildButton.enabled = False
         g.addWidget(self.buildButton)
         self.progressBar = qt.QProgressBar(); self.progressBar.setTextVisible(True); self.progressBar.setFormat("%p%"); self.progressBar.hide(); g.addWidget(self.progressBar)
-        self.progressLabel = qt.QLabel(""); self.progressLabel.setStyleSheet("font-weight:bold"); self.progressLabel.hide(); g.addWidget(self.progressLabel)
-        self.status = qt.QLabel("CD を入れて「CD-R から読み込む」を押してください。"); self.status.setWordWrap(True); g.addWidget(self.status)
+        self.progressLabel = lab("", "h"); self.progressLabel.hide(); g.addWidget(self.progressLabel)
+        self.status = lab("CD を入れて「CD-R から読み込む」を押してください。", "muted"); g.addWidget(self.status)
 
-        # ---------------- ③
-        box = qt.QGroupBox("③ 見る・保存する"); g = qt.QGridLayout(box); v.addWidget(box)
-        self.viewButton = qt.QPushButton("見る・切る（操作パネルへ）"); self.viewButton.setStyleSheet("font-weight:bold; padding:6px"); g.addWidget(self.viewButton, 0, 0, 1, 2)
-        self.aortaButton = qt.QPushButton("大動脈サイジング（ステントグラフト）"); self.aortaButton.setStyleSheet("font-weight:bold; padding:6px"); g.addWidget(self.aortaButton, 3, 0, 1, 2)
-        self.pngButton = qt.QPushButton("今の画面を画像で保存"); g.addWidget(self.pngButton, 1, 0)
-        self.openDirButton = qt.QPushButton("保存フォルダを開く"); g.addWidget(self.openDirButton, 1, 1)
-        self.slicerButton = qt.QPushButton("Slicer の通常画面に切り替え（上級者用）"); self.slicerButton.setStyleSheet("color:#888")
-        g.addWidget(self.slicerButton, 2, 0, 1, 2)
-        self.licButton = qt.QPushButton(""); self.licButton.setStyleSheet("color:#666")
+        # ---------------- 3
+        g = card("3  見る・保存する")
+        row = qt.QHBoxLayout(); row.setSpacing(6); g.addLayout(row)
+        self.viewButton = btn("見る・切る  ›", "primary", "操作パネル（CardiacView）へ"); row.addWidget(self.viewButton, 1)
+        self.aortaButton = btn("大動脈サイジング  ›", "primary", "ステントグラフトのサイジング（中心線 → 径の表 → CSV）"); row.addWidget(self.aortaButton, 1)
+        row = qt.QHBoxLayout(); row.setSpacing(6); g.addLayout(row)
+        self.pngButton = btn("画像で保存", None, "今の画面を PNG で保存"); row.addWidget(self.pngButton, 1)
+        self.openDirButton = btn("保存フォルダ", None, "保存した症例・画像のフォルダを開く"); row.addWidget(self.openDirButton, 1)
+
+        row = qt.QHBoxLayout(); row.setSpacing(2); v.addLayout(row)
+        self.slicerButton = btn("Slicer の通常画面", "ghost", "Slicer の通常画面に切り替え（上級者用）"); row.addWidget(self.slicerButton)
+        row.addStretch(1)
+        self.licButton = btn("", "ghost")
         self.licButton.setToolTip("左右の心腔の色分け・心筋の断面に使う AI（TotalSegmentator の heartchambers_highres）の学術ライセンス番号を登録します（無料・各自で申請）")
-        g.addWidget(self.licButton, 4, 0, 1, 2); self._updateLicLabel()
+        row.addWidget(self.licButton); self._updateLicLabel()
         v.addStretch(1)
 
         self.cdButton.connect("clicked()", self.onCD)
@@ -394,7 +435,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             self._say(f"読み込み中…（{folder}）　CD からは 1〜3 分かかります")
             self.progressBar.setRange(0, 0); self.progressBar.show(); self.progressLabel.setText("CD から PC へ取り込み中…"); self.progressLabel.show(); slicer.app.processEvents()
             rows, info = self.logic.importFolder(folder)
-            self.infoLabel.setText(info)
+            self.infoLabel.setText(info); self.infoLabel.setVisible(bool(info))
             self._fill(rows)
             self.progressBar.setRange(0, 1000); self.progressBar.hide(); self.progressLabel.hide()
             self._say("シリーズを選んで「3D を作る」を押してください（★ がおすすめ）。" if rows else "CT のシリーズが見つかりませんでした。")
@@ -408,14 +449,15 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.rows = rows
         self.table.setRowCount(len(rows))
         for r, s in enumerate(rows):
-            d4 = f"  ［4D {len(s['phases'])} 位相・{s['phaseLab']}］" if s.get("phases") else ""
-            vals = ["★" if s.get("best") else "", s["desc"] + d4, str(s["n"]), f"{s['thick']:.1f}" if s["thick"] else "?",
+            d4 = f"{len(s['phases'])}相" if s.get("phases") else ""
+            tip = s["desc"] + (f"\n4D: {len(s['phases'])} 位相（このシリーズは {s['phaseLab']}）" if s.get("phases") else "")
+            vals = ["★" if s.get("best") else "", s["desc"], d4, str(s["n"]), f"{s['thick']:.1f}" if s["thick"] else "?",
                     "あり" if s["contrast"] else "", s["orient"]]
             for c, val in enumerate(vals):
-                it = qt.QTableWidgetItem(val)
-                if not s["usable"]: it.setForeground(qt.QBrush(qt.QColor(150, 150, 150)))
+                it = qt.QTableWidgetItem(val); it.setToolTip(tip)
+                if c == 2 and d4: it.setForeground(qt.QBrush(qt.QColor(76, 200, 240)))
+                if not s["usable"]: it.setForeground(qt.QBrush(qt.QColor(110, 116, 126)))
                 self.table.setItem(r, c, it)
-        self.table.resizeColumnsToContents()
         best = [i for i, s in enumerate(rows) if s.get("best")]
         if best: self.table.selectRow(best[0])
 
@@ -425,12 +467,12 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         s = self.rows[sel[0].row()] if sel and sel[0].row() < len(getattr(self, "rows", [])) else None
         ph = (s or {}).get("phases") or []
         if len(ph) >= 2:
-            self.buildButton.setText(f"3D と 4D（動く心臓・{len(ph)} 位相）を作る（約 6〜10 分）")
-            self._say(f"このシリーズは 4D（心電図同期 {len(ph)} 位相）です。% は心拍の中のタイミング（R 波から次の R 波までを 100%）で、"
-                      "同じ心臓を少しずつ時間をずらして撮ったものです。3D は 1 つの位相から作り、4D では全部の位相を使います。"
-                      "75% 付近（拡張中期）は動きが少なく 3D 向き、35〜40% 付近は収縮期です。右の画像を見て、ぶれの少ない位相を選んでください。")
+            self.buildButton.setText(f"3D ＋ 4D（{len(ph)} 位相）を作る"); self.buildButton.setToolTip("約 6〜10 分")
+            self._say(f"4D（心電図同期 {len(ph)} 位相）のシリーズです。% は R 波から次の R 波までの中のタイミング。"
+                      "3D は選んだ位相から、4D は全位相から作ります。75% 付近（拡張中期）は動きが少なく 3D 向き、35〜40% は収縮期。"
+                      "右の画像でぶれの少ない位相を選んでください。")
         else:
-            self.buildButton.setText("3D を作る（初回 約5〜10分）")
+            self.buildButton.setText("3D を作る"); self.buildButton.setToolTip("初回 約5〜10分（2回目から速くなります）")
         if s is not None:
             try: self.logic.preview(s)
             except Exception as e: print("preview:", e)
@@ -465,7 +507,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             ok = True
             n4 = cv.logic.n4D() if hasattr(cv.logic, "n4D") else 0
             self._say(cv.statusLabel.text + f"\n症例を保存しました（{os.path.basename(path)}）。"
-                      + (f"\n4D（{n4} 位相）も準備できました。操作パネルの「4D（動く心臓）」の ▶ 再生で動きます。" if n4 >= 2 else ""))
+                      + (f"\n4D（{n4} 位相）も準備できました。操作パネルの「4D」の ▶ 再生で動きます。" if n4 >= 2 else ""))
             slicer.util.selectModule("CardiacView")
         except Exception as e:
             import traceback; traceback.print_exc(); self._say(f"エラー: {e}")
@@ -496,7 +538,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
 
     def _updateLicLabel(self):
         ok = bool(tsLicense())
-        self.licButton.setText("AI ライセンス: 登録済み ✓（変更する）" if ok else "AI ライセンスを登録する（心腔の色分けに必要・無料）")
+        self.licButton.setText("AI ライセンス ✓" if ok else "AI ライセンスを登録（無料）")
 
     def onLicense(self):
         msg = ("左右の心腔の色分けと心筋の断面には、TotalSegmentator の心腔モデル（heartchambers_highres）を使います。\n"

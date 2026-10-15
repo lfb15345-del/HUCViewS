@@ -199,6 +199,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         root.setAttribute(qt.Qt.WA_StyledBackground, True)
         _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame); _sc.setWidget(root)   # パネルを狭くしても使える
         _sc.setStyleSheet("QScrollArea{background:#15171c; border:none}")
+        try:
+            import CardiacView; _sc.setStyleSheet(CardiacView.SC_STYLE); root.setStyleSheet(STYLE + CardiacView._iconCSS().replace("cvRoot", "saRoot"))
+        except Exception: pass
         self.layout.addWidget(_sc); self.layout.setContentsMargins(0, 0, 0, 0)
         v = qt.QVBoxLayout(root); v.setContentsMargins(10, 10, 10, 10); v.setSpacing(10); self.root = root
 
