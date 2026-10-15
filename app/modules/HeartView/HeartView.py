@@ -838,6 +838,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         if cv.logic.sourceVolume is not None: cv.volumeSelector.setCurrentNode(cv.logic.sourceVolume)
         cv.logic.setCapOpacity(cv.capSlider.value / 100.0)
         cv.onFourChamber() if cv.logic._findChambers() is not None else cv.onVSD()
+        qt.QTimer.singleShot(400, lambda: (cv.logic._fitParallel(recenter=True), cv.logic._viewSizeWatch(), cv.logic._view().scheduleRender()))   # 画面の大きさに合わせて全体を収める
 
     def savePNG(self):
         import ScreenCapture

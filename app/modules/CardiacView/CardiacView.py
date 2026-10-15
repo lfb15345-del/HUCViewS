@@ -531,8 +531,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         lab = labs[i] if i < len(labs) and labs[i] else f"{i + 1}"
         self.phaseLabel.setText(f"{lab}  ({i + 1}/{n})")
         try:
-            ca = L._view().cornerAnnotation()
-            ca.SetText(1, f"4D  {lab.replace('位相', 'Phase')}  ({i + 1}/{n})" if getattr(L, "on4D", False) else ""); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
+            L._setUL("1_4d", f"4D  {lab.replace('位相', 'Phase')}  ({i + 1}/{n})" if getattr(L, "on4D", False) else "")
         except Exception: pass
 
     def _onLayerCheck(self, name, on):
@@ -769,6 +768,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         except Exception: pass
         if key == "heart":
             self.onFourChamber() if L._findChambers() is not None else self.onVSD()
+            try: L.updateInset()
+            except Exception: pass
             return
         L.capBlood = False
         if L.cutAxis == "LOCK" or self.lockCheck.checked:
@@ -1740,6 +1741,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         r = float(np.linalg.norm(vb[1] - vb[0]) / 2) if vb is not None else self._sceneRadius()
         cn = self._camera()
         cn.SetFocalPoint(*center); cn.SetPosition(*(center + n * r * 2.2)); cn.SetViewUp(*(-axis))
+        try: self._fitParallel()                                               # 画面の縦横比に合わせて心臓全体を収める
+        except Exception as e: print('fit:', e)
         cn.GetCamera().SetViewAngle(30); cn.ResetClippingRange()
         lo, hi = self._visibleBounds()
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
@@ -2059,8 +2062,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if ins is None or getattr(slicer, "_cvInset", None) is not ins: ins = self.inset = _Inset(self._view())
             nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith("CV ") and n.GetName() not in self.INSET_SKIP
                      and n.GetDisplayNode() is not None and n.GetDisplayNode().GetVisibility()]
-            if not nodes: nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith("CV 血管")]
-            ins.setModels(nodes); ins.followCamera(self._camera()); ins.setVisible(True)
+            if not nodes: nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith(("CV 心臓壁", "CV 血管"))]
+            ins.setModels(nodes); ins.followCamera(self._camera()); ins.setVisible(True); ins._autoHidden = False
+            self._lastSize = None                                             # 画面が狭ければ次の描画でまた隠す
             self._insetPlane()
         except Exception as e: print("inset:", e)
 
@@ -2535,14 +2539,20 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if getattr(self, "vrOn", False) and self.vrWin is not None:
                 c0, w0 = self.vrWin
                 lo, hi = self._vrHU(c0 - w0 / 2), self._vrHU(c0 + w0 / 2)
-                ca.SetText(3, f"VR window {lo:.0f} - {hi:.0f} HU (LV scale)\nW {hi - lo:.0f}  L {(lo + hi) / 2:.0f}")
+                ca.SetText(3, f"VR  W {hi - lo:.0f} / L {(lo + hi) / 2:.0f}\n{lo:.0f} - {hi:.0f} HU")
             else: ca.SetText(3, "")
             ca.GetTextProperty().SetColor(1, 0.9, 0.5); v.scheduleRender()
         except Exception: pass
 
     def showVR(self, on, mode=None):
         first = on and getattr(self, "vrDisplay", None) is None
-        if first: self.setupVR()
+        if first:                                                             # 初めての VR で Slicer がカメラを戻してしまうので、今の向き・大きさを保つ
+            c = self._camera(); st = (c.GetPosition(), c.GetFocalPoint(), c.GetViewUp(), c.GetParallelScale())
+            self.setupVR()
+            def _back(c=c, st=st):
+                try: c.SetPosition(*st[0]); c.SetFocalPoint(*st[1]); c.SetViewUp(*st[2]); c.SetParallelScale(st[3]); c.ResetClippingRange()
+                except Exception: pass
+            _back(); qt.QTimer.singleShot(0, _back); qt.QTimer.singleShot(150, _back)
         if mode is not None and mode != getattr(self, "vrMode", None):
             self.vrMode = mode; self.vrWin = None; self.setVRWindow()
         self.vrOn = bool(on)
@@ -2780,13 +2790,117 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             except Exception: pass
         self._fitParallel(); self._view().forceRender()
 
-    def _fitParallel(self, margin=1.12):
-        vn = self._viewNode()
-        if vn.GetRenderMode() != vn.Orthographic: return
-        vb = self._visibleBounds()
-        if vb is None: return
-        lo, hi = vb
-        self._camera().SetParallelScale(float(np.max(hi - lo)) / 2.0 * margin)
+    def _fitParallel(self, margin=1.08, recenter=False):
+        """画面の縦横比を考えて、見えているもの全体を収める（細い画面でも横が切れない）。形の点を画面の向きに投影して測る"""
+        vn = self._viewNode(); cam = self._camera().GetCamera()
+        P = self._shownPoints()
+        if P is None: return
+        W, H = self._view().renderWindow().GetSize(); asp = (W / float(H)) if (W > 10 and H > 10) else 1.0
+        fp = np.array(cam.GetFocalPoint()); p = np.array(cam.GetPosition()); dop = fp - p; dop = dop / (float(np.linalg.norm(dop)) or 1.0)
+        up = np.array(cam.GetViewUp()); up = up - dop * np.dot(up, dop); up = up / (np.linalg.norm(up) or 1.0); rt = np.cross(dop, up)
+        X = P - fp; u = X @ up; r = X @ rt
+        if recenter:                                                           # 画面の真ん中へ（奥行き方向は動かさない）
+            d = up * (u.max() + u.min()) / 2 + rt * (r.max() + r.min()) / 2; fp = fp + d; p = p + d
+            cam.SetFocalPoint(*fp); cam.SetPosition(*p); u = u - (u.max() + u.min()) / 2; r = r - (r.max() + r.min()) / 2
+        hu = float(np.max(np.abs(u))); hr = float(np.max(np.abs(r)))
+        need = max(hu, hr / asp) * margin * (1.15 if getattr(self, "on4D", False) else 1.0)   # 4D は心臓のまわりも少し描くので余白を多めに
+        if vn.GetRenderMode() == vn.Orthographic:
+            cam.SetParallelScale(need)
+        elif recenter:
+            ang = math.radians(cam.GetViewAngle()); D = need / math.tan(ang / 2) + float(np.max(np.abs((P - fp) @ dop)))
+            cam.SetPosition(*(fp - dop * D))
+        try: self._view().renderWindow().GetRenderers().GetFirstRenderer().ResetCameraClippingRange()
+        except Exception: pass
+        self._lastSize = None
+
+    def _shownPoints(self, maxPts=40000):
+        """今 3D に出ている形の点（間引き）。隠した骨・軟部組織は入れない。VR・4D の時は心臓・血管"""
+        from vtk.util.numpy_support import vtk_to_numpy
+        vr = getattr(self, "vrOn", False) or getattr(self, "on4D", False); arrs = []
+        heart = [k for k in self.layerModels if "心臓壁" in k] or [k for k in self.layerModels if not any(x in k for x in ("軟部", "骨", "人工物"))]
+        for name, n in self.layerModels.items():                              # VR・4D は心臓のまわりだけを描くので、心臓の範囲で合わせる
+            try:
+                pd = n.GetPolyData() if n else None; d = n.GetDisplayNode() if n else None
+                if pd is None or d is None or not pd.GetNumberOfPoints(): continue
+                if (vr and name in heart) or (not vr and d.GetVisibility()): arrs.append(vtk_to_numpy(pd.GetPoints().GetData()))
+            except Exception: pass
+        if not arrs:
+            vb = self._visibleBounds()
+            if vb is None: return None
+            lo, hi = vb; return np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])], float)
+        n = sum(len(a) for a in arrs); k = max(1, n // maxPts)
+        return np.concatenate([a[::k] for a in arrs]).astype(float)
+
+    def _shownBounds(self):
+        """今 3D に出ているものの範囲（隠した骨・軟部組織は入れない。VR・4D の時は心臓・血管の範囲）"""
+        B = []; vr = getattr(self, "vrOn", False) or getattr(self, "on4D", False)
+        for name, n in self.layerModels.items():
+            try:
+                pd = n.GetPolyData() if n else None; d = n.GetDisplayNode() if n else None
+                if pd is None or d is None or not pd.GetNumberOfPoints(): continue
+                if d.GetVisibility() or (vr and not any(k in name for k in ("軟部", "骨", "人工物"))): B.append(pd.GetBounds())
+            except Exception: pass
+        if not B: return self._visibleBounds()
+        A = np.array(B); return (A[:, 0::2].min(0), A[:, 1::2].max(0))
+
+    def _setUL(self, key, text):
+        """左上の表示（4D の位相・一言メッセージ）をまとめて出す"""
+        d = self.__dict__.setdefault("_ulTexts", {}); d[key] = text or ""
+        try:
+            ca = self._view().cornerAnnotation(); ca.SetText(2, "\n".join(t for k, t in sorted(d.items()) if t))
+            ca.GetTextProperty().SetColor(1.0, 0.88, 0.45); self._view().scheduleRender()
+        except Exception: pass
+
+    def _viewSizeWatch(self):
+        """3D 画面の大きさが変わったら（画面割り・パネルの開閉・ウィンドウの大きさ）: 細い向きの見える範囲を保ち、全体図と文字を画面に合わせる"""
+        try: ren = self._view().renderWindow().GetRenderers().GetFirstRenderer()
+        except Exception: return
+        old = getattr(slicer, "_cvSizeTag", None)
+        if old is not None:
+            if old[0] is ren and old[2] is self: return
+            try: old[0].RemoveObserver(old[1])
+            except Exception: pass
+        self._lastSize = None
+        slicer._cvSizeTag = (ren, ren.AddObserver("StartEvent", self._onViewStart), self)
+
+    def _onViewStart(self, caller=None, ev=None):
+        try:
+            v = self._view(); W, H = v.renderWindow().GetSize()
+            if W < 20 or H < 20: return
+            last = getattr(self, "_lastSize", None)
+            if last == (W, H): return
+            self._lastSize = (W, H)
+            if last is not None:
+                a0 = min(1.0, last[0] / float(last[1])); a1 = min(1.0, W / float(H))
+                if abs(a0 - a1) > 1e-3:                                           # 細くなったら引いて、太くなったら戻す（横が切れない）
+                    cam = self._camera().GetCamera(); f = a0 / a1
+                    if cam.GetParallelProjection(): cam.SetParallelScale(cam.GetParallelScale() * f)
+                    else:
+                        fp = np.array(cam.GetFocalPoint()); p = np.array(cam.GetPosition()); cam.SetPosition(*(fp + (p - fp) * f))
+                    caller.ResetCameraClippingRange()
+            self._layoutOverlay(W, H)
+        except Exception as e: print("view size:", e)
+
+    def _layoutOverlay(self, W, H):
+        v = self._view()
+        try: dpr = max(1.0, W / float(max(1, v.width)))
+        except Exception: dpr = 1.0
+        ins = getattr(self, "inset", None)
+        if ins is not None and getattr(slicer, "_cvInset", None) is ins:          # 全体図はピクセルで決めた大きさ（画面が狭いと出さない）
+            w = min(0.26 * W, 220 * dpr); h = w / 1.35
+            if h > 0.34 * H: h = 0.34 * H; w = h * 1.35
+            m = 6 * dpr
+            ins.ren.SetViewport(m / W, m / H, (m + w) / W, (m + h) / H)
+            small = W < 330 * dpr or H < 240 * dpr
+            if small:
+                if ins.ren.GetDraw(): ins.ren.SetDraw(0); ins._autoHidden = True
+            elif getattr(ins, "_autoHidden", False):
+                ins._autoHidden = False
+                if getattr(self, "insetOn", True): ins.ren.SetDraw(1)
+        try:
+            ca = v.cornerAnnotation(); ca.SetMaximumFontSize(int(13 * dpr)); ca.SetMinimumFontSize(0)   # 大きい画面でも文字が大きくなりすぎない（狭い画面では自動で小さく）
+            ca.SetLinearFontScaleFactor(5); ca.SetNonlinearFontScaleFactor(0.35)
+        except Exception: pass
 
     def setRightMode(self, mode):
         self.rmode = mode
@@ -2795,8 +2909,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _modeLabel(self):
         try:
             names = dict(self.RMODES); ca = self._view().cornerAnnotation()
-            ca.SetText(1, f"右ドラッグ: {names.get(getattr(self, 'rmode', 'zoom'), '拡大')}".replace("右ドラッグ", "R-drag").replace("拡大", "Zoom").replace("ウィンドウ", "Window").replace("移動", "Pan").replace("切る位置", "Cut"))
-            ca.GetTextProperty().SetColor(0.8, 0.9, 1.0); self._view().scheduleRender()
+            ca.SetText(1, "")
+            self._setUL("2_rmode", f"右ドラッグ: {names.get(getattr(self, 'rmode', 'zoom'), '拡大')}".replace("右ドラッグ", "R-drag").replace("拡大", "Zoom").replace("ウィンドウ", "Window").replace("移動", "Pan").replace("切る位置", "Cut"))
         except Exception: pass
 
     def _pan(self, x0, y0, x1, y1, cam0):
@@ -2864,6 +2978,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         reg = getattr(slicer, "_cvMouse", None)
         if reg: reg["v"] = 0                                                  # 断面ビューが増えたので付け直す
         self.installMouse(); self._installPerfMon()
+        self._viewSizeWatch()
+        qt.QTimer.singleShot(250, lambda: (self._fitParallel(recenter=True), self._view().scheduleRender()))
 
     def _cutFov(self):
         lo, hi = self._visibleBounds() if self.bounds is not None else (np.zeros(3), np.ones(3) * 200)
@@ -3127,11 +3243,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _flash(self, msg):
         """3D 画面の上に一言だけ出す（2 秒）"""
         try:
-            ca = self._view().cornerAnnotation(); ca.SetText(2, msg); ca.GetTextProperty().SetColor(1.0, 0.85, 0.4); self._view().scheduleRender()
+            self._setUL("3_flash", msg)
             t = getattr(self, "_flashTimer", None)
             if t is None:
                 t = self._flashTimer = qt.QTimer(); t.setSingleShot(True); t.setInterval(2200)
-                t.connect("timeout()", lambda: (self._view().cornerAnnotation().SetText(2, ""), self._view().scheduleRender()))
+                t.connect("timeout()", lambda: self._setUL("3_flash", ""))
             t.start()
         except Exception: pass
 
@@ -3243,7 +3359,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self.labels4D = (self.seq4D.GetAttribute("CV.4D.labels") or "").split("|")
         vrl = slicer.modules.volumerendering.logic()
         dn = vrl.GetFirstVolumeRenderingDisplayNode(self.proxy4D)
-        if dn is None: dn = vrl.CreateDefaultVolumeRenderingNodes(self.proxy4D)
+        if dn is None:
+            c = self._camera(); st = (c.GetPosition(), c.GetFocalPoint(), c.GetViewUp(), c.GetParallelScale())   # Slicer がカメラを戻さないように
+            dn = vrl.CreateDefaultVolumeRenderingNodes(self.proxy4D)
+            def _back(c=c, st=st):
+                try: c.SetPosition(*st[0]); c.SetFocalPoint(*st[1]); c.SetViewUp(*st[2]); c.SetParallelScale(st[3]); c.ResetClippingRange()
+                except Exception: pass
+            _back(); qt.QTimer.singleShot(0, _back); qt.QTimer.singleShot(150, _back)
         dn.RemoveAllViewNodeIDs(); dn.AddViewNodeID(self._viewNode().GetID())
         self.vr4D = dn; self._tf4D()
         try: slicer.modules.sequences.setToolBarVisible(False)                # 再生は CardiacView の欄で（Slicer 標準の再生バーは出さない）
@@ -3297,7 +3419,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         for x, col in mono(cols): ctf.AddRGBPoint(x, *col)
         try:
             if getattr(self, "on4D", False):
-                ca = self._view().cornerAnnotation(); ca.SetText(3, f"4D window {lo:.0f} - {hi:.0f} HU\nW {w0:.0f}  L {c0:.0f}"); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
+                ca = self._view().cornerAnnotation(); ca.SetText(3, f"4D  W {w0:.0f} / L {c0:.0f}\n{lo:.0f} - {hi:.0f} HU"); ca.GetTextProperty().SetColor(1, 0.9, 0.5)
         except Exception: pass
 
     def set4DMode(self, mode):
