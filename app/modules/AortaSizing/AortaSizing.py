@@ -527,6 +527,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def _tvEnter(self):
         L = self.logic
         if L.P is None: self._say("先に中心線を作ってください"); return
+        pl0 = getattr(L, "plan", None)
+        if pl0 is not None and pl0.get("path") in L.frames and pl0["path"] != L.path:   # 計画を作った経路（右腸骨など）に戻す
+            try: L.curS = float(pl0["p"]); self._busy(L.selectPath, pl0["path"], self._say); self._syncPathButtons()
+            except Exception as e: print("tv path:", e)
         pl = L.planInit()
         try: self.osBtns[[0.0, 0.05, 0.10, 0.15, 0.20].index(round(pl["os"], 2))].checked = True
         except Exception: pass
@@ -709,11 +713,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         def run():
             M, rms = L.registerPost(self._say)
             L.extractStent(status=self._say)
+            try: L.refinePost(self._say)
+            except Exception as e: print("refine:", e)
             return rms
         rms = self._busy(run)
         if rms is None: return
         zr = L.post.GetSpacing()[2]
-        self.postInfo.setText(f"重ね合わせ（背骨）の誤差 {rms:.1f} mm・術後 CT のスライス間隔 {zr:.1f} mm（端の位置はおよそ ±{max(zr / 2, rms):.0f} mm）")
+        ps = getattr(L, "postShift", None); pst = ""
+        if ps is not None: pst = f"。そのあと大動脈の外形で合わせ直し（ずれ 中央値 {np.median(np.hypot(ps['u'], ps['v'])):.1f}・最大 {np.hypot(ps['u'], ps['v']).max():.1f} mm）"
+        self.postInfo.setText(f"重ね合わせ（背骨）の誤差 {rms:.1f} mm{pst}・術後 CT のスライス間隔 {zr:.1f} mm（端の位置はおよそ ±{max(zr / 2, rms):.0f} mm）")
         self._tvRefresh()
         c = L.comparePost()
         if c: self._say(f"術後のグラフト: 近位端 {c['dP']:+.0f} mm・遠位端 {c['dD']:+.0f} mm（計画との差。＋ = 遠位へ）")
@@ -2851,6 +2859,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if dist[i] < best[0]: best = (float(dist[i]), name, float(s[i]))
         dist, name, s = best
         if name is None or dist > 15: return
+        if name != self.path and getattr(self, "_tvMode", False): return              # TEVAR: 計画の経路のまま
         if name != self.path and s > getattr(self, "sharedLen", 0) + 2:
             qt.QTimer.singleShot(0, lambda: self._switch(name, s))
         else: self._queue(s=s)
@@ -3941,6 +3950,76 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         except Exception as e: print("compare geom:", e)
         return out
 
+    def _postShiftAt(self, ks):
+        """断面 ks での、大動脈の外形で合わせ直したずれ (u, v) mm。無ければ 0"""
+        ps = getattr(self, "postShift", None)
+        if ps is None or ps.get("path") != self.path: return np.zeros((len(ks), 2))
+        x = self.s[np.asarray(ks)]
+        return np.c_[np.interp(x, ps["s"], ps["u"]), np.interp(x, ps["s"], ps["v"])]
+
+    def refinePost(self, status=print, lo=None, hi=None):
+        """背骨で合わせた術後 CT を、断面ごとに大動脈の外形でもう一度合わせる（平行移動、長さ方向はなめらかに）。
+        呼吸・体位で大動脈は背骨に対して数 mm〜1 cm ずれるため。金属（実際のグラフト）もこの合わせ方で拾い直す"""
+        from scipy import ndimage
+        self.postShift = None
+        raw = slicer.util.arrayFromVolume(self.postStraight()).astype(np.float32)
+        K, nu, _ = raw.shape
+        ac = getattr(self, "actual", None); pl = getattr(self, "plan", None) or {}
+        lo = lo if lo is not None else min([v for v in (ac and ac["lo"], pl.get("p")) if v is not None] or [0.0]) - 40.0
+        hi = hi if hi is not None else max([v for v in (ac and ac["hi"], pl.get("d")) if v is not None] or [self.length]) + 40.0
+        ss = np.arange(max(lo, 0.0), min(hi, self.length - 1.0), 4.0); out = []
+        for x in ss:
+            k = self._k(x); kq = int(4 * round(k / 4.0)); xy = self._section(kq, "outer")
+            if xy is None or len(xy) < 6: continue
+            M = _rasterPoly(np.asarray(xy, float), nu); Dd = ndimage.distance_transform_edt(~M) * STEP; ring = (Dd > 2) & (Dd < 7)
+            img = ndimage.gaussian_filter(np.clip(raw[k], -150, 150), 1.0)
+            sc = lambda dy, dx: (lambda sh: sh[M].mean() - sh[ring].mean())(np.roll(np.roll(img, -dy, 0), -dx, 1))
+            s0 = sc(0, 0); best = (s0, 0, 0)
+            for dy in range(-30, 31, 2):
+                for dx in range(-30, 31, 2):
+                    v = sc(dy, dx)
+                    if v > best[0]: best = (v, dy, dx)
+            b0 = best
+            for dy in range(b0[1] - 2, b0[1] + 3):
+                for dx in range(b0[2] - 2, b0[2] + 3):
+                    v = sc(dy, dx)
+                    if v > best[0]: best = (v, dy, dx)
+            if best[0] - s0 < 3.0: best = (s0, 0, 0)                                 # はっきり良くならなければ動かさない
+            out.append((x, best[2] * STEP, best[1] * STEP, best[0] - s0))
+        if len(out) < 3: status("大動脈の外形で合わせ直せませんでした（背骨の重ね合わせのまま）"); return None
+        A = np.array(out); u = ndimage.median_filter(A[:, 1], 5, mode="nearest"); v = ndimage.median_filter(A[:, 2], 5, mode="nearest")
+        u = ndimage.gaussian_filter1d(u, 2.0, mode="nearest"); v = ndimage.gaussian_filter1d(v, 2.0, mode="nearest")
+        self.postShift = dict(path=self.path, s=A[:, 0], u=u, v=v)
+        mag = np.hypot(u, v)
+        status(f"術後 CT を大動脈の外形で合わせ直しました（背骨合わせからのずれ 中央値 {np.median(mag):.1f} mm・最大 {mag.max():.1f} mm）")
+        self._restent(status)
+        return self.postShift
+
+    def _restent(self, status=print):
+        """合わせ直した術後の伸ばした画像から、金属（ステント）を拾い直す"""
+        from scipy import ndimage
+        ac = getattr(self, "actual", None)
+        if ac is None or ac.get("path") != self.path: return
+        if "pts0" not in ac: ac["pts0"] = ac["pts"]
+        a = slicer.util.arrayFromVolume(self.postStraight()); pre = slicer.util.arrayFromVolume(self.straight); nu = a.shape[1]
+        k0, k1 = self._k(ac["lo"] - 2.0), self._k(ac["hi"] + 2.0); pts = []
+        for k in range(k0, k1 + 1):
+            kq = int(4 * round(k / 4.0)); xy = self._section(kq, "outer")
+            if xy is None or len(xy) < 6: continue
+            M = ndimage.binary_dilation(_rasterPoly(np.asarray(xy, float), nu), iterations=6)      # 外周 + 3 mm
+            m = M & (a[k] > 450) & (pre[k] < 600)
+            if not m.any(): continue
+            rc = np.argwhere(m); uu = rc[:, 1] * STEP - HALF; vv = rc[:, 0] * STEP - HALF
+            pts.append(self.P[k] + uu[:, None] * self.B[k] + vv[:, None] * self.N[k])
+        if not pts: return
+        X = np.concatenate(pts)
+        if len(X) > 20000: X = X[np.random.default_rng(0).choice(len(X), 20000, replace=False)]
+        ac["pts"] = X
+        from scipy.spatial import cKDTree
+        _, kk = cKDTree(self.P).query(X); ac["s"] = self.s[kk]
+        self._drawActual(); self._drawGreen()
+        status(f"金属を拾い直しました（{len(X)} 点）")
+
     def postStraight(self):
         """術後 CT を、術前の中心線に沿って伸ばした画像（術前と同じ位置で並べて見られる）"""
         from scipy import ndimage
@@ -3952,7 +4031,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         K = len(self.P); out = np.zeros((K, nu, nu), np.int16)
         for k0 in range(0, K, 64):
             k1 = min(K, k0 + 64)
-            Q = self.P[k0:k1, None, None, :] + UU[None, :, :, None] * self.B[k0:k1, None, None, :] + VV[None, :, :, None] * self.N[k0:k1, None, None, :]
+            sh = self._postShiftAt(np.arange(k0, k1))                                  # 大動脈の外形で合わせ直したずれ
+            Q = (self.P[k0:k1, None, None, :] + (UU[None, :, :, None] + sh[:, 0, None, None, None]) * self.B[k0:k1, None, None, :]
+                 + (VV[None, :, :, None] + sh[:, 1, None, None, None]) * self.N[k0:k1, None, None, :])
             H = Q.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
             out[k0:k1] = ndimage.map_coordinates(a, [H[:, 2], H[:, 1], H[:, 0]], order=1, mode="nearest").reshape(k1 - k0, nu, nu).astype(np.int16)
         node = slicer.mrmlScene.GetFirstNodeByName("SA stretched post") or slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "SA stretched post")
