@@ -364,7 +364,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tvPick = self._btn("クリックで 近位端 → 遠位端", "primary", "押してから、ストレッチ像（または 3D）を 近位端 → 遠位端 の順に 2 回クリック。Enter でも（今の断面を 近位端 → 遠位端）", True); c.addWidget(self.tvPick)
         self.tvRange = self._btn("範囲をドラッグで決める", None, "押してから、右のストレッチ像で 近位端 → 遠位端 までドラッグ", True); self.tvRange.setVisible(False)
         self.tvLen = qt.QLabel("—"); self.tvLen.setStyleSheet("font-size:17px; font-weight:bold; color:#ffffff"); c.addWidget(self.tvLen)
-        c.addWidget(self._lab("微調整: 近位端・遠位端の −/＋（1 mm・Shift を押しながらで 5 mm）、または ストレッチ像の白い線をつかんで動かす。", "muted"))
+        self.tvLen.setToolTip("微調整: 近位端・遠位端の −/＋（1 mm・Shift を押しながらで 5 mm）、または ストレッチ像の白い線をつかんで動かす")
         g = qt.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(6); c.addLayout(g)
         for j, t in enumerate(("", "位置", "径（実測 → グラフト）")): g.addWidget(self._lab(t, "colh"), 0, j)
         self.tvRows = {}
@@ -379,7 +379,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                 nb.connect("clicked()", lambda key=key, dl=dl: self.onTvNudge(key, dl))
             self.tvRows[key] = (pos, dia)
         g.setColumnStretch(2, 1)
-        self.tvRound = self._btn("近位端を 左鎖骨下直下の正円部に", None, "左鎖骨下動脈の口を過ぎて、断面が正円（短径/長径 ≥ 0.82）になる所を近位端にする"); c.addWidget(self.tvRound)
+        self.tvRound = self._btn("近位端を 左鎖骨下直下の正円部に", None, "左鎖骨下動脈の口を過ぎて、断面が正円（短径/長径 ≥ 0.82）になる所を近位端にする")
         r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("オーバーサイズ", "muted"))
         self.osGrp, self.osBtns = self._seg(["0%", "5%", "10%", "15%", "20%"], r)
         self.osBtns[2].checked = True
@@ -394,6 +394,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.endBtns[0].checked = True
         self.endBtns[0].setToolTip("端までフラップを押して広がる（この症例の術後 CT はこちらに近い）")
         self.endBtns[1].setToolTip("両端の 2 cm で、真腔のあるがままの形へなめらかに戻る（端はフラップを押し広げきらない）")
+        c.addWidget(self.tvRound)
         r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("径を手で決める", "muted"))
         self.dpSpin = qt.QSpinBox(); self.ddSpin = qt.QSpinBox()
         for sp, tip in ((self.dpSpin, "近位の径（自動 = 実測 × オーバーサイズ）"), (self.ddSpin, "遠位の径（自動 = 実測 × オーバーサイズ）")):
@@ -427,6 +428,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                               "緑 = 非 SINE 群より小・黄 = 間・赤 = SINE 群以上。判定の基準ではありません。", "muted"))
         nxt = self._btn("次へ: 術後 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
+        gc = self.tvPick.parentWidget(); pl.removeWidget(gc); pl.insertWidget(0, gc)     # 仮想グラフト（範囲・フラップ・両端）をいちばん上に（スクロールせずに見える）
 
         # ---- ページ 4: 術後（術後 CT を重ねて、計画との違いを見る）
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
