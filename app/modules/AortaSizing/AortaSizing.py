@@ -340,7 +340,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
         card, c = self._card(pl, "使い方")
         c.addWidget(self._lab("① 解離なら「真腔に沿わせる」→ 3D に真腔（水色）・偽腔（紫）を出して穴の場所を確かめる（緑の線が偽腔に入っていたら「真腔をクリックで直す」）"
-                              "　② 断面で穴をクリックしてエントリーを置く　③ 「範囲をドラッグで決める」→ ストレッチ像で近位端から遠位端までドラッグ"
+                              "　② 断面で穴をクリックしてエントリーを置く　③ 「クリックで 近位端 → 遠位端」→ ストレッチ像を 2 回クリック（Enter 2 回でも）→ −/＋ で微調整"
                               "　④ フラップ・両端・径を選ぶ → 遠位端の SINE の目安を見る", "muted"))
         card, c = self._card(pl, "解離（真腔）", "緑の線 = 断面の真腔")
         r = qt.QHBoxLayout(); c.addLayout(r)
@@ -361,8 +361,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._tbl(self.covTable, 170); c.addWidget(self.covTable)
 
         card, c = self._card(pl, "仮想グラフト", "置きたい範囲にカバードステントを描く")
-        self.tvRange = self._btn("範囲をドラッグで決める", "primary", "押してから、右のストレッチ像で 近位端 → 遠位端 までドラッグ（1 回で決まります）", True); c.addWidget(self.tvRange)
-        c.addWidget(self._lab("ストレッチ像の白い線（Plan P / Plan D）は、つかんでドラッグすると端だけ動きます。", "muted"))
+        self.tvPick = self._btn("クリックで 近位端 → 遠位端", "primary", "押してから、ストレッチ像（または 3D）を 近位端 → 遠位端 の順に 2 回クリック。Enter でも（今の断面を 近位端 → 遠位端）", True); c.addWidget(self.tvPick)
+        self.tvRange = self._btn("範囲をドラッグで決める", None, "押してから、右のストレッチ像で 近位端 → 遠位端 までドラッグ", True); self.tvRange.setVisible(False)
+        self.tvLen = qt.QLabel("—"); self.tvLen.setStyleSheet("font-size:17px; font-weight:bold; color:#ffffff"); c.addWidget(self.tvLen)
+        c.addWidget(self._lab("微調整: 近位端・遠位端の −/＋（1 mm・Shift を押しながらで 5 mm）、または ストレッチ像の白い線をつかんで動かす。", "muted"))
         g = qt.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(6); c.addLayout(g)
         for j, t in enumerate(("", "位置", "径（実測 → グラフト）")): g.addWidget(self._lab(t, "colh"), 0, j)
         self.tvRows = {}
@@ -372,6 +374,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             dia = self._lab("—"); g.addWidget(dia, r, 2)
             b = self._btn("ここに", None, f"今の断面の位置を{name}にする"); g.addWidget(b, r, 3)
             b.connect("clicked()", lambda key=key: self.onTvHere(key))
+            for j, (t, dl) in enumerate((("−", -1.0), ("＋", 1.0))):
+                nb = self._btn(t, None, f"{name}を 1 mm {'近位' if dl < 0 else '遠位'}へ（Shift で 5 mm）"); nb.setFixedWidth(34); g.addWidget(nb, r, 4 + j)
+                nb.connect("clicked()", lambda key=key, dl=dl: self.onTvNudge(key, dl))
             self.tvRows[key] = (pos, dia)
         g.setColumnStretch(2, 1)
         self.tvRound = self._btn("近位端を 左鎖骨下直下の正円部に", None, "左鎖骨下動脈の口を過ぎて、断面が正円（短径/長径 ≥ 0.82）になる所を近位端にする"); c.addWidget(self.tvRound)
@@ -515,6 +520,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         for b in self.flapBtns: b.connect("clicked()", self.onTvFlap)
         self.tvRound.connect("clicked()", self.onTvRound)
         self.tvRange.connect("toggled(bool)", self.onTvRange)
+        self.tvPick.connect("toggled(bool)", self.onTvPick)
         self.flShowBtn.connect("toggled(bool)", self.onFLShow)
         for b in self.axisBtns: b.connect("clicked()", self.onTvAxis)
         for b in self.endBtns: b.connect("clicked()", self.onTvEnds)
@@ -587,6 +593,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         L = self.logic
         if L.P is None or not hasattr(self, "tvRows"): return
         pl = L.planInit()
+        if hasattr(self, "tvLen"): self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm　（{self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}）")
         try: (Dp, mp, ap), (Dd, md, ad) = L.planDiams()
         except Exception as e: print("tv:", e); return
         for key, s, D, mD, man in (("p", pl["p"], Dp, mp, ap), ("d", pl["d"], Dd, md, ad)):
@@ -703,6 +710,35 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
     def onTvHere(self, key):
         self._dropSameRange(); self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
+
+    def onTvPick(self, on):
+        L = self.logic; L.pickPD = "p" if on else None; L._pickP = None
+        if on:
+            for b in (getattr(self, "planEditBtn", None), getattr(self, "tlFixBtn", None), getattr(self, "entryBtn", None), self.tvRange):
+                if b is not None and b.checked: b.checked = False
+            self._say("ストレッチ像で 近位端 をクリック（断面を動かして Enter でも）。")
+        L._drawGreen()
+
+    def onTvEnter(self):
+        """計画のページの Enter: 今の断面を 近位端 → 遠位端"""
+        L = self.logic
+        if not getattr(L, "pickPD", None):
+            self.tvPick.blockSignals(True); self.tvPick.checked = True; self.tvPick.blockSignals(False); L.pickPD = "p"; L._pickP = None
+        L._pickAt(float(L.curS))
+
+    def onTvNudge(self, key, dl):
+        L = self.logic; pl = L.planInit()
+        if qt.QApplication.keyboardModifiers() & qt.Qt.ShiftModifier: dl *= 5.0
+        pl[key] = float(np.clip(pl[key] + dl, 0.0, L.length - 1.0))
+        if pl["d"] < pl["p"] + 10.0:
+            if key == "p": pl["p"] = pl["d"] - 10.0
+            else: pl["d"] = pl["p"] + 10.0
+        self._dropSameRange(); L._queue(s=pl[key]); L._drawGreen()
+        self.tvRows[key][0].setText(self._tvRef(pl[key])); self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm　（{self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}）")
+        t = getattr(self, "_nudgeT", None)
+        if t is None:
+            t = self._nudgeT = qt.QTimer(); t.setSingleShot(True); t.timeout.connect(lambda: (self._busy(self.logic.planDraw), self._tvRefresh()))
+        t.start(450)                                                        # 押し終わってから 1 回だけ描き直す
 
     def onTvRange(self, on):
         self.logic.rangeMode = bool(on)
@@ -941,7 +977,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()
         self.logic._tvMode = tv
-        for btn, page in ((getattr(self, "tlFixBtn", None), 2), (getattr(self, "planEditBtn", None), 2), (getattr(self, "alignBtn", None), 3), (getattr(self, "tvRange", None), 2), (getattr(self, "entryBtn", None), 2)):
+        for btn, page in ((getattr(self, "tvPick", None), 2), (getattr(self, "tlFixBtn", None), 2), (getattr(self, "planEditBtn", None), 2), (getattr(self, "alignBtn", None), 3), (getattr(self, "tvRange", None), 2), (getattr(self, "entryBtn", None), 2)):
             if btn is not None and btn.checked and i != page: btn.checked = False
         if tv: self._tvEnter()
         try:                                                                  # TEVAR の時は血管を半透明にして、中のグラフトを見せる
@@ -1148,6 +1184,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             return
         if cmd == "tvplan":
             self._dropSameRange(); self.tvRange.blockSignals(True); self.tvRange.checked = False; self.tvRange.blockSignals(False)
+            self.tvPick.blockSignals(True); self.tvPick.checked = False; self.tvPick.blockSignals(False)
             self._busy(self.logic.planDraw); self._tvRefresh(); pl = self.logic.plan
             self._say(f"グラフト: {self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}（{pl['d'] - pl['p']:.0f} mm）。白い線をつかむと端だけ動かせます。"); return
         if cmd == "editdone":
@@ -1155,6 +1192,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             return
         if cmd == "fixapply": self._busy(self.logic.applyFixes, self._say); return
         if cmd == "fixexit": self.fixButton.checked = False; return
+        if cmd == "enter" and self.stack.currentIndex == 2 and getattr(self.logic, "_tvMode", False): self.onTvEnter(); return
+        if cmd == "esc" and getattr(self.logic, "pickPD", None): self.tvPick.checked = False; self._say("端の選びを取り消しました。"); return
         if cmd == "enter": self.onPlace()
         elif cmd == "pin": self.onPin()
         elif cmd == "mode": self._mode("lumen" if self.logic.mode == "outer" else "outer")
@@ -2449,6 +2488,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             ab = G(hs); lines.append((ab, (0.85, 0.85, 0.85), False))
             if np.isfinite(dmax): labels.append((ab[1], f"{self.rel(hs):+.0f} mm  {dmax:.1f}/{dmin:.1f}", (1, 1, 1), 13))
         pl = getattr(self, "plan", None)
+        pk = getattr(self, "_pickP", None)
+        if pk is not None and getattr(self, "pickPD", None):
+            ab = G(pk); lines.append((ab, (1.0, 0.9, 0.2), False))
+            if vn == "Green": labels.append((ab[1], "P", (1.0, 0.9, 0.2), 13))
         if pl is not None and pl.get("on", True) and pl.get("path") == self.path:
             for sx, nm in ((pl["p"], "Plan P"), (pl["d"], "Plan D")):
                 ab = G(sx); lines.append((ab, (0.95, 0.95, 1.0), False))
@@ -2725,7 +2768,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         d = getattr(self, "_alDrag", None)
         if d is not None and d[0] == "xy":
             k, uv = self._uvRed(it); dd = (uv - d[1])[0] * self.B[k] + (uv - d[1])[1] * self.N[k]
-            self._alDrag = (d[0], d[1], dd, d[3]); self._showContour(exact=False); self._abort(it); return
+            self._alDrag = (d[0], d[1], dd, d[3]); self._abort(it)
+            if time.time() - getattr(self, "_lastMv", 0.0) > 0.08: self._lastMv = time.time(); self._showContour(exact=False)
+            return
         p = getattr(self, "_pdDrag", None)
         if p is not None:
             k, uv = self._uvRed(it)
@@ -2733,8 +2778,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             else: p["sc"] = float(np.clip(np.linalg.norm(uv - p["c"]) / max(p["r0"], 1.0), 0.5, 1.5))
             st = getattr(self, "onStatus", None)
             msg = f"シミュレーション: ずらす {np.linalg.norm(p['d']):.1f} mm" if p["kind"] == "move" else f"シミュレーション: 太さ {(p['sc'] - 1) * 100:+.0f}%"
-            if st: st(msg + f"（離すと前後 {self.ADJ_SOFT:.0f} mm がなめらかについてきます）")
-            self._showContour(exact=False); self._abort(it)
+            self._abort(it)
+            if time.time() - getattr(self, "_lastMv", 0.0) > 0.08:
+                self._lastMv = time.time(); self._showContour(exact=False)
+                if st: st(msg + f"（離すと前後 {self.ADJ_SOFT:.0f} mm がなめらかについてきます）")
 
     def _releaseRed(self, it):
         cb = getattr(self, "onKey", None)
@@ -2812,6 +2859,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
         if it.GetShiftKey(): return
         pl = getattr(self, "plan", None)
+        if getattr(self, "_tvMode", False) and getattr(self, "pickPD", None):  # TEVAR: クリックで 近位端 → 遠位端
+            self._pickAt(self._sGreen(it, nm)); self._abort(it); return
         if getattr(self, "_tvMode", False) and pl is not None and pl.get("path") == self.path:   # TEVAR: 範囲をドラッグ / 白い線（近位・遠位端）をつかんで動かす
             sC = self._sGreen(it, nm)
             if getattr(self, "rangeMode", False): self._tvDrag = ("range", sC); pl["p"] = pl["d"] = sC; self._drawGreen(); self._abort(it); return
@@ -3107,6 +3156,20 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if getattr(self, "_tvDrag", None) is not None or getattr(self, "_alDrag", None) is not None: self._releaseGreen(it); return
         self._drawGreen()
 
+    def _pickAt(self, s):
+        """端を決める: 1 回目 = 近位端、2 回目 = 遠位端 → グラフトを描く"""
+        s = float(np.clip(s, 0.0, self.length)); st = getattr(self, "onStatus", None); pl = self.planInit()
+        self._queue(s=s)                                                    # その断面も出す
+        if getattr(self, "pickPD", None) != "d" or getattr(self, "_pickP", None) is None:
+            self._pickP = s; self.pickPD = "d"; self._drawGreen()
+            if st: st("近位端を決めました（黄色の線 P）。次に遠位端をクリック（または断面を動かして Enter）。Esc で取り消し。")
+            return
+        p, d = sorted((self._pickP, s))
+        if d < p + 10.0: d = min(p + 10.0, self.length - 1.0)
+        self._pickP = None; self.pickPD = None; pl["p"], pl["d"] = p, d; pl["path"] = self.path
+        cb = getattr(self, "onKey", None)
+        if cb: qt.QTimer.singleShot(0, lambda: cb("tvplan"))
+
     def _releaseGreen(self, it):
         d = getattr(self, "_alDrag", None)
         if d is not None and d[0] == "s":
@@ -3144,6 +3207,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         dist, name, s = best
         if name is None or dist > 15: return
         if name != self.path and getattr(self, "_tvMode", False): return              # TEVAR: 計画の経路のまま
+        if getattr(self, "_tvMode", False) and getattr(self, "pickPD", None): self._pickAt(s); return
         if name != self.path and s > getattr(self, "sharedLen", 0) + 2:
             qt.QTimer.singleShot(0, lambda: self._switch(name, s))
         else: self._queue(s=s)
@@ -3646,6 +3710,21 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         return np.maximum(rs[np.maximum(first - 1, 0)], 1.0)
 
     def _graftGeom(self, lo, hi, Dp, Dd, path):
+        """_graftGeom0 の結果を覚えておく（表の更新・比べる のたびに計算し直さない）"""
+        pl = getattr(self, "plan", None) or {}; tv = self.tlValid() if self.P is not None else False
+        key = (round(float(lo), 2), round(float(hi), 2), round(float(Dp), 2), round(float(Dd), 2), path, self.path, id(self.straight),
+               bool(pl.get("tl")), pl.get("flap"), pl.get("ends"), pl.get("axis"), tuple(tuple(float(x) for x in a) for a in (pl.get("adj") or [])),
+               tv, id(self.tl) if tv else 0, self.tl.get("ver", 0) if tv else 0, len(self.P) if self.P is not None else 0)
+        mem = self.__dict__.setdefault("_ggMemo", {})
+        if key in mem:
+            F, ks, R, C, gr, nom = mem[key]; self._graftRad = gr; self._graftNominal = nom
+            return F, ks, R.copy(), C.copy()
+        F, ks, R, C = self._graftGeom0(lo, hi, Dp, Dd, path)
+        if len(mem) > 6: mem.clear()
+        mem[key] = (F, ks, R.copy(), C.copy(), self._graftRad, self._graftNominal)
+        return F, ks, R, C
+
+    def _graftGeom0(self, lo, hi, Dp, Dd, path):
         """仮想グラフトの形。R = 断面ごとの相当半径、C = 中心。self._graftRad に半径の輪（広がった形）も置く"""
         from scipy import ndimage
         F = self.frames[path]; k0, k1 = self._k(lo, path), self._k(hi, path); ks = np.arange(k0, k1 + 1); n = len(ks)
@@ -3883,7 +3962,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for j in range(2): cen[:, j] = ndimage.gaussian_filter1d(np.interp(np.arange(K), np.where(ok)[0], cen[ok, j]), 3.0 / STEP)
         u = cen[:, 1] * STEP - HALF; v = cen[:, 0] * STEP - HALF
         deq = np.sqrt(4 * cnt * STEP * STEP / np.pi); deq[~ok] = np.nan
-        tl.update(cen2=cen, C=self.P + u[:, None] * self.B + v[:, None] * self.N, deq=deq)
+        tl.update(cen2=cen, C=self.P + u[:, None] * self.B + v[:, None] * self.N, deq=deq, ver=tl.get("ver", 0) + 1); tl["_xy"] = {}
 
     def _tlSeedAt(self, sd):
         """手で直した点（3D）→ いまの中心線の断面 k と (u, v)"""
@@ -3955,20 +4034,22 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _tlXY(self, k):
         """断面 k の真腔の輪郭（中心からの放射でふち）。(u, v) mm"""
-        tl = self.tl; m = tl["masks"][k]
-        if not m.any(): return None
+        tl = self.tl; cache = tl.setdefault("_xy", {})
+        if k in cache: return cache[k]
+        m = tl["masks"][k]
+        if not m.any(): cache[k] = None; return None
         r0, c0 = tl["cen2"][k] if np.isfinite(tl["cen2"][k][0]) else np.argwhere(m).mean(0)
         if not (0 <= int(r0) < m.shape[0] and 0 <= int(c0) < m.shape[1]) or not m[int(r0), int(c0)]:
             r0, c0 = np.argwhere(m).mean(0)
-        th = np.linspace(0, 2 * np.pi, 96, endpoint=False); out = []
-        for t in th:
-            dr, dc = math.sin(t), math.cos(t); s_ = 0.0
-            while True:
-                r, c = int(round(r0 + dr * (s_ + 0.5))), int(round(c0 + dc * (s_ + 0.5)))
-                if not (0 <= r < m.shape[0] and 0 <= c < m.shape[1]) or not m[r, c]: break
-                s_ += 0.5
-            out.append(((c0 + dc * s_) * STEP - HALF, (r0 + dr * s_) * STEP - HALF))
-        return np.array(out)
+        th = np.linspace(0, 2 * np.pi, 96, endpoint=False); dr, dc = np.sin(th)[:, None], np.cos(th)[:, None]
+        ss = np.arange(0.0, 2 * m.shape[0], 0.5)[None, :]                  # 中心から 0.5 画素ずつ外へ。最初に真腔を出た所がふち
+        rr = np.rint(r0 + dr * (ss + 0.5)).astype(int); cc = np.rint(c0 + dc * (ss + 0.5)).astype(int)
+        ok = (rr >= 0) & (rr < m.shape[0]) & (cc >= 0) & (cc < m.shape[1])
+        ins = ok & m[np.clip(rr, 0, m.shape[0] - 1), np.clip(cc, 0, m.shape[1] - 1)]
+        first = np.where((~ins).any(1), np.argmax(~ins, 1), ins.shape[1]); s_ = first * 0.5
+        out = np.c_[(c0 + np.cos(th) * s_) * STEP - HALF, (r0 + np.sin(th) * s_) * STEP - HALF]
+        cache[k] = out
+        return out
 
     def extractFL(self, status=print):
         """造影される偽腔: 伸ばした画像で、大動脈の壁の内側・真腔の外にある造影された所"""
