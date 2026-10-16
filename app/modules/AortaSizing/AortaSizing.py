@@ -453,7 +453,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         c.addWidget(self._lab("断面で金色の点を内腔の壁などに合わせてドラッグ（その高さの前後 3 cm）、ストレッチ像で上下にドラッグすると全体が頭尾方向に動きます。離すと金属を拾い直し、表も更新します。", "muted"))
         self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
         c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。"
-                              "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属の輪に円を当てはめた値）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
+                              "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属に楕円を当てはめた値。径 = 面積が同じ円の径、かっこ内は長径×短径）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
         nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(4)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
@@ -619,7 +619,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                     ("d", "plan"): self._tvRef(pl["d"]), ("d", "post"): self._tvRef(ac["hi"]), ("d", "diff"): f"{cmp_['dD']:+.0f} mm",
                     ("len", "plan"): f"{cmp_['planLen']:.0f} mm", ("len", "post"): f"{cmp_['realLen']:.0f} mm", ("len", "diff"): f"{cmp_['realLen'] - cmp_['planLen']:+.0f} mm"}
             if "Dreal" in cmp_:
-                vals.update({("dia", "plan"): (f"{cmp_['Dplan']:.0f} mm（名目 {cmp_['Dnom']:.0f}）" if cmp_.get("Dnom") and cmp_["Dnom"] - cmp_["Dplan"] > 0.5 else f"{cmp_['Dplan']:.0f} mm"), ("dia", "post"): f"{cmp_['Dreal']:.0f} mm（{cmp_['DrealMin']:.0f}〜{cmp_['DrealMax']:.0f}）",
+                vals.update({("dia", "plan"): (f"{cmp_['Dplan']:.0f} mm（名目 {cmp_['Dnom']:.0f}）" if cmp_.get("Dnom") and cmp_["Dnom"] - cmp_["Dplan"] > 0.5 else f"{cmp_['Dplan']:.0f} mm"), ("dia", "post"): (f"{cmp_['Dreal']:.0f} mm（{cmp_['RealMaj']:.0f}×{cmp_['RealMin']:.0f}）" if "RealMaj" in cmp_ else f"{cmp_['Dreal']:.0f} mm（{cmp_['DrealMin']:.0f}〜{cmp_['DrealMax']:.0f}）"),
                              ("dia", "diff"): f"{round(cmp_['Dreal'] - cmp_['Dplan']) + 0:+.0f} mm",
                              ("off", "plan"): "広がりの予測" if getattr(L, "_graftRad", None) is not None else ("真腔の中心" if pl.get("tl") else "大動脈の中心"), ("off", "post"): f"中央値 {cmp_['offMed']:.0f} mm",
                              ("off", "diff"): f"最大 {cmp_['offMax']:.0f} mm（{self._tvRef(cmp_['offAt'])}）"})
@@ -2327,9 +2327,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         try:
             ac = getattr(self, "actual", None)
             if ac is not None and ac.get("C") is not None and ac["path"] == self.path and ac["ks"][0] <= k <= ac["ks"][-1]:
-                i = k - ac["ks"][0]; cc_ = ac["C"][i] - P; th = np.linspace(0, 2 * np.pi, 72, endpoint=False)
-                xy = np.c_[cc_ @ B + ac["R"][i] * np.cos(th), cc_ @ N + ac["R"][i] * np.sin(th)]
-                lines.append((W(xy), (1.0, 0.72, 0.2), True)); labels.append((W(xy[54:55])[0], f"Post {2 * ac['R'][i]:.0f}", (1.0, 0.72, 0.2), 14))
+                i = k - ac["ks"][0]; cc_ = ac["C"][i] - P
+                if ac.get("Rth") is not None:                                              # 実際のステント = 金属に当てはめた楕円
+                    Rt = ac["Rth"][i]; th = np.linspace(0, 2 * np.pi, len(Rt), endpoint=False); xy = np.c_[cc_ @ B + Rt * np.cos(th), cc_ @ N + Rt * np.sin(th)]
+                else:
+                    th = np.linspace(0, 2 * np.pi, 72, endpoint=False); xy = np.c_[cc_ @ B + ac["R"][i] * np.cos(th), cc_ @ N + ac["R"][i] * np.sin(th)]
+                lab_ = f"Post {2 * ac['A'][i]:.0f}x{2 * ac['Bm'][i]:.0f}" if ac.get("A") is not None else f"Post {2 * ac['R'][i]:.0f}"
+                lines.append((W(xy), (1.0, 0.72, 0.2), True)); labels.append((W(xy[54:55])[0], lab_, (1.0, 0.72, 0.2), 14))
             if ac is not None and ac.get("path") == self.path:                          # 実際の金属（この断面の前後 2.5 mm）を金色の点で
                 Tk = np.cross(B, N); dX = ac["pts"] + self._liveAlign() - P; mm_ = np.abs(dX @ Tk) <= 2.5
                 if mm_.any():
@@ -4142,7 +4146,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._fitRings()
         if ac.get("C") is not None:
             F = self.frames[ac["path"]]; ks = ac["ks"]
-            self._model("TEVAR 術後（範囲）", self._tubePD(ac["C"], F["N"][ks], F["B"][ks], ac["R"] + 0.6), (1.0, 0.75, 0.3), 0.25, spec=0.1)
+            tube = self._tubeRadPD(ac["C"], F["B"][ks], F["N"][ks], ac["Rth"] + 0.6) if ac.get("Rth") is not None else self._tubePD(ac["C"], F["N"][ks], F["B"][ks], ac["R"] + 0.6)
+            self._model("TEVAR 術後（範囲）", tube, (1.0, 0.75, 0.3), 0.25, spec=0.1)
         for nm, (v, op, psz) in vis.items():                                             # 前の表示状態（出す/隠す・透明度）に戻す
             m0 = slicer.mrmlScene.GetFirstNodeByName(nm)
             if m0 is not None and m0.GetDisplayNode(): m0.GetDisplayNode().SetVisibility(v); m0.GetDisplayNode().SetOpacity(op); m0.GetDisplayNode().SetPointSize(psz)
@@ -4156,28 +4161,34 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         except Exception: pass
 
     def _fitRings(self):
-        """術後の金属を、中心線の各断面（前後 4 mm）で円に当てはめる → 実際のグラフトの中心と半径"""
+        """術後の金属を、中心線の各断面（前後 4 mm）で楕円に当てはめる → 実際のグラフトの中心・長径・短径・向き。
+        ステントは正円に広がるとは限らない（解離では楕円）ので、円ではなく楕円で（円だと径と中心に系統誤差が出る）"""
         ac = self.actual; F = self.frames[ac["path"]]
         from scipy.spatial import cKDTree
         from scipy import ndimage
-        k0, k1 = self._k(ac["lo"], ac["path"]), self._k(ac["hi"], ac["path"]); ks = np.arange(k0, k1 + 1)
+        k0, k1 = self._k(ac["lo"], ac["path"]), self._k(ac["hi"], ac["path"]); ks = np.arange(k0, k1 + 1); n = len(ks)
         X = ac["pts"]; _, kk = cKDTree(F["P"]).query(X)
         d = X - F["P"][kk]; u = (d * F["B"][kk]).sum(1); v = (d * F["N"][kk]).sum(1)
-        cu = np.full(len(ks), np.nan); cv = np.full(len(ks), np.nan); rr = np.full(len(ks), np.nan); w = int(4.0 / STEP)
-        for i in range(0, len(ks), 4):
+        cu, cv, A, Bm, c2, s2 = (np.full(n, np.nan) for _ in range(6)); w = int(4.0 / STEP)
+        for i in range(0, n, 4):
             m = np.abs(kk - ks[i]) <= w
-            if m.sum() < 12: continue
-            A = np.c_[u[m], v[m], np.ones(m.sum())]; b = u[m] ** 2 + v[m] ** 2
-            try: sol = np.linalg.lstsq(A, b, rcond=None)[0]
-            except Exception: continue
-            x0, y0 = sol[0] / 2, sol[1] / 2; r = math.sqrt(max(sol[2] + x0 * x0 + y0 * y0, 0))
-            ang = np.sort(np.arctan2(v[m] - y0, u[m] - x0)); gap = np.max(np.diff(np.r_[ang, ang[0] + 2 * np.pi]))
-            if 6.0 <= r <= 30.0 and gap < np.pi * 0.8: cu[i], cv[i], rr[i] = x0, y0, r      # 輪の半分以上に金属がある時だけ
-        ok = np.isfinite(rr)
+            if m.sum() < 15: continue
+            uu, vv = u[m], v[m]
+            e = _fitEllipse(uu, vv)
+            if e is None or not (12.0 <= e[2] <= e[1] <= 60.0 and e[2] / e[1] >= 0.45): continue
+            (x0, y0), maj, mnr, ph = e
+            ang = np.sort(np.arctan2(vv - y0, uu - x0)); gap = np.max(np.diff(np.r_[ang, ang[0] + 2 * np.pi]))
+            if gap >= np.pi * 0.8: continue                                           # 輪の半分以上に金属がある時だけ
+            cu[i], cv[i], A[i], Bm[i] = x0, y0, maj / 2, mnr / 2
+            ecc = (maj - mnr) / max(maj, 1e-6); c2[i], s2[i] = ecc * math.cos(2 * ph), ecc * math.sin(2 * ph)   # 向きは 2 倍角で（180° で同じ）
+        ok = np.isfinite(A)
         if ok.sum() < 3: ac["C"] = None; return
-        idx = np.arange(len(ks)); sm = lambda a: ndimage.gaussian_filter1d(np.interp(idx, idx[ok], a[ok]), 3.0 / STEP, mode="nearest")
-        cu, cv, rr = sm(cu), sm(cv), sm(rr)
-        ac.update(ks=ks, C=F["P"][ks] + cu[:, None] * F["B"][ks] + cv[:, None] * F["N"][ks], R=rr, fitOK=ok)
+        idx = np.arange(n); sm = lambda a: ndimage.gaussian_filter1d(np.interp(idx, idx[ok], a[ok]), 3.0 / STEP, mode="nearest")
+        cu, cv, A, Bm, c2, s2 = (sm(a) for a in (cu, cv, A, Bm, c2, s2))
+        Bm = np.minimum(Bm, A); ph = 0.5 * np.arctan2(s2, c2)
+        th = np.linspace(0, 2 * np.pi, self.NTH, endpoint=False)
+        Rth = A[:, None] * Bm[:, None] / np.sqrt((Bm[:, None] * np.cos(th[None] - ph[:, None])) ** 2 + (A[:, None] * np.sin(th[None] - ph[:, None])) ** 2)
+        ac.update(ks=ks, C=F["P"][ks] + cu[:, None] * F["B"][ks] + cv[:, None] * F["N"][ks], R=np.sqrt(A * Bm), A=A, Bm=Bm, phi=ph, Rth=Rth, cu=cu, cv=cv, fitOK=ok)
 
     def comparePost(self):
         """計画と術後の違い（中心線に沿った mm。＋ は遠位＝足側へずれた）"""
@@ -4200,6 +4211,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                     out.update(Dplan=float(np.median(2 * Rp[iP])), Dreal=float(np.median(2 * ac["R"][iA])),
                                DrealMin=float(np.min(2 * ac["R"][iA])), DrealMax=float(np.max(2 * ac["R"][iA])),
                                offMed=float(np.median(off)), offMax=float(np.max(off)), offAt=float(self.frames[pl["path"]]["s"][both[int(np.argmax(off))]]))
+                    if ac.get("A") is not None: out.update(RealMaj=float(np.median(2 * ac["A"][iA])), RealMin=float(np.median(2 * ac["Bm"][iA])))
         except Exception as e: print("compare geom:", e)
         return out
 
