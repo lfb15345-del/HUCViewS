@@ -273,9 +273,13 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.fixApply = self._btn("反映して作り直す（0 点）", "primary", "置いた修正点で、中心線をまとめて 1 回だけ作り直す"); fr.addWidget(self.fixApply, 1)
         self.fixClear = self._btn("点を消す", None, "反映していない修正点を全部消す"); fr.addWidget(self.fixClear)
         self.fixRow.hide()
-        self.editButton = self._btn("中心線を直す（点をドラッグ・右クリックで削除）", None, None, True); c.addWidget(self.editButton)
+        self.editButton = self._btn("中心線を手で直す（3 断面でクリック / ドラッグ）", "primary", "軸位・矢状断・冠状断のどこでも、中心線の近くをクリックするとそこへ動き、押したままドラッグでずらせます", True); c.addWidget(self.editButton)
+        self.editHint = self._lab("3 断面のどこでも: 中心線（線）の近くをクリック → そこへ動く。押したままドラッグ → ずらす。"
+                                  "右クリック → 点を消す。ホイール → スライス送り。Ctrl+Z → 戻す。終わったら「完了」か Enter（ここで 1 回だけ作り直します）。", "muted")
+        self.editHint.setWordWrap(True); self.editHint.hide(); c.addWidget(self.editHint)
+        self.fixButton.hide()
         r = qt.QHBoxLayout(); c.addLayout(r)
-        self.addPtButton = self._btn("通る点を追加"); r.addWidget(self.addPtButton)
+        self.addPtButton = self._btn("通る点を追加"); r.addWidget(self.addPtButton); self.addPtButton.hide()
         self.centerHereButton = self._btn("ここを中心に寄せる"); r.addWidget(self.centerHereButton)
         self.centerAllButton = self._btn("全体を中心に寄せる"); r.addWidget(self.centerAllButton)
         c.addWidget(self._lab("3D の線をクリック = 左右の切り替えとその位置へ移動", "muted"))
@@ -677,12 +681,20 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._say("中心線を合わせるモード: 軸位（A）か断面（X）で真腔の中心をクリック → ホイールで次の高さへ → … → 「反映して作り直す」。" if on else "合わせるモードを終えました。")
 
     def onEdit(self, on):
+        if self.logic.P is None:
+            self.editButton.blockSignals(True); self.editButton.checked = False; self.editButton.blockSignals(False); self._say("先に中心線を作ってください"); return
+        self.editHint.setVisible(on); self.editButton.setText("完了（中心線を作り直す）" if on else "中心線を手で直す（3 断面でクリック / ドラッグ）")
+        self.addPtButton.setVisible(not on)
         self.logic.editMode(on, self.logic.path)
         if not on and self.logic.path:
-            self._busy(lambda: (self.logic.rebuild(self.logic.path, self._say), self.refreshReadout(), self.refreshLists()))
+            L = self.logic
+            def fin():
+                L._rebuildKeep(self._say)                                     # 直した所だけ作り直す（広ければ全部）
+                L.showLayout(); L.setPosition(min(L.curS, L.length)); self.refreshReadout(); self.refreshLists()
+            self._busy(fin)
             self._say("直した中心線で作り直しました。")
         else:
-            self._say("元の CT（3 断面・3D）で中心線の点をドラッグ。右クリックで削除。終わったらもう一度ボタン。")
+            self._say("3 断面のどこでも、中心線の近くをクリックするとそこへ動きます（押したままドラッグでずらす）。終わったら「完了」。")
 
     def onAddPoint(self):
         if not self.editButton.checked: self.editButton.checked = True
@@ -798,6 +810,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._say(self.logic.undoLast())
 
     def onKey(self, cmd):
+        if cmd == "editdone":
+            if self.editButton.checked: self.editButton.checked = False
+            return
         if cmd == "fixapply": self._busy(self.logic.applyFixes, self._say); return
         if cmd == "fixexit": self.fixButton.checked = False; return
         if cmd == "enter": self.onPlace()
@@ -1972,7 +1987,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _drawGreen(self):
         """ストレッチ像: 現在位置（赤）・ベースライン（緑）・マーカー（水色）・マウスの位置（白）を軽く描く"""
-        if self.P is None: return
+        if self.P is None or getattr(self, "_editing", False): return
         for ovn, vn, rot in (("ovGreen", "Green", self.rot), ("ovOrange", "Orange", self.rot + getattr(self, "orangeOff", 90.0))):
             o = getattr(self, ovn, None)
             if o is not None: self._drawStretch(o, vn, rot)
@@ -3813,7 +3828,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 except Exception: pass
             self._iTags = []
             for k, cc in self.curves.items():
-                d = cc.GetDisplayNode(); d.RemoveAllViewNodeIDs(); d.SetVisibility(k == name); cc.SetLocked(k != name)
+                d = cc.GetDisplayNode(); d.RemoveAllViewNodeIDs(); d.SetVisibility(k == name); cc.SetLocked(True)   # つまみは Slicer に触らせない（下の自前の操作で動かす）
+                if k == name: d.SetLineThickness(0.6); d.SetGlyphScale(2.2); d.SetPointLabelsVisibility(False)
             if c is not None and c.GetNumberOfControlPoints():
                 p = self.P[self._k()] if self.P is not None else [0, 0, 0]
                 slicer.modules.markups.logic().JumpSlicesToLocation(p[0], p[1], p[2], True)
@@ -3821,13 +3837,120 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             for nm in ("Red", "Green", "Yellow"):
                 it = lm.sliceWidget(nm).sliceView().interactor()
                 self._editTags.append((it, it.AddObserver(vtk.vtkCommand.RightButtonPressEvent, lambda cl, e, nm=nm: self._rightDelete(cl, nm), 1.0)))
+                E = vtk.vtkCommand
+                self._editTags.append((it, it.AddObserver(E.LeftButtonPressEvent, lambda cl, e, nm=nm: self._edPress(cl, nm), 2.0)))
+                self._editTags.append((it, it.AddObserver(E.MouseMoveEvent, lambda cl, e, nm=nm: self._edMove(cl, nm), 2.0)))
+                self._editTags.append((it, it.AddObserver(E.LeftButtonReleaseEvent, lambda cl, e, nm=nm: self._edRelease(cl, nm), 2.0)))
+                self._editTags.append((it, it.AddObserver(E.KeyPressEvent, lambda cl, e: self._edKey(cl), 2.0)))
+            self._edHist = []; self._edDrag = None
+            self._edShadow(c)                                                   # 矢状断・冠状断に中心線の全体をうすく出す
+            for ov in ("ovRed", "ovGreen", "ovOrange"):                      # 計測用の線・文字は消す（3 断面では意味がない）
+                o = getattr(self, ov, None)
+                if o is not None:
+                    try: o.set([], [])
+                    except Exception: pass
+            p = self.P[self._k()] if self.P is not None else np.zeros(3)
+            for nm, fw in (("Red", 160.0), ("Green", 300.0), ("Yellow", 300.0)):   # 今の位置を真ん中に、見やすい大きさで
+                w = lm.sliceWidget(nm); sn = w.mrmlSliceNode()
+                try: w.sliceView().cornerAnnotation().ClearAllTexts()
+                except Exception: pass
+                fov = sn.GetFieldOfView(); r = fov[1] / max(fov[0], 1e-6)
+                sn.SetFieldOfView(fw, fw * r, fov[2]); sn.JumpSliceByCentering(float(p[0]), float(p[1]), float(p[2]))
         else:
             for it, tag in getattr(self, "_editTags", []):
                 try: it.RemoveObserver(tag)
                 except Exception: pass
             self._editTags = []
-            for cc in self.curves.values(): cc.SetLocked(True)
-            self._editing = False
+            for cc in self.curves.values():
+                cc.SetLocked(True)
+                try: cc.GetDisplayNode().SetSliceProjection(False)
+                except Exception: pass
+            self._editing = False; self._edDrag = None
+            self._edShadow(None)
+
+    def _edShadow(self, c):
+        """中心線の全体の通り道を、矢状断・冠状断にうすく描く（編集した点にすぐついていく）"""
+        old = getattr(self, "_shadowTag", None)
+        if old is not None:
+            try: old[0].RemoveObserver(old[1])
+            except Exception: pass
+            self._shadowTag = None
+        for o in getattr(self, "_edOv", []) or []:
+            try: o.remove()
+            except Exception: pass
+        self._edOv = []
+        if c is None: return
+        from vtk.util.numpy_support import vtk_to_numpy
+        self._edOv = [_Overlay(nm) for nm in ("Green", "Yellow") if slicer.app.layoutManager().sliceWidget(nm) is not None]
+        def sync(caller=None, ev=None):
+            try:
+                cp = c.GetCurvePointsWorld()
+                if cp is None or cp.GetNumberOfPoints() < 2: return
+                pts = vtk_to_numpy(cp.GetData()).astype(float)
+                for o in self._edOv: o.set([(pts, (1.0, 0.72, 0.25), False)])
+            except Exception as e: print("shadow:", e)
+        sync(); self._shadowTag = (c, c.AddObserver(vtk.vtkCommand.ModifiedEvent, sync))
+
+    def _edAbort(self, it):
+        for tt, tag in getattr(self, "_editTags", []):
+            if tt is it:
+                try: it.GetCommand(tag).SetAbortFlag(1)
+                except Exception: pass
+
+    def _edPress(self, it, nm):
+        """クリック = 近くの中心線をそこへ。押したままドラッグ = ずらす。中心線から遠い所は普段どおり（ウィンドウ）"""
+        c = self.curves.get(self.path)
+        if c is None or it.GetShiftKey() or it.GetControlKey(): return
+        from vtk.util.numpy_support import vtk_to_numpy
+        sn = slicer.app.layoutManager().sliceWidget(nm).mrmlSliceNode(); ras = self._rasAt(it, nm)
+        M = sn.GetSliceToRAS(); n = np.array([M.GetElement(i, 2) for i in range(3)]); n /= np.linalg.norm(n) + 1e-9
+        cp = c.GetCurvePointsWorld()
+        if cp is None or cp.GetNumberOfPoints() < 2: return
+        pts = vtk_to_numpy(cp.GetData()).astype(float)
+        off = (pts - ras) @ n; inpl = pts - np.outer(off, n)
+        axial = sn.GetOrientation() == "Axial"
+        cand = np.where(np.abs(off) < 6.0)[0] if axial else np.arange(len(pts))     # 矢状断・冠状断は、見えている線（全体）のどこでもつかめる
+        if len(cand) == 0: return
+        d = np.linalg.norm(inpl[cand] - ras, axis=1); j = int(cand[np.argmin(d)])
+        if d.min() > (40.0 if axial else 20.0): return
+        q = pts[j]; cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
+        self._edHist.append(cps.copy())
+        dc = np.linalg.norm(cps - q, axis=1); i = int(np.argmin(dc))
+        if dc[i] > 6.0:                                                              # 近くに点が無ければ、そこに点を足す
+            best, bi = 1e9, 0
+            for t_ in range(len(cps) - 1):
+                a, b = cps[t_], cps[t_ + 1]; ab = b - a; tt = np.clip((q - a) @ ab / max(ab @ ab, 1e-9), 0, 1)
+                dd = np.linalg.norm(a + tt * ab - q)
+                if dd < best: best, bi = dd, t_
+            c.InsertControlPoint(bi + 1, vtk.vtkVector3d(*q)); i = bi + 1
+        keep = 0.0 if axial else float((q - ras) @ n)                                 # 矢状断・冠状断では奥行きはそのまま（見えている線を横にずらす）
+        c.SetNthControlPointPositionWorld(i, *(ras + keep * n))
+        self._edDrag = (i, nm, keep, n); self._edAbort(it)
+
+    def _edMove(self, it, nm):
+        dr = getattr(self, "_edDrag", None)
+        if dr is None or dr[1] != nm: return
+        i, _, keep, n = dr; c = self.curves.get(self.path); c.SetNthControlPointPositionWorld(i, *(self._rasAt(it, nm) + keep * n)); self._edAbort(it)
+
+    def _edRelease(self, it, nm):
+        if getattr(self, "_edDrag", None) is None: return
+        self._edDrag = None; self._edAbort(it)
+        st = getattr(self, "onStatus", None)
+        if st: st(f"中心線を動かしました（{len(self._edHist)} 回）。続けてクリック / ドラッグ。終わったら「完了」か Enter。Ctrl+Z で戻す。")
+
+    def _edKey(self, it):
+        key = it.GetKeySym() or ""
+        if (key in ("z", "Z") and it.GetControlKey()) or key in ("BackSpace",):
+            if self._edHist:
+                c = self.curves.get(self.path); cps = self._edHist.pop()
+                wasMod = c.StartModify(); c.RemoveAllControlPoints()
+                for q in cps: c.AddControlPoint(vtk.vtkVector3d(*q))
+                c.EndModify(wasMod)
+            self._edAbort(it)
+        elif key in ("Return", "KP_Enter", "Escape"):
+            cb = getattr(self, "onKey", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb("editdone"))
+            self._edAbort(it)
 
     def _rightDelete(self, it, nm):
         c = self.curves.get(self.path)
