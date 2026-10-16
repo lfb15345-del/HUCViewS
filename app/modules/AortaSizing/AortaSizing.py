@@ -413,7 +413,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.flapGrp, self.flapBtns = self._seg(["慢性", "急性", "動かない"], r)
         self.flapBtns[0].checked = True
         self.flapBtns[0].setToolTip("フラップを押して真腔が広がる（径 ≒ 真腔の長径まで）。三日月の両端はガターとして残る。断面の緑の線 = 押されて動くフラップ")
-        self.flapBtns[1].setToolTip("フラップがよく動く: 真腔の長径（+3 mm）の円まで丸く広がる（グラフトの名目径が上限。偽腔側の大動脈の真ん中までは行かない）")
+        self.flapBtns[1].setToolTip("フラップがよく動く: 真腔の長径の円まで丸く広がる（グラフトの名目径が上限。偽腔側の大動脈の真ん中までは行かない）")
         self.flapBtns[2].setToolTip("フラップは動かない: グラフトは術前の真腔の中だけ（細い角はガター）")
         r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("両端", "muted"))
         self.endGrp, self.endBtns = self._seg(["押し広げる", "あるがまま"], r)
@@ -3755,7 +3755,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     #  解離でない所（真腔 = 内腔全体）は、内腔の中で径まで広がり、楕円の所は壁に押されて沿う
     GRAFT_END_MM = 20.0      # 「端はあるがまま」の時、両端のこの長さで、押し広げた形から真腔のあるがままの形へなめらかに戻る
     ELL_RATIO = 0.82         # 解離（慢性）: 広がったグラフトの短径/長径。この症例の術後 CT で中央値 0.82（0.76〜0.86）
-    ELL_PLUS = 3.0           # 長径 = 真腔の長径 + 3 mm（同じく術後 CT で +2.9 mm）。グラフトの径が上限
+    ELL_PLUS = 0.0           # 長径 = 真腔の長径（足し算なし）。+3 mm でも試したが、楕円で測った実際の径・中心のずれは 0 の方が近かった（22.2/23.2 mm・2.9 mm vs 24.3・4.1 mm）
     GRAFT_WALL_MM = 1.5      # 外周（壁の外側）から、この厚みぶん内側までしかグラフトは広がらない
     NTH = 72
 
@@ -3789,7 +3789,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if mt and mt["dmin"] / max(mt["dmax"], 1e-6) < 0.8:                 # 三日月・楕円の真腔: 楕円のまま広がる（長軸は真腔の長径の向き）
                 a_, b_ = mt["maxLine"]; phi = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
                 A = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0); ell = (A, A * self.ELL_RATIO, phi); r = A
-        elif useTL and flap == "acute":                                          # 急性: フラップがよく動いて丸くなるが、偽腔側の大動脈の真ん中までは行かない → 真腔の長径（+3 mm）の円まで
+        elif useTL and flap == "acute":                                          # 急性: フラップがよく動いて丸くなるが、偽腔側の大動脈の真ん中までは行かない → 真腔の長径の円まで
             xy = self._tlXY(k); mt = _polyMetrics(xy) if xy is not None else None
             if mt: r = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0)
         r = float(max(r, 2.0))                                                   # 壁より大きい所は、壁に当たって沿う（下の放射で切る）
