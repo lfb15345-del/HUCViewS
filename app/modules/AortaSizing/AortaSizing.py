@@ -780,7 +780,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             h += (f"<tr><td>{name}</td><td align='right'>{pc(r['r_long'])}</td><td align='right'>{pc(r['r_short'])}</td><td align='right'>{pc(r['r_area'])}</td><td align='right'>{pc(r['r_per'])}</td></tr>"
                   f"<tr><td style='{g}'></td><td align='right' style='{g}'>{r['tl_long']:.0f}→{r['maj']:.0f}</td><td align='right' style='{g}'>{r['tl_short']:.0f}→{r['min']:.0f}</td>"
                   f"<td align='right' style='{g}'>短/長 {r['ratio']:.2f}</td><td></td></tr>")
-        h += f"</table><span style='{g}'>中央値・mm。実際 = 術後の金属に楕円を当てはめた値（{len(ex['rows'])} 断面）。</span>"
+            if r.get("d_flap") is not None and key != "prox":
+                h += f"<tr><td style='{g}'></td><td colspan='4' style='{g}'>偽腔側（フラップ）{r['d_flap']:+.0f} mm・壁側 {r['d_wall']:+.0f} mm</td></tr>"
+        h += (f"</table><span style='{g}'>中央値・mm。実際 = 術後の金属に楕円を当てはめた値（{len(ex['rows'])} 断面）。"
+              "偽腔側・壁側 = 術前の真腔の縁から、ステントがどちらへどれだけ広がったか。</span>")
         self.expLab.setText(h)
 
     def onExpCsv(self):
@@ -4330,7 +4333,17 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if t is None: continue
             per_t = float(np.linalg.norm(np.diff(np.r_[xy, xy[:1]], axis=0), axis=1).sum())
             a_, b_ = e[1] / 2, e[2] / 2; area = math.pi * a_ * b_; per = math.pi * (3 * (a_ + b_) - math.sqrt((3 * a_ + b_) * (a_ + 3 * b_)))
-            rows.append(dict(s=float(x), maj=e[1], min=e[2], area=area, per=per, tl_long=t["dmax"], tl_short=t["dmin"], tl_area=t["area"], tl_per=per_t))
+            dfl = dwl = np.nan                                                        # 偽腔側（フラップ）と壁側に、術前の真腔の縁からどれだけ動いたか
+            try:
+                tm = self.tl["masks"][k]; E = self._aortaIn(k, self.path); rc = np.argwhere(tm); tlc = np.c_[rc[:, 1], rc[:, 0]] * STEP - HALF
+                fr = np.argwhere((E > 0) & ~tm) if E is not None else np.zeros((0, 2))
+                if len(fr) > 50 and len(tlc) > 20:
+                    cT = tlc.mean(0); uF = np.c_[fr[:, 1], fr[:, 0]].mean(0) * STEP - HALF - cT; uF /= np.linalg.norm(uF) + 1e-9
+                    near = np.abs(d @ self.T[k]) <= 2.5; me = np.c_[d @ self.B[k], d @ self.N[k]][near] if near.sum() >= 15 else np.c_[d @ self.B[k], d @ self.N[k]]
+                    pm = (me - cT) @ uF; pt = (tlc - cT) @ uF
+                    dfl = float(np.percentile(pm, 95) - pt.max()); dwl = float(-np.percentile(pm, 5) + pt.min())
+            except Exception: pass
+            rows.append(dict(s=float(x), maj=e[1], min=e[2], area=area, per=per, tl_long=t["dmax"], tl_short=t["dmin"], tl_area=t["area"], tl_per=per_t, d_flap=dfl, d_wall=dwl))
         if len(rows) < 3: return None
         lo, hi = ac["lo"], ac["hi"]; S = np.array([r["s"] for r in rows])
         def summ(msk):
@@ -4338,7 +4351,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             g = lambda key: np.array([r[key] for r in rows])[msk]
             return dict(n=int(msk.sum()), maj=float(np.median(g("maj"))), min=float(np.median(g("min"))), tl_long=float(np.median(g("tl_long"))), tl_short=float(np.median(g("tl_short"))),
                         r_long=float(np.median(g("maj") / g("tl_long"))), r_short=float(np.median(g("min") / g("tl_short"))),
-                        r_area=float(np.median(g("area") / g("tl_area"))), r_per=float(np.median(g("per") / g("tl_per"))), ratio=float(np.median(g("min") / g("maj"))))
+                        r_area=float(np.median(g("area") / g("tl_area"))), r_per=float(np.median(g("per") / g("tl_per"))), ratio=float(np.median(g("min") / g("maj"))),
+                        d_flap=float(np.nanmedian(g("d_flap"))) if np.isfinite(g("d_flap")).any() else None, d_wall=float(np.nanmedian(g("d_wall"))) if np.isfinite(g("d_wall")).any() else None)
         reg = dict(prox=summ(S < lo + 20.0), mid=summ((S >= lo + 20.0) & (S <= hi - 20.0)), dist=summ(S > hi - 20.0), all=summ(S > -1e9))
         self.expansion = dict(rows=rows, reg=reg, lo=lo, hi=hi)
         return self.expansion
@@ -4351,11 +4365,12 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         with open(fn, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow(["位置 mm（中心線）", "基準からの位置 mm", "実際 長径", "実際 短径", "実際 面積 mm2", "実際 周径", "術前真腔 長径", "術前真腔 短径", "術前真腔 面積 mm2", "術前真腔 周径",
-                        "長径の比", "短径の比", "面積の比", "周径の比"])
+                        "長径の比", "短径の比", "面積の比", "周径の比", "偽腔側への広がり mm", "壁側への広がり mm"])
             for r in ex["rows"]:
                 w.writerow([f"{r['s']:.1f}", f"{self.rel(r['s']):.1f}", f"{r['maj']:.1f}", f"{r['min']:.1f}", f"{r['area']:.0f}", f"{r['per']:.1f}",
                             f"{r['tl_long']:.1f}", f"{r['tl_short']:.1f}", f"{r['tl_area']:.0f}", f"{r['tl_per']:.1f}",
-                            f"{r['maj'] / r['tl_long']:.2f}", f"{r['min'] / r['tl_short']:.2f}", f"{r['area'] / r['tl_area']:.2f}", f"{r['per'] / r['tl_per']:.2f}"])
+                            f"{r['maj'] / r['tl_long']:.2f}", f"{r['min'] / r['tl_short']:.2f}", f"{r['area'] / r['tl_area']:.2f}", f"{r['per'] / r['tl_per']:.2f}",
+                            f"{r['d_flap']:.1f}" if np.isfinite(r["d_flap"]) else "", f"{r['d_wall']:.1f}" if np.isfinite(r["d_wall"]) else ""])
         return fn
 
     def _restent(self, status=print, thr=450.0):
