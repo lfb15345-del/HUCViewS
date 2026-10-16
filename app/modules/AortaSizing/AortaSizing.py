@@ -339,7 +339,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
         card, c = self._card(pl, "使い方")
-        c.addWidget(self._lab("① 解離なら「真腔に沿わせる」→ 3D に真腔（水色）・偽腔（紫）を出して穴の場所を確かめる"
+        c.addWidget(self._lab("① 解離なら「真腔に沿わせる」→ 3D に真腔（水色）・偽腔（紫）を出して穴の場所を確かめる（緑の線が偽腔に入っていたら「真腔をクリックで直す」）"
                               "　② 断面で穴をクリックしてエントリーを置く　③ 「範囲をドラッグで決める」→ ストレッチ像で近位端から遠位端までドラッグ"
                               "　④ フラップ・両端・径を選ぶ → 遠位端の SINE の目安を見る", "muted"))
         card, c = self._card(pl, "解離（真腔）", "緑の線 = 断面の真腔")
@@ -347,6 +347,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tlBtn = self._btn("真腔に沿わせる", None, "中心線の点から、造影された真腔を断面ごとにたどり（フラップで止まる）、グラフトを真腔の中心に置きます", True); r.addWidget(self.tlBtn, 1)
         self.tlShowBtn = self._btn("真腔を 3D に", None, "たどった真腔をうすい水色で 3D に出す", True); self.tlShowBtn.checked = True; r.addWidget(self.tlShowBtn)
         self.tlInfo = self._lab("中心線が真腔を通っていれば、ボタン 1 つで真腔をたどります（数秒）。", "muted"); self.tlInfo.setWordWrap(True); c.addWidget(self.tlInfo)
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.tlFixBtn = self._btn("真腔をクリックで直す", None, "緑の線が偽腔に入っている断面で、本当の真腔の中をクリック → その前後をたどり直します（Ctrl+Z で戻す）", True); r.addWidget(self.tlFixBtn, 1)
+        self.tlFixReset = self._btn("直しを消す", None, "真腔の手直しをすべて消して、自動でたどり直す"); r.addWidget(self.tlFixReset)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.flShowBtn = self._btn("偽腔を 3D に（紫）", None, "造影される偽腔を紫で 3D に出す。グラフト（白）が偽腔の入口側をふさいでいるかを見る", True); r.addWidget(self.flShowBtn, 1)
         self.flInfo = self._lab("", "muted"); self.flInfo.setWordWrap(True); c.addWidget(self.flInfo)
@@ -530,6 +533,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.alignBtn.connect("toggled(bool)", self.onAlignMode); self.alignReset.connect("clicked()", self.onAlignReset)
         self.planEditBtn.connect("toggled(bool)", self.onPlanEdit); self.planAdjReset.connect("clicked()", self.onPlanAdjReset)
         self.tlBtn.connect("toggled(bool)", self.onTL)
+        self.tlFixBtn.connect("toggled(bool)", self.onTLFix); self.tlFixReset.connect("clicked()", self.onTLFixReset)
         self.tlShowBtn.connect("toggled(bool)", lambda on: (lambda m: m and m.GetDisplayNode().SetVisibility(on))(slicer.mrmlScene.GetFirstNodeByName("TEVAR 真腔")))
         self.pngBtn.connect("clicked()", self.onPNG)
         self.secBtn.connect("clicked()", self.onSecPNG)
@@ -624,6 +628,42 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                              ("off", "plan"): "広がりの予測" if getattr(L, "_graftRad", None) is not None else ("真腔の中心" if pl.get("tl") else "大動脈の中心"), ("off", "post"): f"中央値 {cmp_['offMed']:.0f} mm",
                              ("off", "diff"): f"最大 {cmp_['offMax']:.0f} mm（{self._tvRef(cmp_['offAt'])}）"})
             for k, v in vals.items(): self.cmpLab[k].setText(v)
+
+    def onTLFix(self, on):
+        L = self.logic
+        if on and L.P is not None and not L.tlValid():
+            if not self.tlBtn.checked: self.tlBtn.checked = True
+            else: self._busy(L.extractTL, self._say)
+        if on and not L.tlValid():
+            self.tlFixBtn.blockSignals(True); self.tlFixBtn.checked = False; self.tlFixBtn.blockSignals(False); L.tlFixMode = False; return
+        L.tlFixMode = bool(on); L.onTLClick = self._onTLClick
+        if on:
+            for b in (self.planEditBtn, self.entryBtn):
+                if b.checked: b.checked = False
+            self._say("断面（X）で、本当の真腔の中をクリック → その前後をたどり直します（緑の線）。Ctrl+Z で戻す。終わったらもう一度ボタンを押す。")
+
+    def _onTLClick(self, k, uv):
+        L = self.logic; res = []
+        self._busy(lambda: res.append(L.fixTL(k, uv, self._say)))
+        if not res or res[0] is None: self._say("そこからは真腔をたどれませんでした。造影されている所（明るい所）をクリックしてください。"); return
+        self._afterTL(f"真腔をたどり直しました（{res[0]:.0f} mm の範囲）。まだずれていれば別の断面でもクリック。Ctrl+Z で戻す。")
+
+    def _afterTL(self, msg):
+        L = self.logic
+        if self.flShowBtn.checked: self._busy(L.extractFL, self._say)
+        self._busy(L.planDraw); self._tvRefresh()
+        try: self._expRefresh()
+        except Exception: pass
+        L._showContour(exact=False)
+        if L.tlValid():
+            d = L.tl["deq"]; n = len(L.planInit().get("tlfix", []) or [])
+            self.tlInfo.setText(f"真腔をたどりました（径 {np.nanmin(d):.0f}〜{np.nanmax(d):.0f} mm" + (f"・手直し {n} か所" if n else "") + "）。断面の緑の線で確認してください。")
+        self._say(msg)
+
+    def onTLFixReset(self):
+        L = self.logic; L.planInit()["tlfix"] = []
+        if L.P is None or not self.tlBtn.checked: self._say("真腔の手直しを消しました。"); return
+        self._busy(L.extractTL, self._say); L._tlAfter(); self._afterTL("真腔の手直しを消して、自動でたどり直しました。")
 
     def onTL(self, on):
         L = self.logic; pl = L.planInit(); pl["tl"] = bool(on)
@@ -722,6 +762,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def onEntry(self, on):
         L = self.logic
         if not on: L._entryCb = None; return
+        if self.tlFixBtn.checked: self.tlFixBtn.checked = False
         def done(ras):
             L._entryCb = None; name = L.addEntry(ras); self.entryBtn.blockSignals(True); self.entryBtn.checked = False; self.entryBtn.blockSignals(False)
             self._tvRefresh(); self._say(f"{name} を置きました（中心線 {self._tvRef(L.curS)}）。")
@@ -819,6 +860,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def onPlanEdit(self, on):
         L = self.logic; L.planEditMode = bool(on)
         if not on: L._cancelDrags()
+        if on and self.tlFixBtn.checked: self.tlFixBtn.checked = False
         if on:
             L.alignMode = False; self.alignBtn.blockSignals(True); self.alignBtn.checked = False; self.alignBtn.blockSignals(False)
             self._say("断面の白い輪: 中をドラッグ = ずらす、ふちをドラッグ = 太さ（前後 2 cm がなめらかに）。Ctrl+Z で戻す。")
@@ -899,7 +941,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()
         self.logic._tvMode = tv
-        for btn, page in ((getattr(self, "planEditBtn", None), 2), (getattr(self, "alignBtn", None), 3), (getattr(self, "tvRange", None), 2), (getattr(self, "entryBtn", None), 2)):
+        for btn, page in ((getattr(self, "tlFixBtn", None), 2), (getattr(self, "planEditBtn", None), 2), (getattr(self, "alignBtn", None), 3), (getattr(self, "tvRange", None), 2), (getattr(self, "entryBtn", None), 2)):
             if btn is not None and btn.checked and i != page: btn.checked = False
         if tv: self._tvEnter()
         try:                                                                  # TEVAR の時は血管を半透明にして、中のグラフトを見せる
@@ -1098,6 +1140,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             self._say(f"シミュレーションを直しました（{len(L.plan.get('adj', []))} か所）。Ctrl+Z で戻す・「直しを消す」で元どおり。"); return
         if cmd == "adjundo":
             L = self.logic
+            if getattr(L, "tlFixMode", False):
+                if L.undoTLFix(): self._afterTL("真腔の手直しを 1 つ戻しました。")
+                return
             if getattr(L, "alignMode", False) and getattr(L, "postManual", None): L.postManual.pop(); self._afterAlign()
             elif getattr(L, "planEditMode", False) and L.planInit().get("adj"): L.plan["adj"].pop(); self._busy(L.planDraw); self._tvRefresh(); L._showContour(exact=False); self._say("1 つ戻しました。")
             return
@@ -2647,7 +2692,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _keyAny(self, it):
         key = it.GetKeySym() or ""; ctrl = bool(it.GetControlKey())
-        if ctrl and key in ("z", "Z") and (getattr(self, "alignMode", False) or getattr(self, "planEditMode", False)):
+        if ctrl and key in ("z", "Z") and (getattr(self, "alignMode", False) or getattr(self, "planEditMode", False) or getattr(self, "tlFixMode", False)):
             cb = getattr(self, "onKey", None)
             if cb: qt.QTimer.singleShot(0, lambda: cb("adjundo"))
             self._abort(it); return
@@ -2711,6 +2756,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     def _clickRed(self, it):
         if getattr(self, "alignMode", False) and getattr(self, "actual", None) is not None and self.P is not None:   # 術後の重ね合わせを手で直す
             k, uv = self._uvRed(it); self._alDrag = ("xy", uv, np.zeros(3), float(self.s[k])); self._abort(it); return
+        if getattr(self, "tlFixMode", False) and self.P is not None and self.tlValid():          # 真腔を手で直す: クリックした所が本当の真腔
+            k, uv = self._uvRed(it); self._abort(it); cb = getattr(self, "onTLClick", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb(k, uv))
+            return
         gr = getattr(self, "_graftRad", None)
         if getattr(self, "planEditMode", False) and gr is not None and gr["path"] == self.path and self.P is not None:   # シミュレーションを手で直す
             k, uv = self._uvRed(it)
@@ -3759,47 +3808,150 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         tl = getattr(self, "tl", None)
         return tl is not None and tl.get("path") == self.path and tl.get("K") == len(self.P) and tl.get("vol") is self.straight
 
-    def extractTL(self, status=print):
-        """真腔: 断面ごとに、中心線の点から造影された内腔を広げる。細いすき間（フラップの切れ目・エントリー）は 1 mm の「開き」で切って偽腔へ漏れないようにする"""
+    def _tlSlice(self, im, thr, seeds, prevMask, ref):
+        """1 断面の真腔。seeds = 種の (行, 列) の候補（先が優先）。prevMask = 隣の断面の真腔。ref = 近くの真腔の面積（画素）"""
         from scipy import ndimage
+        nu = im.shape[0]; rr, cc = np.mgrid[-2:3, -2:3]; disk = (rr ** 2 + cc ** 2) <= 4
+        cl = lambda x: int(min(max(round(float(x)), 2), nu - 3))
+        seeds = [(cl(r), cl(c)) for r, c in seeds]
+        cv = None
+        for r, c in seeds:
+            v = float(np.median(im[r - 2:r + 3, c - 2:c + 3]))
+            if v >= thr: cv = v; break
+        if cv is None: return None
+        hasPrev = prevMask is not None and prevMask.any(); comp = None
+        for f in (0.7, 0.8, 0.88):                                           # 真腔の明るさの 7 割で区切る（フラップの部分容積で漏れない）。急に広がったら上げる
+            m = im > max(thr, f * cv)
+            lab, n = ndimage.label(ndimage.binary_opening(m, structure=disk))
+            if n == 0: break
+            cand = []
+            for r, c in seeds:
+                if lab[r, c] and lab[r, c] not in cand: cand.append(lab[r, c])
+            if hasPrev and len(cand) > 1: cand.sort(key=lambda l: -np.count_nonzero((lab == l) & prevMask))   # 中心線が偽腔に入っても、前の断面の真腔と重なる方
+            l = cand[0] if cand else 0
+            if not l:
+                idx = np.argwhere(lab > 0); d = ((idx - seeds[0]) ** 2).sum(1); j = int(np.argmin(d))
+                if d[j] > (10.0 / STEP) ** 2: break
+                l = lab[tuple(idx[j])]
+            comp = ndimage.binary_fill_holes(ndimage.binary_dilation(lab == l, structure=disk) & m)
+            if ref is None or comp.sum() < 1.8 * ref: return comp
+        if comp is None or not comp.any(): return None
+        if ref is not None and comp.sum() >= 1.8 * ref:                     # フラップの穴（エントリー）で偽腔とつながった: 隣の断面の真腔の形を引き継ぐ（0.5 mm ずつしか広げない）
+            if hasPrev: g = ndimage.binary_dilation(prevMask, structure=np.ones((3, 3), bool))
+            else:
+                r0, c0 = seeds[0]; Rr = 1.3 * math.sqrt(ref / math.pi); yy, xx = np.ogrid[:nu, :nu]; g = (yy - r0) ** 2 + (xx - c0) ** 2 <= Rr * Rr
+            c2 = ndimage.binary_fill_holes(comp & g)
+            if c2.any():
+                lab, n = ndimage.label(c2)
+                if n > 1: c2 = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
+                comp = c2
+        return comp
+
+    def extractTL(self, status=print):
+        """真腔: 断面ごとに、中心線の点から造影された内腔を広げる。細いすき間は 1 mm の「開き」で切る。
+        フラップの穴で偽腔とつながった断面は、隣の断面の真腔の形を引き継ぐ。手で直した所（plan["tlfix"]）はたどり直す"""
         if self.straight is None: raise RuntimeError("先に中心線を作ってください")
         a = slicer.util.arrayFromVolume(self.straight); K, nu, _ = a.shape; c0 = nu // 2
         thr = max(120.0, float(self.thr) - 20.0)
-        rr, cc = np.mgrid[-2:3, -2:3]; disk = (rr ** 2 + cc ** 2) <= 4
-        masks = np.zeros(a.shape, bool); cen = np.full((K, 2), np.nan); area = np.zeros(K)
-        prev = (c0, c0); t0 = time.time(); hist = []
+        masks = np.zeros(a.shape, bool); prev = (c0, c0); prevM = None; lastK = -99; t0 = time.time(); hist = []
         for k in range(K):
-            im = a[k]
-            pr, pc = int(prev[0]), int(prev[1])
-            cv = float(np.median(im[c0 - 2:c0 + 3, c0 - 2:c0 + 3]))
-            if cv < thr: cv = float(np.median(im[max(pr - 2, 0):pr + 3, max(pc - 2, 0):pc + 3]))
-            if cv < thr: continue
-            comp = None
-            for f in (0.7, 0.8, 0.88):                                       # 真腔の明るさの 7 割で区切る（フラップの部分容積で漏れない）。急に広がったら上げる
-                m = im > max(thr, f * cv)
-                lab, n = ndimage.label(ndimage.binary_opening(m, structure=disk))
-                if n == 0: break
-                l = lab[c0, c0] or lab[pr, pc]
-                if not l:
-                    idx = np.argwhere(lab > 0); d = ((idx - (c0, c0)) ** 2).sum(1); j = int(np.argmin(d))
-                    if d[j] > (10.0 / STEP) ** 2: break
-                    l = lab[tuple(idx[j])]
-                comp = ndimage.binary_fill_holes(ndimage.binary_dilation(lab == l, structure=disk) & m)
-                ref = np.median(hist[-40:]) if len(hist) >= 10 else None
-                if ref is None or comp.sum() < 1.8 * ref: break
+            ref = float(np.median(hist[-40:])) if len(hist) >= 10 else None
+            comp = self._tlSlice(a[k], thr, [(c0, c0), prev], prevM if k - lastK <= 4 else None, ref)
             if comp is None or not comp.any(): continue
-            masks[k] = comp; r_, c_ = np.nonzero(comp); cen[k] = (r_.mean(), c_.mean()); area[k] = comp.sum() * STEP * STEP; prev = cen[k]; hist.append(comp.sum())
+            masks[k] = comp; r_, c_ = np.nonzero(comp); prev = (r_.mean(), c_.mean()); prevM = comp; lastK = k; hist.append(comp.sum())
             if k % 200 == 0: status(f"真腔をたどっています… {100 * k // K}%")
-        ok = np.isfinite(cen[:, 0])
-        if ok.sum() < 10: raise RuntimeError("真腔が見つかりませんでした（中心線が真腔を通っているか確認）")
-        for j in range(2): cen[:, j] = ndimage.gaussian_filter1d(np.interp(np.arange(K), np.where(ok)[0], cen[ok, j]), 3.0 / STEP)
-        u = cen[:, 1] * STEP - HALF; v = cen[:, 0] * STEP - HALF
-        C = self.P + u[:, None] * self.B + v[:, None] * self.N
-        deq = np.sqrt(4 * area / np.pi); deq[~ok] = np.nan
-        self.tl = dict(path=self.path, K=K, vol=self.straight, masks=masks, cen2=cen, C=C, deq=deq)
-        status(f"真腔をたどりました（{time.time() - t0:.0f} 秒）。緑の線 = 断面の真腔")
+        self.tl = dict(path=self.path, K=K, vol=self.straight, masks=masks, cen2=None, C=None, deq=None, thr=thr)
+        self._tlUndo = []
+        nfix = 0
+        for sd in list((getattr(self, "plan", None) or {}).get("tlfix", []) or []):    # 手で直した所をもう一度
+            if sd.get("path") != self.path: continue
+            k, uv = self._tlSeedAt(sd)
+            if k is not None and self._tlRetrace(a, k, ((uv[1] + HALF) / STEP, (uv[0] + HALF) / STEP)) is not None: nfix += 1
+        self._tlFinish()
+        status(f"真腔をたどりました（{time.time() - t0:.0f} 秒" + (f"・手で直した {nfix} か所を反映" if nfix else "") + "）。緑の線 = 断面の真腔")
         self._drawTL(); self._showContour(exact=False)
         return self.tl
+
+    def _tlFinish(self):
+        """真腔のマスクから、中心（なめらか）・3D の中心・等価径を出し直す"""
+        from scipy import ndimage
+        tl = self.tl; masks = tl["masks"]; K, nu, _ = masks.shape
+        cnt = masks.reshape(K, -1).sum(1); ok = cnt > 0
+        if ok.sum() < 10: raise RuntimeError("真腔が見つかりませんでした（中心線が真腔を通っているか確認）")
+        ar = np.arange(nu, dtype=float)
+        cen = np.c_[(masks.sum(2) @ ar) / np.maximum(cnt, 1), (masks.sum(1) @ ar) / np.maximum(cnt, 1)]
+        for j in range(2): cen[:, j] = ndimage.gaussian_filter1d(np.interp(np.arange(K), np.where(ok)[0], cen[ok, j]), 3.0 / STEP)
+        u = cen[:, 1] * STEP - HALF; v = cen[:, 0] * STEP - HALF
+        deq = np.sqrt(4 * cnt * STEP * STEP / np.pi); deq[~ok] = np.nan
+        tl.update(cen2=cen, C=self.P + u[:, None] * self.B + v[:, None] * self.N, deq=deq)
+
+    def _tlSeedAt(self, sd):
+        """手で直した点（3D）→ いまの中心線の断面 k と (u, v)"""
+        ras = np.asarray(sd["ras"], float); k0 = self._k(sd["s"]); w = int(40.0 / STEP)
+        ks = np.arange(max(0, k0 - w), min(len(self.P), k0 + w + 1))
+        if not len(ks): return None, None
+        k = int(ks[np.argmin(np.abs(np.einsum("ij,ij->i", ras - self.P[ks], self.T[ks])))])
+        d = ras - self.P[k]; uv = np.array([d @ self.B[k], d @ self.N[k]])
+        if np.abs(uv).max() >= HALF: return None, None
+        return k, uv
+
+    def _tlRetrace(self, a, k0, seed, maxmm=150.0):
+        """断面 k0 の seed（行, 列）から真腔をたどり直す（前後へ。元の真腔と 6 断面続けて重なったら止める）。→ (始まりの k, 元のマスク)"""
+        tl = self.tl; masks = tl["masks"]; K = len(masks); thr = tl.get("thr") or max(120.0, float(self.thr) - 20.0)
+        cnt = masks.reshape(K, -1).sum(1); w = cnt[max(0, k0 - 60):k0 + 61]; w = w[w > 0]; ref = float(np.median(w)) if len(w) else None
+        sr, sc = int(round(seed[0])), int(round(seed[1]))
+        pm = None                                                           # 穴の断面: 近くの「ふつうの大きさ」で種を含む真腔の形を手がかりに
+        for dk in sorted(range(-20, 21), key=abs):
+            kk = k0 + dk
+            if dk == 0 or not (0 <= kk < K) or not cnt[kk] or (ref and cnt[kk] >= 1.8 * ref): continue
+            if masks[kk][max(sr - 2, 0):sr + 3, max(sc - 2, 0):sc + 3].any(): pm = masks[kk]; break
+        c0m = self._tlSlice(a[k0], thr, [seed], pm, ref)
+        if c0m is None or not c0m.any(): return None
+        new = {k0: c0m}; lo = hi = k0
+        for step in (1, -1):
+            prevM = c0m; r_, c_ = np.nonzero(c0m); prev = (r_.mean(), c_.mean()); same = miss = 0; hist = [c0m.sum()]
+            k = k0 + step
+            while 0 <= k < K and abs(k - k0) * STEP <= maxmm:
+                rf = float(np.median(hist[-40:])) if len(hist) >= 10 else ref
+                comp = self._tlSlice(a[k], thr, [prev], prevM, rf)
+                if comp is None or not comp.any():
+                    miss += 1
+                    if miss > 6: break
+                    k += step; continue
+                miss = 0; old = masks[k]; un = np.count_nonzero(comp | old)
+                iou = np.count_nonzero(comp & old) / un if un else 1.0
+                new[k] = comp; lo = min(lo, k); hi = max(hi, k)
+                same = same + 1 if iou > 0.8 else 0
+                if same >= 6: break
+                r_, c_ = np.nonzero(comp); prev = (r_.mean(), c_.mean()); prevM = comp; hist.append(comp.sum()); k += step
+        oldM = masks[lo:hi + 1].copy()
+        for k, m in new.items(): masks[k] = m
+        return lo, oldM
+
+    def fixTL(self, k, uv, status=print):
+        """断面 k の (u, v) が本当の真腔: そこから前後をたどり直す。→ 直した長さ mm（だめなら None）"""
+        if not self.tlValid(): self.extractTL(status)
+        a = slicer.util.arrayFromVolume(self.straight); nu = a.shape[1]
+        seed = ((uv[1] + HALF) / STEP, (uv[0] + HALF) / STEP)
+        if not (2 <= seed[0] < nu - 2 and 2 <= seed[1] < nu - 2): return None
+        r = self._tlRetrace(a, k, seed)
+        if r is None: return None
+        ras = self.P[k] + uv[0] * self.B[k] + uv[1] * self.N[k]
+        self.planInit().setdefault("tlfix", []).append(dict(path=self.path, s=float(self.s[k]), ras=[float(x) for x in ras]))
+        self.__dict__.setdefault("_tlUndo", []).append(r); self._tlAfter()
+        return len(r[1]) * STEP
+
+    def undoTLFix(self):
+        u = getattr(self, "_tlUndo", None)
+        if not u or not self.tlValid(): return False
+        lo, old = u.pop(); self.tl["masks"][lo:lo + len(old)] = old
+        tf = self.planInit().get("tlfix")
+        if tf: tf.pop()
+        self._tlAfter(); return True
+
+    def _tlAfter(self):
+        self._tlFinish(); self.__dict__.get("_depCache", {}).clear(); self.fl = None
+        self._drawTL(); self._showContour(exact=False)
 
     def _tlXY(self, k):
         """断面 k の真腔の輪郭（中心からの放射でふち）。(u, v) mm"""
