@@ -3842,7 +3842,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 self._editTags.append((it, it.AddObserver(E.MouseMoveEvent, lambda cl, e, nm=nm: self._edMove(cl, nm), 2.0)))
                 self._editTags.append((it, it.AddObserver(E.LeftButtonReleaseEvent, lambda cl, e, nm=nm: self._edRelease(cl, nm), 2.0)))
                 self._editTags.append((it, it.AddObserver(E.KeyPressEvent, lambda cl, e: self._edKey(cl), 2.0)))
-            self._edHist = []; self._edDrag = None
+            self._edHist = []; self._edDrag = None; self._edAnchors = set()
+            for m in slicer.util.getNodesByClass("vtkMRMLModelNode"):          # TEVAR の筒の輪郭は 3 断面では出さない（まぎらわしい）
+                if m.GetName().startswith("TEVAR ") and m.GetDisplayNode() is not None: m.GetDisplayNode().SetVisibility2D(False)
             self._edShadow(c)                                                   # 矢状断・冠状断に中心線の全体をうすく出す
             for ov in ("ovRed", "ovGreen", "ovOrange"):                      # 計測用の線・文字は消す（3 断面では意味がない）
                 o = getattr(self, ov, None)
@@ -3914,7 +3916,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         d = np.linalg.norm(inpl[cand] - ras, axis=1); j = int(cand[np.argmin(d)])
         if d.min() > (40.0 if axial else 20.0): return
         q = pts[j]; cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
-        self._edHist.append(cps.copy())
+        anc = self.__dict__.setdefault("_edAnchors", set())
+        self._edHist.append((cps.copy(), [k for k in range(len(cps)) if c.GetNthControlPointID(k) in anc]))
         dc = np.linalg.norm(cps - q, axis=1); i = int(np.argmin(dc))
         if dc[i] > 6.0:                                                              # 近くに点が無ければ、そこに点を足す
             best, bi = 1e9, 0
@@ -3924,13 +3927,42 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 if dd < best: best, bi = dd, t_
             c.InsertControlPoint(bi + 1, vtk.vtkVector3d(*q)); i = bi + 1
         keep = 0.0 if axial else float((q - ras) @ n)                                 # 矢状断・冠状断では奥行きはそのまま（見えている線を横にずらす）
-        c.SetNthControlPointPositionWorld(i, *(ras + keep * n))
-        self._edDrag = (i, nm, keep, n); self._edAbort(it)
+        base = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
+        w = self._edWeights(c, base, i)                                               # まわりの点もなめらかについてくる（自分で置いた点は動かさない）
+        anc.add(c.GetNthControlPointID(i))
+        self._edDrag = (i, nm, keep, n, base, w); self._edApply(c, ras + keep * n); self._edAbort(it)
+
+    SOFT_MM = 22.0          # 動かした点のまわりが、どのくらいの長さ一緒についてくるか
+
+    def _edWeights(self, c, base, i):
+        """動かす点 i のまわりの点の「ついてくる割合」。自分で置いた点（アンカー）で止まり、その間はなめらかに減る"""
+        n = len(base); a = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(base, axis=0), axis=1))]
+        anc = getattr(self, "_edAnchors", set()); isA = np.array([c.GetNthControlPointID(k) in anc for k in range(n)])
+        w = np.zeros(n); w[i] = 1.0; sig = self.SOFT_MM
+        for side in (-1, 1):
+            rng = range(i - 1, -1, -1) if side < 0 else range(i + 1, n)
+            stop = next((k for k in rng if isA[k]), None)
+            span = abs(a[stop] - a[i]) if stop is not None else None
+            for k in (range(i - 1, -1, -1) if side < 0 else range(i + 1, n)):
+                if stop is not None and (k <= stop if side < 0 else k >= stop): break
+                dist = abs(a[k] - a[i])
+                if span is not None and span < 2.5 * sig: w[k] = 0.5 * (1 + math.cos(math.pi * min(dist / span, 1.0)))
+                else: w[k] = math.exp(-(dist / sig) ** 2)
+                if w[k] < 0.01: break
+        w[0] = 0.0 if i != 0 else 1.0; w[-1] = 0.0 if i != n - 1 else 1.0          # 両端（起始・末梢）は動かさない
+        return w
+
+    def _edApply(self, c, target):
+        i, _, keep, n, base, w = self._edDrag
+        off = np.asarray(target, float) - base[i]
+        wasMod = c.StartModify()
+        for k in np.nonzero(w > 0)[0]: c.SetNthControlPointPositionWorld(int(k), *(base[k] + w[k] * off))
+        c.EndModify(wasMod)
 
     def _edMove(self, it, nm):
         dr = getattr(self, "_edDrag", None)
         if dr is None or dr[1] != nm: return
-        i, _, keep, n = dr; c = self.curves.get(self.path); c.SetNthControlPointPositionWorld(i, *(self._rasAt(it, nm) + keep * n)); self._edAbort(it)
+        keep, n = dr[2], dr[3]; c = self.curves.get(self.path); self._edApply(c, self._rasAt(it, nm) + keep * n); self._edAbort(it)
 
     def _edRelease(self, it, nm):
         if getattr(self, "_edDrag", None) is None: return
@@ -3942,10 +3974,11 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         key = it.GetKeySym() or ""
         if (key in ("z", "Z") and it.GetControlKey()) or key in ("BackSpace",):
             if self._edHist:
-                c = self.curves.get(self.path); cps = self._edHist.pop()
+                c = self.curves.get(self.path); cps, ai = self._edHist.pop()
                 wasMod = c.StartModify(); c.RemoveAllControlPoints()
                 for q in cps: c.AddControlPoint(vtk.vtkVector3d(*q))
                 c.EndModify(wasMod)
+                self._edAnchors = {c.GetNthControlPointID(k) for k in ai if k < c.GetNumberOfControlPoints()}
             self._edAbort(it)
         elif key in ("Return", "KP_Enter", "Escape"):
             cb = getattr(self, "onKey", None)
