@@ -520,6 +520,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         c.addWidget(self._lab("まとめ・マーカー表（外周/内腔）・手動計測・3D・ストレッチ像・各マーカーの断面を A4 に。PNG と CSV も同じフォルダに入ります。", "muted"))
         self.pngBtn = self._btn("高画質画像（PNG）だけ保存"); c.addWidget(self.pngBtn)
         self.secBtn = self._btn("今の断面だけ PNG で保存"); c.addWidget(self.secBtn)
+        self.sineCsvBtn = self._btn("SINE の目安を CSV に（一覧に 1 行追加）", None, "計画・治療長・遠位端の真腔・SINE の目安（と術後のずれ）を 1 行に。ドキュメント\\HeartView症例\\TEVAR_SINE_一覧.csv に症例ごとに追記（解析用）"); c.addWidget(self.sineCsvBtn)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.outLabel = self._lab("まだ保存していません", "muted"); self.outLabel.setWordWrap(True); r.addWidget(self.outLabel, 1)
         self.openBtn = self._btn("フォルダを開く"); self.openBtn.enabled = False; r.addWidget(self.openBtn)
@@ -591,6 +592,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tlShowBtn.connect("toggled(bool)", lambda on: (lambda m: m and m.GetDisplayNode().SetVisibility(on))(slicer.mrmlScene.GetFirstNodeByName("TEVAR 真腔")))
         self.pngBtn.connect("clicked()", self.onPNG)
         self.secBtn.connect("clicked()", self.onSecPNG)
+        self.sineCsvBtn.connect("clicked()", self.onSineCsv)
         self.openBtn.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self._lastDir)))
         L.onChanged = self.refreshReadout
         L.onListsChanged = self.refreshLists
@@ -641,7 +643,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         L = self.logic
         if L.P is None or not hasattr(self, "tvRows"): return
         pl = L.planInit()
-        if hasattr(self, "tvLen"): self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm")
+        if hasattr(self, "tvLen"): self._tvLenSet()
         try: (Dp, mp, ap), (Dd, md, ad) = L.planDiams()
         except Exception as e: print("tv:", e); return
         for key, s, D, mD, man in (("p", pl["p"], Dp, mp, ap), ("d", pl["d"], Dd, md, ad)):
@@ -773,6 +775,14 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def onTvHere(self, key):
         self._dropSameRange(); self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
 
+    def _tvLenSet(self):
+        L = self.logic; pl = L.planInit(); lg = L.planLengths()
+        t = f"<span style='font-size:17px; font-weight:bold; color:#ffffff'>治療長 {pl['d'] - pl['p']:.0f} mm</span>"
+        if lg: t += f"<br><span style='font-size:11px; color:#9aa7b4'>外弯 {lg['outer']:.0f}・内弯 {lg['inner']:.0f} mm</span>"
+        self.tvLen.setTextFormat(qt.Qt.RichText); self.tvLen.setText(t)
+        self.tvLen.setToolTip("治療長 = 近位端から遠位端までの中心線の長さ。外弯 / 内弯 = グラフト（名目の径）の筒の上で、いちばん長い / 短いすじの長さ（大弯側 / 小弯側）。"
+                              "微調整: 近位端・遠位端の −/＋（1 mm・Shift で 5 mm）、または ストレッチ像の白い線をつかんで動かす")
+
     def onTvPick(self, on):
         L = self.logic; L.pickPD = "p" if on else None; L._pickP = None
         if on:
@@ -796,7 +806,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             if key == "p": pl["p"] = pl["d"] - 10.0
             else: pl["d"] = pl["p"] + 10.0
         self._dropSameRange(); L._queue(s=pl[key]); L._drawGreen()
-        self.tvRows[key][0].setText(self._tvRef(pl[key])); self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm")
+        self.tvRows[key][0].setText(self._tvRef(pl[key])); self._tvLenSet()
         t = getattr(self, "_nudgeT", None)
         if t is None:
             t = self._nudgeT = qt.QTimer(); t.setSingleShot(True); t.timeout.connect(lambda: (self._busy(self.logic.planDraw), self._tvRefresh()))
@@ -1259,7 +1269,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             self._dropSameRange(); self.tvRange.blockSignals(True); self.tvRange.checked = False; self.tvRange.blockSignals(False)
             self.tvPick.blockSignals(True); self.tvPick.checked = False; self.tvPick.blockSignals(False)
             self._busy(self.logic.planDraw); self._tvRefresh(); pl = self.logic.plan
-            self._say(f"グラフト: {self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}（{pl['d'] - pl['p']:.0f} mm）。白い線をつかむと端だけ動かせます。"); return
+            lg = self.logic.planLengths(); lt = f"・外弯 {lg['outer']:.0f}・内弯 {lg['inner']:.0f} mm" if lg else ""
+            self._say(f"治療長 {pl['d'] - pl['p']:.0f} mm（中心線{lt}）: {self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}。−/＋ か白い線で微調整。"); return
         if cmd == "editdone":
             if self.editButton.checked: self.editButton.checked = False
             return
@@ -1353,6 +1364,11 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     def _done(self, d, what):
         self._lastDir = d; self.openBtn.enabled = True
         self.outLabel.setText(f"{what}: {d}"); self._say(f"{what}を保存しました。")
+
+    def onSineCsv(self):
+        r = self._busy(self.logic.saveSineCSV)
+        if not r: self._say("SINE の目安がまだありません（3 計画で「真腔に沿わせる」→ 範囲を決める）。"); return
+        self._done(os.path.dirname(r[1]), "SINE の目安（" + os.path.basename(r[1]) + " に 1 行追加）")
 
     def onPDF(self):
         L = self.logic
@@ -2569,6 +2585,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             for sx, nm in ((pl["p"], "Plan P"), (pl["d"], "Plan D")):
                 ab = G(sx); lines.append((ab, (0.95, 0.95, 1.0), False))
                 if vn == "Green": labels.append((ab[1], nm, (0.95, 0.95, 1.0), 12))
+            if vn == "Green": labels.append((G(0.5 * (pl["p"] + pl["d"]))[1], f"{pl['d'] - pl['p']:.0f} mm", (0.95, 0.95, 1.0), 15))
         ac = getattr(self, "actual", None)
         if ac is not None and ac.get("path") == self.path:
             for sx, nm in ((ac["lo"], "Post P"), (ac["hi"], "Post D")):
@@ -3936,6 +3953,56 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if b is not None: out["emr"] = dict(mean=gD / b["mean"], per=gp / b["per"], area=ga / b["area"])
         return out
 
+    def sineRow(self):
+        """解析用: 計画・遠位端の真腔・SINE の目安を 1 行に（列名 → 値）"""
+        si = self.sineIdx(); pl = self.planInit()
+        if not si: return None
+        lg = self.planLengths() or {}
+        (Dp, mp, _), (Dd, md, _) = self.planDiams()
+        vn = self.vol.GetName() if getattr(self, "vol", None) is not None else ""
+        f = lambda v, n=2: "" if v is None or (isinstance(v, float) and not np.isfinite(v)) else (f"{v:.{n}f}" if isinstance(v, (float, np.floating)) else v)
+        a, b = si["tl"], si.get("tl2") or {}
+        row = [("保存日時", time.strftime("%Y-%m-%d %H:%M")), ("画像（シリーズ）", vn), ("研究 ID（手で記入）", ""), ("経路", pl["path"]),
+               ("近位端 mm", f(self.rel(pl["p"]), 1)), ("遠位端 mm", f(self.rel(pl["d"]), 1)),
+               ("治療長 中心線 mm", f(lg.get("cl"), 1)), ("治療長 内弯 mm", f(lg.get("inner"), 1)), ("治療長 外弯 mm", f(lg.get("outer"), 1)),
+               ("近位 実測径 mm", f(mp, 1)), ("近位 グラフト径 mm", f(Dp, 1)), ("遠位 実測径 mm", f(md, 1)), ("遠位 グラフト径 mm", f(Dd, 1)),
+               ("オーバーサイズ設定 %", f(pl["os"] * 100, 0)), ("フラップ", {"chronic": "慢性", "acute": "急性", "fixed": "動かない"}.get(pl.get("flap"), "")),
+               ("両端", "あるがまま" if pl.get("ends") == "asis" else "押し広げる"),
+               ("遠位端 真腔 短径", f(a["short"], 1)), ("遠位端 真腔 長径", f(a["long"], 1)), ("遠位端 真腔 平均径", f(a["mean"], 1)),
+               ("遠位端 真腔 周径", f(a["per"], 1)), ("遠位端 真腔 面積 mm2", f(a["area"], 0)),
+               ("2cm 先 真腔 短径", f(b.get("short"), 1)), ("2cm 先 真腔 長径", f(b.get("long"), 1)), ("2cm 先 真腔 周径", f(b.get("per"), 1)), ("2cm 先 真腔 面積 mm2", f(b.get("area"), 0)),
+               ("オーバーサイズ 平均径", f(si["pre"]["mean"])), ("オーバーサイズ 周径", f(si["pre"]["per"])), ("オーバーサイズ 面積", f(si["pre"]["area"])), ("オーバーサイズ 短径", f(si["pre"]["short"])),
+               ("予測 広がり径", f(si.get("gD"), 1)), ("予測 周径", f(si.get("gper"), 1)), ("予測 面積 mm2", f(si.get("garea"), 0)), ("予測 ガター mm2", f(si.get("gut"), 0))]
+        e = si.get("emr") or {}
+        row += [("ミスマッチ 平均径", f(e.get("mean"))), ("ミスマッチ 周径", f(e.get("per"))), ("ミスマッチ 面積", f(e.get("area")))]
+        c = None
+        try: c = self.comparePost() if getattr(self, "actual", None) is not None else None
+        except Exception: c = None
+        row += [("術後 近位端のずれ mm", f(c.get("dP") if c else None, 1)), ("術後 遠位端のずれ mm", f(c.get("dD") if c else None, 1)),
+                ("術後 実際の長さ mm", f(c.get("realLen") if c else None, 1)), ("術後 実際の径 mm", f(c.get("Dreal") if c else None, 1))]
+        return row
+
+    def saveSineCSV(self, d=None):
+        """この症例の 1 行を フォルダ d（TEVAR_SINE目安.csv）と、ドキュメント\\HeartView症例\\TEVAR_SINE_一覧.csv（症例を重ねていく）に"""
+        row = self.sineRow()
+        if not row: return None
+        import csv
+        hdr = [k for k, _ in row]; val = [v for _, v in row]
+        d = d or self.outDir(); fn = os.path.join(d, "TEVAR_SINE目安.csv")
+        with open(fn, "w", newline="", encoding="utf-8-sig") as fh: w = csv.writer(fh); w.writerow(hdr); w.writerow(val)
+        base = os.path.join(os.path.expanduser("~"), "Documents", "HeartView症例"); os.makedirs(base, exist_ok=True)
+        allfn = os.path.join(base, "TEVAR_SINE_一覧.csv")
+        if os.path.exists(allfn):
+            try: old = open(allfn, encoding="utf-8-sig").readline().strip()
+            except Exception: old = ""
+            if old != ",".join(hdr): allfn = os.path.join(base, "TEVAR_SINE_一覧_" + time.strftime("%Y%m%d") + ".csv")   # 列が変わった時は別のファイルに
+        new = not os.path.exists(allfn)
+        with open(allfn, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as fh:
+            w = csv.writer(fh)
+            if new: w.writerow(hdr)
+            w.writerow(val)
+        return fn, allfn
+
     def planDraw(self):
         pl = self.planInit()
         if not pl.get("on", True): self.planShow(False); return
@@ -4780,20 +4847,36 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         return f"クロック位置 {clk}（12 時 = 前、3 時 = 患者の左）を「{name}」に記録しました。"
 
     # ---------------------------------------------------------------- 計測
-    def _curveLengths(self, s0, s1, path=None):
-        """中心線・内弯・外弯の長さ（内弯 = 曲がりの内側）"""
+    def _curveLengths(self, s0, s1, path=None, rad=None):
+        """中心線・内弯・外弯の長さ（内弯 = 曲がりの内側）。壁の側の長さ = ∫(1 ∓ κ r) ds（κ = 中心線の曲率、r = 半径）。
+        rad を渡すとその半径（例: グラフト）、無ければ大動脈の Deq/2"""
         F = self.frames[path or self.path]; P, T = F["P"], F["T"]
         k0, k1 = self._k(s0, path), self._k(s1, path)
         if k1 - k0 < 2: return 0.0, 0.0, 0.0
-        seg = slice(k0, k1 + 1)
         from scipy import ndimage
-        Tm = ndimage.gaussian_filter1d(T, sigma=10 / STEP, axis=0, mode="nearest")
-        kap = np.gradient(Tm, STEP, axis=0)
-        r = np.array([(self.prof[k, 1] if self.prof is not None and not np.isnan(self.prof[k, 1]) else 20.0) / 2 for k in range(k0, k1 + 1)])
-        kv = kap[seg]; kn = np.linalg.norm(kv, axis=1, keepdims=True); khat = np.where(kn > 1e-6, kv / (kn + 1e-12), 0)
-        inner = P[seg] + r[:, None] * khat; outer = P[seg] - r[:, None] * khat
-        L = lambda X: float(np.linalg.norm(np.diff(X, axis=0), axis=1).sum())
-        return L(P[seg]), L(inner), L(outer)
+        Tm = ndimage.gaussian_filter1d(T, sigma=10 / STEP, axis=0, mode="nearest"); Tm = Tm / np.maximum(np.linalg.norm(Tm, axis=1, keepdims=True), 1e-9)
+        kap = np.linalg.norm(np.gradient(Tm, STEP, axis=0), axis=1)[k0:k1 + 1]
+        if rad is not None: r = np.broadcast_to(np.asarray(rad, float), (k1 - k0 + 1,)) if np.ndim(rad) == 0 else np.interp(np.linspace(0, 1, k1 - k0 + 1), np.linspace(0, 1, len(rad)), rad)
+        else:
+            pr = self.prof if (path or self.path) == self.path else None
+            r = np.array([(pr[k, 1] if pr is not None and k < len(pr) and not np.isnan(pr[k, 1]) else 20.0) / 2 for k in range(k0, k1 + 1)])
+        ds = np.linalg.norm(np.diff(P[k0:k1 + 1], axis=0), axis=1); kr = 0.5 * (kap[:-1] * r[:-1] + kap[1:] * r[1:])
+        return float(ds.sum()), float((ds * np.clip(1 - kr, 0, None)).sum()), float((ds * (1 + kr)).sum())
+
+    def planLengths(self):
+        """計画したグラフトの治療長: 中心線、外弯 = グラフトの筒でいちばん長いすじ（大弯側）、内弯 = いちばん短いすじ（mm）"""
+        pl = getattr(self, "plan", None)
+        if not pl or pl.get("path") not in self.frames: return None
+        try:
+            (Dp, _, _), (Dd, _, _) = self.planDiams()
+            F = self.frames[pl["path"]]; k0, k1 = self._k(pl["p"], pl["path"]), self._k(pl["d"], pl["path"])
+            if k1 - k0 < 2 or not Dp or not Dd: return None
+            ks = np.arange(k0, k1 + 1); r = np.linspace(Dp, Dd, len(ks)) / 2.0             # グラフト（名目の径）の筒の上の、まっすぐな「すじ」の長さ
+            th = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+            X = F["P"][ks][None] + r[None, :, None] * (np.cos(th)[:, None, None] * F["B"][ks][None] + np.sin(th)[:, None, None] * F["N"][ks][None])
+            Ls = np.linalg.norm(np.diff(X, axis=1), axis=2).sum(1); cl = float(np.linalg.norm(np.diff(F["P"][ks], axis=0), axis=1).sum())
+        except Exception: return None
+        return dict(cl=cl, inner=float(Ls.min()), outer=float(Ls.max()))
 
     def _tangent(self, s0, s1, path=None):
         F = self.frames[path or self.path]; k0, k1 = sorted((self._k(s0, path), self._k(s1, path)))
@@ -4923,6 +5006,20 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if pz and dz:
                 cl, inn, o = self._curveLengths(pz["s"], dz["s"])
                 out.append(f"[長さ] 近位 → 遠位ランディング: 中心線 {cl:.1f} mm　内弯 {inn:.1f} mm　外弯 {o:.1f} mm")
+            pl_ = getattr(self, "plan", None); lg = self.planLengths() if pl_ else None
+            if lg:
+                out.append(f"[計画のグラフト] {self.rel(pl_['p']):+.1f} → {self.rel(pl_['d']):+.1f} mm　治療長 中心線 {lg['cl']:.1f} mm　内弯 {lg['inner']:.1f} mm　外弯 {lg['outer']:.1f} mm")
+                try:
+                    (Dp, mp, _), (Dd, md, _) = self.planDiams()
+                    if Dp and Dd: out.append(f"  径: 近位 {mp:.1f} → {Dp:.0f} mm・遠位 {md:.1f} → {Dd:.0f} mm（オーバーサイズ {pl_['os'] * 100:.0f}%）")
+                except Exception: pass
+                try: si = self.sineIdx()
+                except Exception: si = None
+                if si:
+                    a = si["tl"]; out.append(f"[遠位端の SINE の目安] 真腔 短径 {a['short']:.1f}・長径 {a['long']:.1f}・周径 {a['per']:.0f} mm・面積 {a['area']:.0f} mm²")
+                    p_ = si["pre"]; out.append(f"  オーバーサイズ（グラフト ÷ 真腔 − 1）: 平均径 {p_['mean']:.2f}・周径 {p_['per']:.2f}・面積 {p_['area']:.2f}")
+                    if "emr" in si: e = si["emr"]; out.append(f"  ミスマッチ（予測の広がり ÷ 2 cm 先の真腔）: 平均径 {e['mean']:.2f}・周径 {e['per']:.2f}・面積 {e['area']:.2f}")
+                    out.append("  参考値は単施設の報告の群平均で、判定の基準ではありません")
                 mx = self._maxIn(pz["s"], dz["s"])
                 if mx: out.append(f"[瘤] 区間内の最大径 Dmax {mx[1]['dmax']:.1f} mm（{self.rel(mx[0]):+.1f} mm）")
                 a = _angle(self._tangent(pz["s"] - 10, pz["s"] + 10), self._tangent(dz["s"] - 10, dz["s"] + 10))
@@ -5125,6 +5222,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         d, files = self.exportImages(None, status)
         status("サイジングシート（PDF）を作成中…")
         summ = self.summary(tpl); self.writeCSV(d)
+        if tpl == "TEVAR":
+            try: self.saveSineCSV(d)
+            except Exception as e: print("sine csv:", e)
         open(os.path.join(d, "summary.txt"), "w", encoding="utf-8").write(summ)
         doc = qt.QTextDocument(); doc.setDefaultFont(self._font(11))
         for i, (nm, fn) in enumerate(files): doc.addResource(qt.QTextDocument.ImageResource, qt.QUrl(f"img{i}.png"), qt.QImage(fn))
