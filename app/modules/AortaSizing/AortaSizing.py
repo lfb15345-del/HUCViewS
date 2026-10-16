@@ -374,6 +374,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tvShowBtn = self._btn("3D に表示", None, "仮想グラフトを出す / 隠す", True); self.tvShowBtn.checked = True; r.addWidget(self.tvShowBtn)
         self.tvGoP = self._btn("近位端へ"); r.addWidget(self.tvGoP)
         self.tvGoD = self._btn("遠位端へ"); r.addWidget(self.tvGoD)
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.ovAorta = self._btn("大動脈を重ねる", None, "3D に大動脈（外周）をうすく重ねる", True); self.ovAorta.checked = True; r.addWidget(self.ovAorta)
+        self.ovPost = self._btn("術後を重ねる", None, "術後 CT の実際のグラフト（金色）を 3D に重ねる", True); r.addWidget(self.ovPost)
+        self.fit3d = self._btn("3D を合わせる", None, "3D をグラフトの範囲に合わせる（左前斜位。押すたびに 左前斜位 → 正面 → 左側面）"); r.addWidget(self.fit3d)
+        r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("グラフトの軸", "muted"))
+        self.axisGrp, self.axisBtns = self._seg(["中心線", "真腔に合わせる"], r)
+        self.axisBtns[0].checked = True
+        self.axisBtns[0].setToolTip("作った中心線をグラフトの軸にする（位置を変えたい時は中心線を直す）")
+        self.axisBtns[1].setToolTip("断面ごとに、真腔をいちばん多く覆う位置へ軸を動かす")
 
         card, c = self._card(pl, "遠位端と SINE の目安")
         self.sineLab = qt.QLabel("—"); self.sineLab.setTextFormat(qt.Qt.RichText); self.sineLab.setWordWrap(True)
@@ -462,6 +471,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.pdfBtn.connect("clicked()", self.onPDF)
         for b in self.osBtns: b.connect("clicked()", self.onTvOversize)
         for b in self.flapBtns: b.connect("clicked()", self.onTvFlap)
+        for b in self.axisBtns: b.connect("clicked()", self.onTvAxis)
+        self.ovAorta.connect("toggled(bool)", lambda on: L.showOverlay3D("aorta", on))
+        self.ovPost.connect("toggled(bool)", lambda on: L.showOverlay3D("post", on))
+        self.fit3d.connect("clicked()", self.onFit3D)
         self.dpSpin.connect("valueChanged(int)", lambda v: self.onTvDiam()); self.ddSpin.connect("valueChanged(int)", lambda v: self.onTvDiam())
         self.tvShowBtn.connect("toggled(bool)", self.onTvShow)
         self.tvGoP.connect("clicked()", lambda: L.setPosition(L.planInit()["p"])); self.tvGoD.connect("clicked()", lambda: L.setPosition(L.planInit()["d"]))
@@ -503,6 +516,12 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         except Exception: pass
         self.tlBtn.blockSignals(True); self.tlBtn.checked = bool(pl.get("tl")); self.tlBtn.blockSignals(False)
         self.flapBtns[0 if pl.get("flap", "chronic") == "chronic" else 1].checked = True
+        self.axisBtns[0 if pl.get("axis", "cl") == "cl" else 1].checked = True
+        L.showOverlay3D("aorta", self.ovAorta.checked); L.showOverlay3D("post", self.ovPost.checked)
+        if not getattr(self, "_tvFitted", False):
+            self._tvFitted = True
+            try: qt.QTimer.singleShot(300, lambda: L.fit3DToGraft("lao"))
+            except Exception: pass
         for sp, key in ((self.dpSpin, "dp"), (self.ddSpin, "dd")):
             sp.blockSignals(True); sp.value = int(pl.get(key) or 0); sp.blockSignals(False)
         self.tvShowBtn.blockSignals(True); self.tvShowBtn.checked = bool(pl.get("on", True)); self.tvShowBtn.blockSignals(False)
@@ -587,6 +606,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
     def onTvHere(self, key):
         self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
+
+    def onTvAxis(self):
+        v = "cl" if self.axisBtns[0].checked else "tl"
+        self._busy(lambda: self.logic.planSet(axis=v)); self._tvRefresh()
+
+    def onFit3D(self):
+        views = ("lao", "front", "left"); self._fitIdx = (getattr(self, "_fitIdx", -1) + 1) % 3
+        self.logic.fit3DToGraft(views[self._fitIdx])
+        self._say({"lao": "3D: 左前斜位", "front": "3D: 正面", "left": "3D: 左側面"}[views[self._fitIdx]])
 
     def onTvFlap(self):
         v = "chronic" if self.flapBtns[0].checked else "acute"
@@ -683,6 +711,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.onAuto()
 
     def exit(self):
+        self.logic._tvMode = False
         try:
             if getattr(self, "_tvRen", None) is not None:
                 ren = slicer.app.layoutManager().threeDWidget(0).threeDView().renderWindow().GetRenderers().GetFirstRenderer()
@@ -697,6 +726,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         i = max(0, min(3, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()
+        self.logic._tvMode = (i == 2)
         if i == 2: self._tvEnter()
         try:                                                                  # TEVAR の時は血管を半透明にして、中のグラフトを見せる
             vm = getattr(self.logic, "vesselModel", None)
@@ -1935,6 +1965,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             ren.SetUseDepthPeeling(True); ren.SetMaximumNumberOfPeels(8); ren.SetOcclusionRatio(0.1)
             ren.SetUseSSAO(True); ren.SetSSAORadius(12.0); ren.SetSSAOBias(0.01); ren.SetSSAOKernelSize(32); ren.SetSSAOBlur(True)
             v3.renderWindow().SetMultiSamples(8)                               # アンチエイリアスで輪郭をなめらかに
+            if getattr(self, "_tvMode", False): ren.SetUseDepthPeeling(False); ren.SetUseSSAO(False)   # TEVAR: 半透明（血管・グラフトの布）を描くため
         except Exception: pass
         if self.P is None: return
         allp = np.vstack([slicer.util.arrayFromMarkupsCurvePoints(c, world=True) for c in self.curves.values()])
@@ -3137,7 +3168,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         E = ndimage.distance_transform_edt(_rasterPoly(np.asarray(xy, float), nu)) * STEP - self.GRAFT_WALL_MM
         cache[key] = (xy, E); return E
 
-    def _deploy(self, k, Rn, path, flap, useTL):
+    def _deploy(self, k, Rn, path, flap, useTL, axis="cl"):
         """断面 k で広がったグラフト: (中心 u, v, 半径の輪 Rth[72], ガター mm², 名目の半径)"""
         from scipy.signal import fftconvolve
         E = self._aortaIn(k, path)
@@ -3151,19 +3182,27 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             xy = self._tlXY(k); mt = _polyMetrics(xy) if xy is not None else None
             if mt: r = min(Rn, mt["dmax"] / 2.0)                               # 真腔の長径まで（周径に沿う）
         r = float(max(r, 2.0))                                                   # 壁より大きい所は、壁に当たって沿う（下の放射で切る）
-        key = (path, int(k), round(r, 1), useTL, id(E))
+        key = (path, int(k), round(r, 1), useTL, id(E), axis)
         cache = self.__dict__.setdefault("_depCache", {})
         if key in cache: return cache[key]
         if len(cache) > 6000: cache.clear()
-        kr = int(math.ceil(r / STEP)); yy, xx = np.mgrid[-kr:kr + 1, -kr:kr + 1]
-        Kd = ((xx * xx + yy * yy) * STEP * STEP <= r * r).astype(np.float32)
-        ov = fftconvolve(TLm.astype(np.float32), Kd, mode="same")
-        feas = E >= r - 0.3
-        if not feas.any(): feas = E >= E.max() - 0.3
-        ov[~feas] = -1
-        rc, cc = np.argwhere(TLm).mean(0); best = ov.max()
-        cand = np.argwhere(ov >= best * 0.99); j = cand[np.argmin(((cand - (rc, cc)) ** 2).sum(1))]   # 同じなら真腔の中心に近い方
-        r0, c0 = float(j[0]), float(j[1]); nu = Ai.shape[0]
+        nu = Ai.shape[0]
+        if axis == "cl":                                                         # 作った中心線を軸にする。壁に当たる分だけ、近い所へずらす
+            r0 = c0 = HALF / STEP
+            if E[int(r0), int(c0)] < r - 0.3:
+                feas = E >= r - 0.3
+                if not feas.any(): feas = E >= E.max() - 0.3
+                pts = np.argwhere(feas); j = pts[np.argmin(((pts - (r0, c0)) ** 2).sum(1))]; r0, c0 = float(j[0]), float(j[1])
+        else:                                                                    # 真腔をいちばん多く覆う位置へ動かす
+            kr = int(math.ceil(r / STEP)); yy, xx = np.mgrid[-kr:kr + 1, -kr:kr + 1]
+            Kd = ((xx * xx + yy * yy) * STEP * STEP <= r * r).astype(np.float32)
+            ov = fftconvolve(TLm.astype(np.float32), Kd, mode="same")
+            feas = E >= r - 0.3
+            if not feas.any(): feas = E >= E.max() - 0.3
+            ov[~feas] = -1
+            rc, cc = np.argwhere(TLm).mean(0); best = ov.max()
+            cand = np.argwhere(ov >= best * 0.99); j = cand[np.argmin(((cand - (rc, cc)) ** 2).sum(1))]   # 同じなら真腔の中心に近い方
+            r0, c0 = float(j[0]), float(j[1])
         th = np.linspace(0, 2 * np.pi, self.NTH, endpoint=False); rs = np.arange(0, r + 0.26, 0.25)
         R_ = r0 + np.sin(th)[:, None] * rs[None] / STEP; C_ = c0 + np.cos(th)[:, None] * rs[None] / STEP
         ok = (R_ >= 0) & (R_ <= nu - 1) & (C_ >= 0) & (C_ <= nu - 1)
@@ -3197,12 +3236,15 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 useTL = bool(pl.get("tl")) and self.tlValid(); flap = pl.get("flap", "chronic")
                 samp = list(range(0, n, 2))
                 if samp[-1] != n - 1: samp.append(n - 1)
-                res = [(i, self._deploy(int(ks[i]), float(Rn[i]), path, flap, useTL)) for i in samp]
+                axis = pl.get("axis", "cl")
+                res = [(i, self._deploy(int(ks[i]), float(Rn[i]), path, flap, useTL, axis)) for i in samp]
                 res = [(i, r) for i, r in res if r is not None]
                 if len(res) >= 2:
                     idx = np.array([i for i, _ in res]); x = np.arange(n)
                     sm = lambda a, sg: ndimage.gaussian_filter1d(a, sg / STEP, axis=0, mode="nearest")
                     cu = sm(np.interp(x, idx, [r[0] for _, r in res]), 2.0); cv = sm(np.interp(x, idx, [r[1] for _, r in res]), 2.0)
+                    if axis == "cl":                                                 # グラフトは硬い筒: 軸はなめらかに
+                        cu = sm(np.interp(x, idx, [r[0] for _, r in res]), 5.0); cv = sm(np.interp(x, idx, [r[1] for _, r in res]), 5.0)
                     Rs = np.array([r[2] for _, r in res]); Rth = np.stack([np.interp(x, idx, Rs[:, j]) for j in range(Rs.shape[1])], 1)
                     Rth = ndimage.gaussian_filter1d(sm(Rth, 1.5), 1.0, axis=1, mode="wrap"); Rth = np.minimum(Rth, Rn[:, None])
                     lim = np.stack([self._rayLimit(int(ks[i]), path, cu[i], cv[i]) for i in idx])          # なめらかにした後も、壁は越えない
@@ -3214,6 +3256,32 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             except Exception as e:
                 import traceback; print("graft deploy:", traceback.format_exc())
         return F, ks, R, C
+
+    def fit3DToGraft(self, view="lao"):
+        """3D をグラフトの範囲（前後 3 cm）に合わせる。lao = 左前斜位、front = 正面、left = 左側面"""
+        pl = self.planInit(); F = self.frames[pl["path"]]
+        k0, k1 = self._k(pl["p"] - 30.0, pl["path"]), self._k(pl["d"] + 30.0, pl["path"])
+        Pk = F["P"][k0:k1 + 1]; ctr = (Pk.min(0) + Pk.max(0)) / 2.0; ext = float(np.ptp(Pk, 0).max()) + 30.0
+        v = slicer.app.layoutManager().threeDWidget(0).threeDView()
+        cam = slicer.modules.cameras.logic().GetViewActiveCameraNode(v.mrmlViewNode())
+        dv = {"lao": (-0.64, 0.77, 0.0), "front": (0.0, 1.0, 0.0), "left": (-1.0, 0.0, 0.0)}[view]
+        dv = np.array(dv) / np.linalg.norm(dv); asp = max(v.width, 1) / max(v.height, 1)
+        c = cam.GetCamera(); half = ext / 2.0 / min(1.0, asp)
+        if c.GetParallelProjection(): c.SetParallelScale(half * 1.05); dist = ext * 2.0
+        else: dist = half / math.tan(math.radians(c.GetViewAngle() / 2.0)) * 1.05
+        cam.SetFocalPoint(*ctr); cam.SetPosition(*(ctr + dv * dist)); cam.SetViewUp(0, 0, 1); cam.ResetClippingRange()
+
+    def showOverlay3D(self, what, on):
+        if what == "aorta":
+            vm = getattr(self, "vesselModel", None)
+            if vm is not None and slicer.mrmlScene.IsNodePresent(vm):
+                d = vm.GetDisplayNode(); d.SetVisibility(bool(on)); d.SetOpacity(0.2)
+        elif what == "post":
+            for nm, vis in (("TEVAR 術後（範囲）", bool(on)), ("TEVAR 術後（金属）", False)):   # 金属の点は 5 mm スライスで筋になるので出さない（筒だけ）
+                m = slicer.mrmlScene.GetFirstNodeByName(nm)
+                if m is not None and m.GetDisplayNode():
+                    m.GetDisplayNode().SetVisibility(vis)
+                    if vis: m.GetDisplayNode().SetOpacity(0.35)
 
     def _tubeRadPD(self, Cs, B, N, Rth):
         """半径の輪 Rth[k, 72]（角度 = B → N）で、断面の形どおりの筒"""
