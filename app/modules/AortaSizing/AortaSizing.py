@@ -3720,13 +3720,16 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         from concurrent.futures import ThreadPoolExecutor
         files = [os.path.join(dp, f) for dp, dn, fn in os.walk(folder) for f in fn]
         status(f"術後 CT: {len(files)} ファイルを調べています…")
+        mpr = []
         def hdr(p):
             try:
                 d = pydicom.dcmread(p, stop_before_pixels=True, force=True)
                 it = str(getattr(d, "ImageType", ""))
                 if "LOCALIZER" in it or "SECONDARY" in it or str(getattr(d, "Modality", "")) != "CT": return None
                 iop = [float(x) for x in d.ImageOrientationPatient]
-                if abs(iop[0]) < 0.9 or abs(iop[4]) < 0.9: return None             # 軸位だけ
+                if abs(iop[0]) < 0.9 or abs(iop[4]) < 0.9:                            # 軸位でない薄い再構成（MPR）は金属用に覚えておく
+                    if 0 < float(getattr(d, "SliceThickness", 0) or 0) <= 2.5 and int(d.Rows) >= 512: mpr.append((p, str(d.SeriesInstanceUID)))
+                    return None
                 return (p, str(d.SeriesInstanceUID), bool(str(getattr(d, "ContrastBolusAgent", "")).strip()), "ORIGINAL" in it,
                         float(getattr(d, "SliceThickness", 0) or 0), int(d.Rows))
             except Exception: return None
@@ -3756,7 +3759,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             for j in range(4): m.SetElement(i, j, float(M[i, j]))
         node.SetIJKToRASMatrix(m); node.CreateDefaultDisplayNodes()
         dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False); dn.SetWindowLevel(800, 200)
-        self.post = node; self.postT = None
+        self.post = node; self.postT = None; self.postMPR = [p for p, _ in mpr]; self._mprCache = None
         status(f"術後 CT を読み込みました（{arr.shape[0]} 枚・{dz:.1f} mm 間隔）")
         return node
 
@@ -4016,6 +4019,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             Xi, Xs = IN[mi], SH[ms]
             sc = lambda t: val(Xi, t).mean() - val(Xs, t).mean()
             kc = self._k(c); Bc, Nc = self.B[kc], self.N[kc]                          # 断面の中だけで動かす（長さ方向は外形では決まらないので背骨合わせのまま）
+            ka, kb = self._k(c - half), self._k(c + half); turn = math.degrees(math.acos(float(np.clip(self.T[ka] @ self.T[kb], -1, 1))))
+            curved = turn > 35.0                                                       # 曲がっている所（弓部）は、長さ方向も外形で決まる
             s0 = sc(np.zeros(3)); best = (s0, np.zeros(3), 0.0, 0.0)
             for step, span in ((1.5, 12.0), (0.5, 1.5)):
                 c0u, c0v = best[2], best[3]; ax = np.arange(-span, span + 1e-6, step)
@@ -4023,10 +4028,17 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                     for dv in ax:
                         t = (c0u + du) * Bc + (c0v + dv) * Nc; v = sc(t)
                         if v > best[0]: best = (v, t, c0u + du, c0v + dv)
+            if curved:
+                Tc = self.T[kc]; base_ = best[1]
+                for dw in np.arange(-8.0, 8.01, 1.0):
+                    for du in np.arange(-1.0, 1.01, 0.5):
+                        for dv in np.arange(-1.0, 1.01, 0.5):
+                            t = base_ + dw * Tc + du * Bc + dv * Nc; v = sc(t)
+                            if v > best[0]: best = (v, t, best[2], best[3])
             if best[0] - s0 < 3.0: best = (s0, np.zeros(3), 0.0, 0.0)                # はっきり良くならなければ動かさない
-            out.append((c, *best[1], best[0] - s0)); status(f"大動脈の外形で合わせ直しています… {self.rel(c):.0f} mm")
+            out.append((c, *best[1], best[0] - s0, float(curved))); status(f"大動脈の外形で合わせ直しています… {self.rel(c):.0f} mm")
         if len(out) < 2: status("大動脈の外形で合わせ直せませんでした（背骨の重ね合わせのまま）"); return None
-        O = np.array(out); T = O[:, 1:4]
+        O = np.array(out); T = O[:, 1:4].copy()
         if len(T) >= 3: T = ndimage.median_filter(T, size=(3, 1), mode="nearest")
         T = ndimage.gaussian_filter1d(T, 1.0, axis=0, mode="nearest")
         self.postShift = dict(path=self.path, s=O[:, 0], t=T, mag=np.linalg.norm(T, axis=1))
@@ -4035,14 +4047,42 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._restent(status)
         return self.postShift
 
+    def _mprMetal(self, thr=450.0, status=print):
+        """薄い MPR（2 mm 以下の冠状断・矢状断）から金属の点を拾う（術後の座標 RAS）。5 mm の軸位より頭尾方向がずっと細かい"""
+        files = getattr(self, "postMPR", None) or []
+        if not files: return None
+        if getattr(self, "_mprCache", None) is not None: return self._mprCache
+        import pydicom
+        from concurrent.futures import ThreadPoolExecutor
+        status(f"薄い再構成（{len(files)} 枚）から金属を拾っています…")
+        def rd(p):
+            try:
+                d = pydicom.dcmread(p, force=True)
+                a = d.pixel_array.astype(np.float32) * float(getattr(d, "RescaleSlope", 1) or 1) + float(getattr(d, "RescaleIntercept", 0) or 0)
+                rr, cc = np.nonzero(a > thr)
+                if len(rr) == 0: return None
+                if len(rr) > 60000: j = np.random.default_rng(0).choice(len(rr), 60000, replace=False); rr, cc = rr[j], cc[j]
+                iop = np.array([float(x) for x in d.ImageOrientationPatient]); ps = [float(x) for x in d.PixelSpacing]; o = np.array([float(x) for x in d.ImagePositionPatient])
+                X = o + cc[:, None] * iop[:3] * ps[1] + rr[:, None] * iop[3:] * ps[0]
+                return (X * np.array([-1.0, -1.0, 1.0])).astype(np.float32)          # LPS → RAS
+            except Exception: return None
+        with ThreadPoolExecutor(8) as ex: parts = [x for x in ex.map(rd, files) if x is not None]
+        self._mprCache = np.concatenate(parts) if parts else None
+        return self._mprCache
+
     def _restent(self, status=print, thr=450.0):
         """金属（ステント）を拾い直す: 術後 CT の金属の画素を、背骨の重ね合わせ → 大動脈の外形で合わせ直したずれ の順に術前の座標へ"""
         from scipy.spatial import cKDTree
         ac = getattr(self, "actual", None)
         if ac is None or ac.get("path") != self.path: return
         if "pts0" not in ac: ac["pts0"] = ac["pts"]
-        M = self.postT; a1 = slicer.util.arrayFromVolume(self.post)
-        Y = self._volPts(self.post, a1 > thr); X = Y @ M[:3, :3].T + M[:3, 3]
+        M = self.postT; Y = None
+        try: Y = self._mprMetal(thr, status)
+        except Exception as e: print("mpr metal:", e)
+        src = "薄い再構成"
+        if Y is None:
+            a1 = slicer.util.arrayFromVolume(self.post); Y = self._volPts(self.post, a1 > thr); src = "軸位"
+        X = Y @ M[:3, :3].T + M[:3, 3]
         d, k = cKDTree(self.P).query(X); sel = (d < 45.0) & (self.s[k] >= ac["lo"] - 4.0) & (self.s[k] <= ac["hi"] + 4.0)
         X, k = X[sel], k[sel]
         X = X - self._postShiftAt(k)
@@ -4055,6 +4095,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if boD is not None: ok &= ~boD[I[:, 2], I[:, 1], I[:, 0]]
         X = X[ok]
         if len(X) < 30: status("金属を拾い直せませんでした（前の結果のまま）"); return
+        if len(X) > 40000: X = X[np.random.default_rng(0).choice(len(X), 40000, replace=False)]
         ac["pts"] = X; _, kk = cKDTree(self.P).query(X); ss = self.s[kk]; ac["s"] = ss
         b_ = np.floor(ss / 2.0).astype(int); cnt = np.bincount(b_, minlength=b_.max() + 1)   # 端も合わせ直した金属で測り直す（まばらな点は端に数えない）
         occ = np.where(cnt >= max(3, 0.2 * np.median(cnt[cnt > 0])))[0]
@@ -4066,7 +4107,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             runs.append((st, pv)); r0, r1 = max(runs, key=lambda r: cnt[r[0]:r[1] + 1].sum())
             if (r1 + 1 - r0) * 2.0 > 0.5 * (ac["hi"] - ac["lo"]): ac["lo"], ac["hi"] = r0 * 2.0, (r1 + 1) * 2.0
         self._drawActual(); self._drawGreen()
-        status(f"金属を拾い直しました（{len(X)} 点）")
+        ac["src"] = src; status(f"金属を拾い直しました（{src}・{len(X)} 点）")
 
     def postStraight(self):
         """術後 CT を、術前の中心線に沿って伸ばした画像（術前と同じ位置で並べて見られる）"""
