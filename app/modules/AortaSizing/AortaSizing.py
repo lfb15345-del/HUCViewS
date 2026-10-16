@@ -424,6 +424,11 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             for j, col in enumerate(("plan", "post", "diff"), 1):
                 w_ = self._lab("—"); w_.setStyleSheet("font-size:12px; font-weight:bold; color:#ffffff"); w_.setWordWrap(True)
                 w_.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred); w_.setMinimumWidth(10); g2.addWidget(w_, i, j); self.cmpLab[(key, col)] = w_
+        c.addWidget(self._lab("術前の真腔からの広がり（実際のステント ÷ 術前の真腔）", "h"))
+        self.expLab = qt.QLabel("「比べる」のあとに出ます。"); self.expLab.setTextFormat(qt.Qt.RichText); self.expLab.setWordWrap(True)
+        self.expLab.setStyleSheet("font-size:12px; color:#dfe6ee"); self.expLab.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred); self.expLab.setMinimumWidth(10)
+        c.addWidget(self.expLab)
+        self.expCsvBtn = self._btn("広がりの表を CSV に保存", None, "断面 2 mm ごとの 実際の長径・短径・面積・周径 と 術前の真腔 と その比（ドキュメント\\HeartView症例）"); c.addWidget(self.expCsvBtn)
         self.sameRangeBtn = self._btn("実際と同じ範囲で描いて比べる", None, "仮想グラフトを、術後の実際のグラフトと同じ範囲に置き直して、形（太さ・位置）だけを比べる。もう一度押すと元の計画に戻る", True); c.addWidget(self.sameRangeBtn)
         self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
         c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。"
@@ -500,6 +505,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.postLoadBtn.connect("clicked()", self.onPostLoad); self.postCmpBtn.connect("clicked()", self.onPostCompare)
         self.postStretchBtn.connect("toggled(bool)", self.onPostStretch)
         self.sameRangeBtn.connect("toggled(bool)", self.onSameRange)
+        self.expCsvBtn.connect("clicked()", self.onExpCsv)
         self.tlBtn.connect("toggled(bool)", self.onTL)
         self.tlShowBtn.connect("toggled(bool)", lambda on: (lambda m: m and m.GetDisplayNode().SetVisibility(on))(slicer.mrmlScene.GetFirstNodeByName("TEVAR 真腔")))
         self.pngBtn.connect("clicked()", self.onPNG)
@@ -715,6 +721,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         def run():
             M, rms = L.registerPost(self._say)
             L.extractStent(status=self._say)
+            pl_ = L.planInit()
+            if pl_.get("tl") and not L.tlValid(): L.extractTL(self._say)
             try: L.refinePost(self._say)
             except Exception as e: print("refine:", e)
             return rms
@@ -726,7 +734,33 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.postInfo.setText(f"重ね合わせ（背骨）の誤差 {rms:.1f} mm{pst}・術後 CT のスライス間隔 {zr:.1f} mm（端の位置はおよそ ±{max(zr / 2, rms):.0f} mm）")
         self._tvRefresh()
         c = L.comparePost()
+        self._expRefresh()
         if c: self._say(f"術後のグラフト: 近位端 {c['dP']:+.0f} mm・遠位端 {c['dD']:+.0f} mm（計画との差。＋ = 遠位へ）")
+
+    def _expRefresh(self):
+        L = self.logic
+        try: ex = L.expansionReport()
+        except Exception as e: print("expansion:", e); ex = None
+        if not ex: self.expLab.setText("「比べる」のあとに出ます（解離では「真腔に沿わせる」も）。"); return
+        g = "color:#9aa7b4; font-size:11px"
+        pc = lambda r: f"<b>{(r - 1) * 100:+.0f}%</b>"
+        h = (f"<table width='100%' cellspacing='0' cellpadding='2'><tr><td></td><td align='right' style='{g}'>長径</td><td align='right' style='{g}'>短径</td>"
+             f"<td align='right' style='{g}'>面積</td><td align='right' style='{g}'>周径</td></tr>")
+        for key, name in (("prox", "近位 2 cm"), ("mid", "中央"), ("dist", "遠位 2 cm"), ("all", "全体")):
+            r = ex["reg"].get(key)
+            if not r: continue
+            h += (f"<tr><td>{name}</td><td align='right'>{pc(r['r_long'])}</td><td align='right'>{pc(r['r_short'])}</td><td align='right'>{pc(r['r_area'])}</td><td align='right'>{pc(r['r_per'])}</td></tr>"
+                  f"<tr><td style='{g}'></td><td align='right' style='{g}'>{r['tl_long']:.0f}→{r['maj']:.0f}</td><td align='right' style='{g}'>{r['tl_short']:.0f}→{r['min']:.0f}</td>"
+                  f"<td align='right' style='{g}'>短/長 {r['ratio']:.2f}</td><td></td></tr>")
+        h += f"</table><span style='{g}'>中央値・mm。実際 = 術後の金属に楕円を当てはめた値（{len(ex['rows'])} 断面）。</span>"
+        self.expLab.setText(h)
+
+    def onExpCsv(self):
+        L = self.logic
+        if not getattr(L, "expansion", None): self._expRefresh()
+        fn = L.saveExpansionCSV()
+        if fn: self._done(os.path.dirname(fn), "広がりの表")
+        else: self._say("先に「比べる」を押してください。")
 
     def onSameRange(self, on):
         L = self.logic; ac = getattr(L, "actual", None); pl = L.planInit()
@@ -1154,6 +1188,29 @@ def _radAt(Rth, rows, ang):
     """半径の輪 Rth[row, 72]（角度 = B 軸から N 軸へ）を、角度 ang で読む（線形補間）"""
     n = Rth.shape[1]; f = (np.mod(ang, 2 * np.pi) / (2 * np.pi)) * n; i0 = np.floor(f).astype(int) % n; i1 = (i0 + 1) % n; w = f - np.floor(f)
     return Rth[rows, i0] * (1 - w) + Rth[rows, i1] * w
+
+
+def _fitEllipse(x, y):
+    """点 (x, y) に楕円を当てはめる（Fitzgibbon の直接法）→ (中心, 長径, 短径, 長軸の角度 rad)。だめなら None"""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    if len(x) < 8: return None
+    mx, my = x.mean(), y.mean(); x = x - mx; y = y - my
+    D = np.c_[x * x, x * y, y * y, x, y, np.ones_like(x)]; S = D.T @ D; C = np.zeros((6, 6)); C[0, 2] = C[2, 0] = 2; C[1, 1] = -1
+    try:
+        ev, V = np.linalg.eig(np.linalg.solve(S, C)); V = np.real(V)
+    except Exception: return None
+    a = None
+    for i in range(6):
+        if 4 * V[0, i] * V[2, i] - V[1, i] ** 2 > 0: a = V[:, i]; break
+    if a is None: return None
+    A, B, Cc, Dd, E, F = a
+    M = np.array([[A, B / 2], [B / 2, Cc]])
+    try: c0 = np.linalg.solve(2 * M, [-Dd, -E])
+    except Exception: return None
+    Fc = F + 0.5 * (Dd * c0[0] + E * c0[1]); w, U = np.linalg.eigh(M)
+    if np.any(w * (-Fc) <= 0): return None
+    ax = np.sqrt(-Fc / w); i = int(np.argmax(ax))
+    return (c0[0] + mx, c0[1] + my), 2 * float(ax.max()), 2 * float(ax.min()), math.atan2(U[1, i], U[0, i])
 
 
 def _polyMetrics(xy):
@@ -4069,6 +4126,49 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         with ThreadPoolExecutor(8) as ex: parts = [x for x in ex.map(rd, files) if x is not None]
         self._mprCache = np.concatenate(parts) if parts else None
         return self._mprCache
+
+    def expansionReport(self, step=2.0):
+        """実際のステント（金属に楕円を当てはめる）が、術前の真腔からどれだけ広がったか（断面ごと・区間ごと）"""
+        ac = getattr(self, "actual", None)
+        if ac is None or ac.get("path") != self.path or not self.tlValid(): return None
+        from scipy.spatial import cKDTree
+        X = ac["pts"]; _, kk = cKDTree(self.P).query(X); rows = []
+        for x in np.arange(ac["lo"] + 2.0, ac["hi"] - 2.0 + 1e-6, step):
+            k = self._k(x); m = np.abs(kk - k) <= int(2.0 / STEP)
+            if m.sum() < 20: continue
+            d = X[m] - self.P[k]; e = _fitEllipse(d @ self.B[k], d @ self.N[k])
+            if e is None or not (8.0 < e[2] <= e[1] < 50.0): continue
+            xy = self._tlXY(k); t = _polyMetrics(xy) if xy is not None else None
+            if t is None: continue
+            per_t = float(np.linalg.norm(np.diff(np.r_[xy, xy[:1]], axis=0), axis=1).sum())
+            a_, b_ = e[1] / 2, e[2] / 2; area = math.pi * a_ * b_; per = math.pi * (3 * (a_ + b_) - math.sqrt((3 * a_ + b_) * (a_ + 3 * b_)))
+            rows.append(dict(s=float(x), maj=e[1], min=e[2], area=area, per=per, tl_long=t["dmax"], tl_short=t["dmin"], tl_area=t["area"], tl_per=per_t))
+        if len(rows) < 3: return None
+        lo, hi = ac["lo"], ac["hi"]; S = np.array([r["s"] for r in rows])
+        def summ(msk):
+            if not np.any(msk): return None
+            g = lambda key: np.array([r[key] for r in rows])[msk]
+            return dict(n=int(msk.sum()), maj=float(np.median(g("maj"))), min=float(np.median(g("min"))), tl_long=float(np.median(g("tl_long"))), tl_short=float(np.median(g("tl_short"))),
+                        r_long=float(np.median(g("maj") / g("tl_long"))), r_short=float(np.median(g("min") / g("tl_short"))),
+                        r_area=float(np.median(g("area") / g("tl_area"))), r_per=float(np.median(g("per") / g("tl_per"))), ratio=float(np.median(g("min") / g("maj"))))
+        reg = dict(prox=summ(S < lo + 20.0), mid=summ((S >= lo + 20.0) & (S <= hi - 20.0)), dist=summ(S > hi - 20.0), all=summ(S > -1e9))
+        self.expansion = dict(rows=rows, reg=reg, lo=lo, hi=hi)
+        return self.expansion
+
+    def saveExpansionCSV(self, d=None):
+        ex = getattr(self, "expansion", None)
+        if not ex: return None
+        import csv
+        d = d or self.outDir(); fn = os.path.join(d, "TEVAR_広がり.csv")
+        with open(fn, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["位置 mm（中心線）", "基準からの位置 mm", "実際 長径", "実際 短径", "実際 面積 mm2", "実際 周径", "術前真腔 長径", "術前真腔 短径", "術前真腔 面積 mm2", "術前真腔 周径",
+                        "長径の比", "短径の比", "面積の比", "周径の比"])
+            for r in ex["rows"]:
+                w.writerow([f"{r['s']:.1f}", f"{self.rel(r['s']):.1f}", f"{r['maj']:.1f}", f"{r['min']:.1f}", f"{r['area']:.0f}", f"{r['per']:.1f}",
+                            f"{r['tl_long']:.1f}", f"{r['tl_short']:.1f}", f"{r['tl_area']:.0f}", f"{r['tl_per']:.1f}",
+                            f"{r['maj'] / r['tl_long']:.2f}", f"{r['min'] / r['tl_short']:.2f}", f"{r['area'] / r['tl_area']:.2f}", f"{r['per'] / r['tl_per']:.2f}"])
+        return fn
 
     def _restent(self, status=print, thr=450.0):
         """金属（ステント）を拾い直す: 術後 CT の金属の画素を、背骨の重ね合わせ → 大動脈の外形で合わせ直したずれ の順に術前の座標へ"""
