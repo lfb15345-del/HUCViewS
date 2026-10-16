@@ -3115,9 +3115,43 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if np.linalg.norm(off) > 45: status("中心から遠すぎます（血管の中をクリック）"); return
         cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
         self._hist = getattr(self, "_hist", []); self._hist.append(("center", (self.path, cps.copy())))
-        self._offsetCurve(c, P0, off)
+        self._softMove(c, [(k, off)])
         self._rebuildKeep(status)
         status(f"中心線を {np.linalg.norm(off):.1f} mm 動かしました（Ctrl+Z で戻す）")
+
+    def _softMove(self, c, fixes, sigma=12.0):
+        """中心線を直す: クリックした点だけを横へ引っぱると、近くの制御点との間で折れ曲がってループする。
+        そこで ① ずらしは断面の面内だけ（頭尾方向には動かさない）② 前後の制御点もなめらかに一緒にずらす（ガウス、幅 12 mm〜）
+        ③ 修正点そのものを通る制御点を置く ④ 前へ進まない点・近すぎる点（ループの元）は除く"""
+        from scipy.spatial import cKDTree
+        P, T, S = self.P, self.T, self.s
+        cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True).astype(float)
+        if len(cps) < 2 or not fixes: return
+        # 制御点の中心線上の位置（前後の順を守るため、順番に近い所を探す）
+        _, ki = cKDTree(P).query(cps); ki = np.maximum.accumulate(ki); si = S[ki]
+        F = []
+        for k, o in fixes:
+            k = int(np.clip(k, 0, len(P) - 1)); o = np.asarray(o, float); o = o - (o @ T[k]) * T[k]; F.append((k, o))
+        num = np.zeros_like(cps); den = np.zeros(len(cps)); wmax = np.zeros(len(cps))
+        for k, o in F:
+            sg = max(sigma, 1.5 * float(np.linalg.norm(o))); w = np.exp(-0.5 * ((si - S[k]) / sg) ** 2)
+            num += w[:, None] * o; den += w; wmax = np.maximum(wmax, w)
+        disp = num / np.maximum(den, 1e-9)[:, None] * wmax[:, None]
+        disp -= np.einsum("ij,ij->i", disp, T[ki])[:, None] * T[ki]          # 面内だけ
+        pts = [(float(si[i]), cps[i] + disp[i], i in (0, len(cps) - 1)) for i in range(len(cps))]
+        for k, o in F: pts.append((float(S[k]), P[k] + o, True))             # 修正点（必ず通す）
+        pts.sort(key=lambda t: t[0]); out = []
+        for sv, x, keep in pts:
+            if out:
+                ps, px, pk = out[-1]; kk = int(np.clip(round(0.5 * (sv + ps) / STEP), 0, len(T) - 1))
+                bad = (sv - ps < 4.0) or float(np.dot(x - px, T[kk])) <= 0.0
+                if bad:
+                    if keep and not pk: out[-1] = (sv, x, keep)                   # 修正点を優先
+                    continue
+            out.append((sv, x, keep))
+        wasMod = c.StartModify(); c.RemoveAllControlPoints()
+        for _, x, _ in out: c.AddControlPoint(vtk.vtkVector3d(*x))
+        c.EndModify(wasMod)
 
     def _offsetCurve(self, c, P0, off):
         cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
@@ -3156,7 +3190,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if not pend or c is None: return 0
         cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
         self._hist = getattr(self, "_hist", []); self._hist.append(("center", (self.path, cps.copy())))
-        for k, p, sk in sorted(pend, key=lambda q: q[2]): self._offsetCurve(c, self.P[k], p - self.P[k])
+        self._softMove(c, [(k, p - self.P[k]) for k, p, sk in pend])
         self.pendingFix = []; self._drawPending()
         s0 = self.curS
         try: self._rebuildKeep(status)
