@@ -526,7 +526,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         c.addWidget(self._lab("まとめ・マーカー表（外周/内腔）・手動計測・3D・ストレッチ像・各マーカーの断面を A4 に。PNG と CSV も同じフォルダに入ります。", "muted"))
         self.pngBtn = self._btn("高画質画像（PNG）だけ保存"); c.addWidget(self.pngBtn)
         self.secBtn = self._btn("今の断面だけ PNG で保存"); c.addWidget(self.secBtn)
-        self.helixCsvBtn = self._btn("解離のらせんを CSV に（一覧に 1 行追加）", None, "解離の範囲・真腔が大動脈のまわりを何度回るか（正味・合計・1 cm あたり）・巻きの向き・真腔の位置（時計）を 1 行に。ドキュメント\\HeartView症例\\解離らせん_一覧.csv に追記（解析用。真腔をたどってから）"); c.addWidget(self.helixCsvBtn)
+        self.helixCsvBtn = self._btn("解離の形を CSV に（断面ごとの表 ＋ 一覧に 1 行）", None, "真腔をたどり、逆向きにもたどって食い違う所を「要確認」に。断面ごと（2 mm）の 真腔の面積・割合・重心のずれ・位置（時）・回転 と、"
+                                     "1 行の要約（解離の範囲・回転・巻き・最大径・版・設定・手直しの回数）を ドキュメント\\HeartView症例\\解離らせん_一覧.csv に追記（解析用）"); c.addWidget(self.helixCsvBtn)
         self.sineCsvBtn = self._btn("SINE の目安を CSV に（一覧に 1 行追加）", None, "計画・治療長・遠位端の真腔・SINE の目安（と術後のずれ）を 1 行に。ドキュメント\\HeartView症例\\TEVAR_SINE_一覧.csv に症例ごとに追記（解析用）"); c.addWidget(self.sineCsvBtn)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.outLabel = self._lab("まだ保存していません", "muted"); self.outLabel.setWordWrap(True); r.addWidget(self.outLabel, 1)
@@ -1403,12 +1404,20 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
     def onHelixCsv(self):
         L = self.logic
-        if L.P is not None and not L.tlValid(): self._busy(L.extractTL, self._say)
-        fn = self._busy(L.saveHelixCSV)
-        if not fn: self._say("真腔がたどれませんでした（3 計画の「真腔に沿わせる」を確認）。"); return
-        h = L.helixMetrics() or {}
-        self._done(os.path.dirname(fn), "解離のらせん（" + os.path.basename(fn) + " に 1 行追加）")
-        if h.get("dissected"): self._say(f"解離 {h['length']:.0f} mm・真腔の回転 正味 {h['net']:+.0f}°（{h['hand']}）・合計 {h['total']:.0f}°・最大 {h['maxAbs']:.0f}°。一覧に 1 行追加しました。")
+        if L.P is None: self._say("先に中心線を作ってください。"); return
+        if not L.tlValid(): self._busy(L.extractTL, self._say)
+        if not L.tlValid(): self._say("真腔がたどれませんでした（3 計画の「真腔に沿わせる」を確認）。"); return
+        self._say("逆向きにもたどって確かめています…"); self._busy(L.tlQC)
+        r = self._busy(L.saveDissectionCSV)
+        if not r: self._say("書き出せませんでした。"); return
+        h = L.helixMetrics() or {}; qc = L.tl.get("qc")
+        self._done(os.path.dirname(r[0]), "解離の形（断面ごとの表）")
+        if h.get("dissected"):
+            ks = np.arange(L._k(h["s0"]), L._k(h["s1"]) + 1); nq = int((qc[ks] < 0.7).sum() * STEP) if qc is not None else 0
+            self._say(f"解離 {h['length']:.0f} mm・回転 正味 {h['net']:+.0f}°（{h['hand']}）・合計 {h['total']:.0f}°。"
+                      + (f"要確認 {nq} mm（上下のたどりが食い違う所。3 計画の「真腔を直す」で確かめてから、もう一度押してください）" if nq else "上下のたどりは一致（要確認なし）。")
+                      + f" {os.path.basename(r[1])} に 1 行追加。")
+        else: self._say("解離は見つかりませんでした（一覧には「なし」で 1 行）。")
 
     def onSineCsv(self):
         r = self._busy(self.logic.saveSineCSV)
@@ -4069,17 +4078,85 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                     tlFrac=float(np.median(seg[:, 2])), offMax=float(np.hypot(u, v).max()), Dmax=float(seg[:, 5].max()),
                     curve=list(zip(seg[:, 0].tolist(), rot.tolist())))
 
+    def _appVersion(self):
+        try: return open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "version.txt"), encoding="utf-8").read().strip()
+        except Exception: return "?"
+
+    def tlQC(self):
+        """真腔のたどりの確かさ: 遠位から逆向きにもたどり、上からの結果と食い違う断面（Dice < 0.7）を「要確認」に"""
+        if not self.tlValid(): return None
+        a = slicer.util.arrayFromVolume(self.straight); K, nu, _ = a.shape; c0 = nu // 2; tl = self.tl
+        thr = tl.get("thr") or max(120.0, float(self.thr) - 20.0); fw = tl["masks"]
+        bw = np.zeros(a.shape, bool); prev = (c0, c0); prevM = None; lastK = 10 ** 9; hist = []
+        for k in range(K - 1, -1, -1):
+            ref = float(np.median(hist[-40:])) if len(hist) >= 10 else None
+            comp = self._tlSlice(a[k], thr, [(c0, c0), prev], prevM if lastK - k <= 4 else None, ref)
+            if comp is None or not comp.any(): continue
+            bw[k] = comp; r_, c_ = np.nonzero(comp); prev = (r_.mean(), c_.mean()); prevM = comp; lastK = k; hist.append(comp.sum())
+        i = (fw & bw).reshape(K, -1).sum(1); u = fw.reshape(K, -1).sum(1) + bw.reshape(K, -1).sum(1)
+        dice = np.where(u > 0, 2 * i / np.maximum(u, 1), 1.0)
+        tl["qc"] = dice; return dice
+
+    def dissectionTable(self, step=2.0):
+        """断面ごと（2 mm）: 大動脈・真腔の面積、真腔の割合、大動脈の中心 → 真腔の重心（mm・向き・回転・時計）、要確認"""
+        h = self.helixMetrics(step=step)
+        if not self.tlValid(): return None
+        qc = self.tl.get("qc")
+        if qc is None: qc = self.tlQC()
+        tl = self.tl; rows = []; rot = dict((round(a, 3), b) for a, b in (h.get("curve") or [])) if h else {}
+        for x in np.arange(0.0, self.length, step):
+            k = self._k(x); E = self._aortaIn(k, self.path)
+            if E is None: continue
+            A = E > 0; Tm = tl["masks"][k] & A
+            if A.sum() < 50: continue
+            ca = np.argwhere(A).mean(0); aa = A.sum() * STEP * STEP; ta = Tm.sum() * STEP * STEP
+            if Tm.sum() >= 10:
+                ct = np.argwhere(Tm).mean(0); d = (ct - ca) * STEP; w = d[1] * self.B[k] + d[0] * self.N[k]; w = w - (w @ self.T[k]) * self.T[k]
+                off = float(np.hypot(d[0], d[1])); clk = ((math.degrees(math.atan2(w @ np.array([-1.0, 0, 0]), w @ np.array([0, 1.0, 0]))) + 360) % 360) / 30.0 or 12.0
+            else: off, clk = float("nan"), float("nan")
+            prof = self.prof[k] if self.prof is not None else [np.nan] * 4
+            rows.append(dict(s=float(x), rel=float(self.rel(x)), aArea=aa, aDeq=2 * math.sqrt(aa / math.pi), Dmax=float(prof[2]), Dmin=float(prof[3]),
+                             tArea=ta, tFrac=ta / max(aa, 1e-6), off=off, clock=clk, rot=rot.get(round(float(x), 3), float("nan")),
+                             qc=("要確認" if qc[k] < 0.7 else "")))
+        return rows
+
+    def saveDissectionCSV(self, d=None):
+        """解離の形: 断面ごとの表（症例のフォルダ）＋ 1 行の要約（解離らせん_一覧.csv に追記）。版・設定・手直しも一緒に残す"""
+        import csv
+        rows = self.dissectionTable()
+        if rows is None: return None
+        d = d or self.outDir()
+        fn = os.path.join(d, "解離_断面ごと.csv")
+        with open(fn, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["位置 mm（中心線）", "基準からの位置 mm", "大動脈 面積 mm2（壁の内側）", "大動脈 Deq", "外周 Dmax", "外周 Dmin", "真腔 面積 mm2", "真腔/大動脈",
+                        "真腔の重心のずれ mm", "真腔の位置（時、足側から）", "真腔の回転 度（解離の始まりから）", "要確認"])
+            g = lambda v, n=1: "" if v is None or (isinstance(v, float) and not np.isfinite(v)) else f"{round(v, n) + 0.0:.{n}f}"
+            for r in rows:
+                w.writerow([g(r["s"]), g(r["rel"]), g(r["aArea"], 0), g(r["aDeq"]), g(r["Dmax"]), g(r["Dmin"]), g(r["tArea"], 0), g(r["tFrac"], 2),
+                            g(r["off"]), g(r["clock"]), g(r["rot"], 0), r["qc"]])
+        allfn = self.saveHelixCSV()
+        return fn, allfn
+
     def helixRow(self):
         h = self.helixMetrics()
         vn = self.vol.GetName() if getattr(self, "vol", None) is not None else ""
         base = [("保存日時", time.strftime("%Y-%m-%d %H:%M")), ("画像（シリーズ）", vn), ("研究 ID（手で記入）", ""), ("経路", self.path or "")]
         if not h: return None
-        if not h.get("dissected"): return base + [("解離", "なし")]
+        qc = self.tl.get("qc") if self.tlValid() else None
+        nq = 0
+        if qc is not None and h.get("dissected"):
+            ks = np.arange(self._k(h["s0"]), self._k(h["s1"]) + 1); nq = int((qc[ks] < 0.7).sum() * STEP)
+        nfix = len([q for q in ((getattr(self, "plan", None) or {}).get("tlfix") or []) if q.get("path") == self.path])
+        ncl = len([q for q in (getattr(self, "_hist", []) or []) if q and q[0] == "center"])
+        audit = [("ソフトの版", self._appVersion()), ("真腔の閾値 HU", f"{(self.tl.get('thr') if self.tlValid() else 0) or 0:.0f}"), ("真腔の手直し（クリック数）", str(nfix)),
+                 ("中心線の手直し（この作業中の回数）", str(ncl)), ("要確認の長さ mm（上下のたどりが食い違う）", str(nq) if qc is not None else "未確認")]
+        if not h.get("dissected"): return base + [("解離", "なし")] + [(k, "") for k in ("解離の始まり mm", "解離の終わり mm", "解離の長さ mm", "真腔の回転（正味）度", "真腔の回転（合計）度", "最大のずれ 度", "1 cm あたり 度", "巻き", "始まりの真腔の位置（時）", "終わりの真腔の位置（時）", "真腔/大動脈 面積比（中央値）", "真腔の偏り 最大 mm", "大動脈の最大径 mm（区間内）")] + audit
         f = lambda x, n=1: f"{x:.{n}f}"
         return base + [("解離", "あり"), ("解離の始まり mm", f(self.rel(h["s0"]))), ("解離の終わり mm", f(self.rel(h["s1"]))), ("解離の長さ mm", f(h["length"])),
                        ("真腔の回転（正味）度", f(h["net"], 0)), ("真腔の回転（合計）度", f(h["total"], 0)), ("最大のずれ 度", f(h["maxAbs"], 0)), ("1 cm あたり 度", f(h["perCm"], 1)), ("巻き", h["hand"]),
                        ("始まりの真腔の位置（時）", f(h["clock0"])), ("終わりの真腔の位置（時）", f(h["clock1"])),
-                       ("真腔/大動脈 面積比（中央値）", f(h["tlFrac"], 2)), ("真腔の偏り 最大 mm", f(h["offMax"])), ("大動脈の最大径 mm（区間内）", f(h["Dmax"]))]
+                       ("真腔/大動脈 面積比（中央値）", f(h["tlFrac"], 2)), ("真腔の偏り 最大 mm", f(h["offMax"])), ("大動脈の最大径 mm（区間内）", f(h["Dmax"]))] + audit
 
     def saveHelixCSV(self, d=None):
         row = self.helixRow()
@@ -4091,7 +4168,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if os.path.exists(allfn):
             try: old = open(allfn, encoding="utf-8-sig").readline().strip()
             except Exception: old = ""
-            if old != ",".join(hdr) and len(hdr) > 5: allfn = os.path.join(base, "解離らせん_一覧_" + time.strftime("%Y%m%d") + ".csv")
+            if old != ",".join(hdr): allfn = os.path.join(base, "解離らせん_一覧_" + time.strftime("%Y%m%d") + ".csv")
         new = not os.path.exists(allfn)
         with open(allfn, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as fh:
             w = csv.writer(fh)
@@ -4315,7 +4392,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._tlAfter(); return True
 
     def _tlAfter(self):
-        self._tlFinish(); self.__dict__.get("_depCache", {}).clear(); self.fl = None
+        self._tlFinish(); self.__dict__.get("_depCache", {}).clear(); self.fl = None; self.tl.pop("qc", None)
         self._drawTL(); self._showContour(exact=False)
 
     def _tlXY(self, k):
