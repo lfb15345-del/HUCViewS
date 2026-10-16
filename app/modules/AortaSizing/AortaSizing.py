@@ -369,6 +369,11 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.flapBtns[0].setToolTip("フラップを押して真腔が広がる（径 ≒ 真腔の長径まで）。三日月の両端はガターとして残る。断面の緑の線 = 押されて動くフラップ")
         self.flapBtns[1].setToolTip("フラップがよく動く: 大動脈の壁の中で、グラフトの径まで丸く広がる")
         self.flapBtns[2].setToolTip("フラップは動かない: グラフトは術前の真腔の中だけ（細い角はガター）")
+        r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("両端", "muted"))
+        self.endGrp, self.endBtns = self._seg(["押し広げる", "あるがまま"], r)
+        self.endBtns[0].checked = True
+        self.endBtns[0].setToolTip("端までフラップを押して広がる（この症例の術後 CT はこちらに近い）")
+        self.endBtns[1].setToolTip("両端の 2 cm で、真腔のあるがままの形へなめらかに戻る（端はフラップを押し広げきらない）")
         r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("径を手で決める", "muted"))
         self.dpSpin = qt.QSpinBox(); self.ddSpin = qt.QSpinBox()
         for sp, tip in ((self.dpSpin, "近位の径（自動 = 実測 × オーバーサイズ）"), (self.ddSpin, "遠位の径（自動 = 実測 × オーバーサイズ）")):
@@ -479,6 +484,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tvRound.connect("clicked()", self.onTvRound)
         self.flShowBtn.connect("toggled(bool)", self.onFLShow)
         for b in self.axisBtns: b.connect("clicked()", self.onTvAxis)
+        for b in self.endBtns: b.connect("clicked()", self.onTvEnds)
         self.ovAorta.connect("toggled(bool)", lambda on: L.showOverlay3D("aorta", on))
         self.ovPost.connect("toggled(bool)", lambda on: L.showOverlay3D("post", on))
         self.fit3d.connect("clicked()", self.onFit3D)
@@ -523,6 +529,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         except Exception: pass
         self.tlBtn.blockSignals(True); self.tlBtn.checked = bool(pl.get("tl")); self.tlBtn.blockSignals(False)
         self.flapBtns[{"chronic": 0, "acute": 1, "fixed": 2}.get(pl.get("flap", "chronic"), 0)].checked = True
+        self.endBtns[1 if pl.get("ends") == "asis" else 0].checked = True
         self.axisBtns[0 if (pl.get("axis") or ("tl" if pl.get("tl") else "cl")) == "cl" else 1].checked = True
         L.showOverlay3D("aorta", self.ovAorta.checked); L.showOverlay3D("post", self.ovPost.checked)
         if not getattr(self, "_tvFitted", False):
@@ -637,6 +644,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         elif st < pl["p"]: t += f"グラフトの近位端より {pl['p'] - st:.0f} mm 近位に偽腔があります（覆っていません）。"
         else: t += "グラフトより遠位です。"
         self.flInfo.setText(t + " 穴（エントリー）は断面で確かめて「エントリーを置く」で印をつけると、覆うかどうかが下の表に出ます。")
+
+    def onTvEnds(self):
+        v = "push" if self.endBtns[0].checked else "asis"
+        self._busy(lambda: self.logic.planSet(ends=v)); self._tvRefresh()
 
     def onTvAxis(self):
         v = "cl" if self.axisBtns[0].checked else "tl"
@@ -3196,6 +3207,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     #     この症例の術後 CT で確かめた: 径の誤差 中央値 2.4 mm、中心のずれ 4.3 mm
     #  急性（フラップが動く）: 壁の中で丸く広がる（グラフトの径まで、大動脈の内側が上限）
     #  解離でない所（真腔 = 内腔全体）は、内腔の中で径まで広がり、楕円の所は壁に押されて沿う
+    GRAFT_END_MM = 20.0      # 「端はあるがまま」の時、両端のこの長さで、押し広げた形から真腔のあるがままの形へなめらかに戻る
     GRAFT_WALL_MM = 1.5      # 外周（壁の外側）から、この厚みぶん内側までしかグラフトは広がらない
     NTH = 72
 
@@ -3305,6 +3317,16 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 axis = pl.get("axis") or ("tl" if useTL else "cl")              # 解離: ワイヤーは真腔を通るので、真腔に合わせる
                 res = [(i, self._deploy(int(ks[i]), float(Rn[i]), path, flap, useTL, axis)) for i in samp]
                 res = [(i, r) for i, r in res if r is not None]
+                END = self.GRAFT_END_MM if pl.get("ends") == "asis" else 0.0
+                if useTL and flap != "fixed" and END > 0 and res:                 # 端: フラップを押し広げきらず、真腔のあるがままの形へなめらかに戻る
+                    sL = (ks - ks[0]) * STEP; dEnd = np.minimum(sL, sL[-1] - sL); new = []
+                    for i, r in res:
+                        wgt = 1.0 if dEnd[i] >= END else 0.5 - 0.5 * math.cos(math.pi * dEnd[i] / END)
+                        if wgt < 0.999:
+                            f = self._deploy(int(ks[i]), float(Rn[i]), path, "fixed", useTL, axis)
+                            if f is not None: r = tuple(wgt * a + (1 - wgt) * b for a, b in zip(r[:4], f[:4])) + (r[4],)
+                        new.append((i, r))
+                    res = new
                 if len(res) >= 2:
                     idx = np.array([i for i, _ in res]); x = np.arange(n)
                     sm = lambda a, sg: ndimage.gaussian_filter1d(a, sg / STEP, axis=0, mode="nearest")
