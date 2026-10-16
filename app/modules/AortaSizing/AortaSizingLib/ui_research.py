@@ -89,10 +89,12 @@ class ResearchUIMixin:
             f"プラーク <b>{s['n']}</b> 個・体積 {s['vol']:.0f} mm³・最大の厚み <b>{s['tMax']:.1f} mm</b>・5 mm 以上 {s['len5']:.0f} mm<br>"
             f"Hosaka（内腔のギザギザ）<b>{s['hosaka']:.2f}</b>・全周の 2/3 超 {'あり' if s['circ23'] else 'なし'}・くぼみ候補 {s['ulcer']} 点<br>"
             f"<span style='{g}'>shaggy の 3 項目（厚み 5 mm 超・全周 2/3 超・くぼみ候補）: {s['shaggyItems']} / 3</span>")
-        sp = s["spacing"]; warn = sp[2] > 1.25 if np.isfinite(sp[2]) else False
-        self.plqNote.setText((f"<span style='color:#ffcc33'>元の CT のスライス間隔 {sp[2]:.1f} mm: 厚い。厚み・ギザギザ・きめは粗く・ならされます（研究では 1.25 mm 以下を推奨）。</span>" if warn
-                              else f"元の CT の画素間隔 {sp[0]:.2f}×{sp[1]:.2f}×{sp[2]:.2f} mm。") + "　くぼみ（潰瘍様）は候補だけ。目で確かめてください。"
-                             + self._plqDissectNote(s))
+        sp = s["spacing"]; z = sp[2] if np.isfinite(sp[2]) else 0.0; g2 = "color:#9aa7b4"
+        if z > 2.5: zt = f"<span style='color:#ffcc33'>元の CT のスライス間隔 {z:.1f} mm: 厚い。厚み・ギザギザ・きめが長さ方向にならされます。研究には薄いシリーズを。</span>"
+        elif z > 1.25: zt = (f"<span style='{g2}'>元の CT のスライス間隔 {z:.1f} mm: 下行・腹部（断面がほぼ横断）の厚みには十分。弓部（斜めに切る所）と 2 mm 未満のくぼみは粗くなる。"
+                             "ラジオミクスは症例どうしでスライス厚をそろえる。</span>")
+        else: zt = f"<span style='{g2}'>元の CT の画素間隔 {sp[0]:.2f}×{sp[1]:.2f}×{z:.2f} mm。</span>"
+        self.plqNote.setText(zt + "　くぼみ（潰瘍様）は候補だけ。目で確かめてください。" + self._plqDissectNote(s))
         self.plqNote.setTextFormat(qt.Qt.RichText)
         ps = q["plaques"]; self.plqTable.setRowCount(len(ps))
         for i, p in enumerate(ps):
