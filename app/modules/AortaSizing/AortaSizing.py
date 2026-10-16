@@ -228,7 +228,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
         # ステップ
         sb = qt.QHBoxLayout(); sb.setSpacing(0); v.addLayout(sb); self.stepGrp = qt.QButtonGroup(root); self.stepBtns = []
-        for i, txt in enumerate(("1  中心線", "2  計測", "3  TEVAR", "4  出力")):
+        for i, txt in enumerate(("1 中心線", "2 計測", "3 計画", "4 術後", "5 出力")):
             b = self._btn(txt, "step", checkable=True); self.stepGrp.addButton(b, i); sb.addWidget(b); self.stepBtns.append(b)
             b.connect("clicked()", lambda i=i: self.showStep(i))
 
@@ -260,6 +260,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
         # ---- ページ 1: 中心線
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10); self.stack.addWidget(pg)
+        flow = self._lab("流れ: CT を開く → 1 中心線 → 2 計測 → 3 計画（3D で穴の場所・仮想ステント）→ 手術 → 4 術後（術後 CT を重ねて違いを見る）→ 5 出力", "muted")
+        flow.setWordWrap(True); pl.addWidget(flow)
         card, c = self._card(pl, "中心線", "AI ラベル + VMTK")
         self.autoButton = self._btn("自動で中心線を作る（1 分ほど）", "primary"); c.addWidget(self.autoButton)
         c.addWidget(self._lab("経路", "muted"))
@@ -329,16 +331,17 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
         card, c = self._card(pl, "結果", "マーカーを置くと自動で更新")
         self.resultBox = qt.QTextBrowser(); self.resultBox.setMinimumHeight(200); c.addWidget(self.resultBox)
-        nxt = self._btn("次へ: TEVAR ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(2)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
+        nxt = self._btn("次へ: 計画 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(2)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
-        # ---- ページ 3: TEVAR（仮想グラフト・エントリー・術後との比較）
+        # ---- ページ 3: 計画（穴の場所を 3D で確かめ、仮想ステントを置く）
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
         sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
         card, c = self._card(pl, "使い方")
-        c.addWidget(self._lab("① 「範囲をドラッグで決める」→ ストレッチ像で近位端から遠位端までドラッグ（白い線をつかむと端だけ動く）"
-                              "　② 解離なら「真腔に沿わせる」　③ 断面で穴をクリックしてエントリーを置く　④ 術後 CT があれば「比べる」", "muted"))
+        c.addWidget(self._lab("① 解離なら「真腔に沿わせる」→ 3D に真腔（水色）・偽腔（紫）を出して穴の場所を確かめる"
+                              "　② 断面で穴をクリックしてエントリーを置く　③ 「範囲をドラッグで決める」→ ストレッチ像で近位端から遠位端までドラッグ"
+                              "　④ フラップ・両端・径を選ぶ → 遠位端の SINE の目安を見る", "muted"))
         card, c = self._card(pl, "解離（真腔）", "緑の線 = 断面の真腔")
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.tlBtn = self._btn("真腔に沿わせる", None, "中心線の点から、造影された真腔を断面ごとにたどり（フラップで止まる）、グラフトを真腔の中心に置きます", True); r.addWidget(self.tlBtn, 1)
@@ -347,6 +350,13 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.flShowBtn = self._btn("偽腔を 3D に（紫）", None, "造影される偽腔を紫で 3D に出す。グラフト（白）が偽腔の入口側をふさいでいるかを見る", True); r.addWidget(self.flShowBtn, 1)
         self.flInfo = self._lab("", "muted"); self.flInfo.setWordWrap(True); c.addWidget(self.flInfo)
+        card, c = self._card(pl, "エントリーと分枝", "緑 覆う・黄 端に近い・赤 覆わない")
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.entryBtn = self._btn("エントリーを置く", "primary", "押してから、断面（X）でエントリーの穴をクリック", True); r.addWidget(self.entryBtn, 1)
+        self.entryDel = self._btn("選んだエントリーを消す"); r.addWidget(self.entryDel)
+        self.covTable = qt.QTableWidget(0, 4); self.covTable.setHorizontalHeaderLabels(["名前", "位置", "計画", "術後"])
+        self._tbl(self.covTable, 170); c.addWidget(self.covTable)
+
         card, c = self._card(pl, "仮想グラフト", "置きたい範囲にカバードステントを描く")
         self.tvRange = self._btn("範囲をドラッグで決める", "primary", "押してから、右のストレッチ像で 近位端 → 遠位端 までドラッグ（1 回で決まります）", True); c.addWidget(self.tvRange)
         c.addWidget(self._lab("ストレッチ像の白い線（Plan P / Plan D）は、つかんでドラッグすると端だけ動きます。", "muted"))
@@ -403,14 +413,17 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         c.addWidget(self._lab("オーバーサイズ = グラフト ÷ 遠位端の真腔 − 1。ミスマッチ = 広がりの予測 ÷ 2 cm 先の真腔。"
                               "参考 = 単施設の報告の非 SINE 群 / SINE 群の平均（VEITH 2024 抄録、ミスマッチは術後の値）。"
                               "緑 = 非 SINE 群より小・黄 = 間・赤 = SINE 群以上。判定の基準ではありません。", "muted"))
-        card, c = self._card(pl, "エントリーと分枝", "緑 覆う・黄 端に近い・赤 覆わない")
-        r = qt.QHBoxLayout(); c.addLayout(r)
-        self.entryBtn = self._btn("エントリーを置く", "primary", "押してから、断面（X）でエントリーの穴をクリック", True); r.addWidget(self.entryBtn, 1)
-        self.entryDel = self._btn("選んだエントリーを消す"); r.addWidget(self.entryDel)
-        self.covTable = qt.QTableWidget(0, 4); self.covTable.setHorizontalHeaderLabels(["名前", "位置", "計画", "術後"])
-        self._tbl(self.covTable, 170); c.addWidget(self.covTable)
+        nxt = self._btn("次へ: 術後 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
+        pl.addStretch(1)
 
-        card, c = self._card(pl, "術後 CT と比べる", "背骨で重ねて、実際の位置を測る")
+        # ---- ページ 4: 術後（術後 CT を重ねて、計画との違いを見る）
+        pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
+        sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
+        card, c = self._card(pl, "使い方")
+        c.addWidget(self._lab("① 「術後 CT を読み込む」でフォルダを選ぶ　② 「比べる」（背骨 → 大動脈の外形で重ね、薄い再構成から金属を拾う。1 分ほど）"
+                              "　③ 表と断面（白 = 計画、金色の点 = 実際の金属）、3D で違いを見る。「実際と同じ範囲で描いて比べる」で形だけを比べられます", "muted"))
+        card, c = self._card(pl, "術後 CT と比べる", "背骨 → 大動脈の外形で重ねて、実際のステントを測る")
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.postLoadBtn = self._btn("術後 CT を読み込む", None, "術後 CT の DICOM フォルダを選ぶ（院内 PC の中で読むだけ）"); r.addWidget(self.postLoadBtn, 1)
         self.postCmpBtn = self._btn("比べる", "primary", "重ね合わせ → 金属（ステント）を拾う → 計画とのずれ"); r.addWidget(self.postCmpBtn)
@@ -433,10 +446,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
         c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。"
                               "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属の輪に円を当てはめた値）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
-        nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
+        nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(4)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
-        # ---- ページ 4: 出力
+        # ---- ページ 5: 出力
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10); self.stack.addWidget(pg)
         card, c = self._card(pl, "出力", "この PC の ドキュメント\\HeartView症例 に保存")
         self.pdfBtn = self._btn("サイジングシート（PDF）を作る", "primary"); c.addWidget(self.pdfBtn)
@@ -802,7 +815,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         try: self.logic.resume()
         except Exception: _err("enter")
         qt.QTimer.singleShot(300, self._autoStart)
-        if self.stack.currentIndex == 2: qt.QTimer.singleShot(500, lambda: self.showStep(2))   # TEVAR の画面に戻ってきた時も半透明の設定に
+        if self.stack.currentIndex in (2, 3): qt.QTimer.singleShot(500, lambda i=self.stack.currentIndex: self.showStep(i))   # TEVAR の画面に戻ってきた時も半透明の設定に
 
     def _autoStart(self):
         """開いたら、中心線がまだ無ければ自動で作って計測の画面にする（ボタンを探さなくてよい）"""
@@ -830,18 +843,19 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         except Exception: _err("exit")
 
     def showStep(self, i):
-        i = max(0, min(3, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
+        i = max(0, min(4, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
+        tv = i in (2, 3)                                                      # 計画・術後（TEVAR）
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()
-        self.logic._tvMode = (i == 2)
-        if i == 2: self._tvEnter()
+        self.logic._tvMode = tv
+        if tv: self._tvEnter()
         try:                                                                  # TEVAR の時は血管を半透明にして、中のグラフトを見せる
             vm = getattr(self.logic, "vesselModel", None)
-            if vm is not None and slicer.mrmlScene.IsNodePresent(vm): vm.GetDisplayNode().SetOpacity(0.3 if i == 2 else 1.0)
+            if vm is not None and slicer.mrmlScene.IsNodePresent(vm): vm.GetDisplayNode().SetOpacity(0.3 if tv else 1.0)
             ren = slicer.app.layoutManager().threeDWidget(0).threeDView().renderWindow().GetRenderers().GetFirstRenderer()
-            if i == 2 and getattr(self, "_tvRen", None) is None:               # 半透明（血管・グラフトの布）をきちんと描く（重ねた描画層では深さの剥離が効かない）
+            if tv and getattr(self, "_tvRen", None) is None:               # 半透明（血管・グラフトの布）をきちんと描く（重ねた描画層では深さの剥離が効かない）
                 self._tvRen = (ren.GetUseDepthPeeling(), ren.GetUseSSAO()); ren.SetUseDepthPeeling(False); ren.SetUseSSAO(False)
-            elif i != 2 and getattr(self, "_tvRen", None) is not None:
+            elif not tv and getattr(self, "_tvRen", None) is not None:
                 ren.SetUseDepthPeeling(self._tvRen[0]); ren.SetUseSSAO(self._tvRen[1]); self._tvRen = None
         except Exception: pass
 
@@ -1058,7 +1072,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     # ---------------------------------------------------------------- 一覧（変更があった時だけ）
     def refreshLists(self):
         L = self.logic; import html
-        if self.stack.currentIndex == 2:
+        if self.stack.currentIndex in (2, 3):
             try: self._tvRefresh()
             except Exception as e: print("tv refresh:", e)
         # テンプレートの手順
