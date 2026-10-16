@@ -327,6 +327,11 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.lenLab = qt.QLabel(""); self.lenLab.setTextFormat(qt.Qt.RichText); self.lenLab.setWordWrap(True); self.lenLab.setStyleSheet("font-size:12px; color:#dfe6ee")
         self.lenLab.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred); self.lenLab.setMinimumWidth(10); c.addWidget(self.lenLab); self.lenLab.hide()
         c.removeWidget(self.lenBtn); c.removeWidget(self.lenLab); self._lenSlot.addWidget(self.lenBtn); self._lenSlot.addWidget(self.lenLab)
+        bg = qt.QGridLayout(); bg.setHorizontalSpacing(4); bg.setVerticalSpacing(4); self._lenSlot.addLayout(bg); self.brChips = {}
+        for i, nm in enumerate(self.BR_CHIPS):
+            b = self._btn(self.SHORT.get(nm, nm), None, f"{nm}: 断面（または 3D のクリック）でその枝の口に合わせて押す → 印。? の印は 1 回押すとそこへ移動、合っていればもう一度押すと確認（✓）。Ctrl+Z で戻す")
+            b.setStyleSheet("padding:3px 4px; font-size:11px"); bg.addWidget(b, i // 4, i % 4); self.brChips[nm] = b
+            b.connect("clicked()", lambda nm=nm: self.onBranchChip(nm))
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.placeBtn = self._btn("ここに置く  ⏎", "primary"); r.addWidget(self.placeBtn, 2)
         self.skipBtn = self._btn("スキップ"); r.addWidget(self.skipBtn)
@@ -616,6 +621,29 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
     # ---------------------------------------------------------------- TEVAR（仮想グラフト・術後との比較）
     SHORT = {"腕頭動脈": "腕頭", "左総頸動脈": "左総頸", "左鎖骨下動脈": "左鎖骨下", "腹腔動脈": "腹腔", "上腸間膜動脈": "SMA", "最下位腎動脈": "腎動脈"}
+    BR_CHIPS = ("腕頭動脈", "左総頸動脈", "左鎖骨下動脈", "腹腔動脈", "上腸間膜動脈", "右腎動脈", "左腎動脈", "大動脈分岐")
+    _BR_SHORT = {"右腎動脈": "右腎", "左腎動脈": "左腎", "大動脈分岐": "分岐"}
+
+    def _chipRefresh(self):
+        L = self.logic
+        for nm, b in (getattr(self, "brChips", None) or {}).items():
+            m = L._mk(nm); base = self.SHORT.get(nm) or self._BR_SHORT.get(nm, nm)
+            if m is None: b.setText(base); b.setStyleSheet("padding:3px 4px; font-size:11px")
+            elif m.get("auto"): b.setText(base + " ?"); b.setStyleSheet("padding:3px 4px; font-size:11px; color:#ffcc33")
+            else: b.setText(base + " ✓"); b.setStyleSheet("padding:3px 4px; font-size:11px; color:#5fd36e")
+
+    def onBranchChip(self, nm):
+        """枝の印: 押す = 今の断面に置く。? の印は 1 回目でそこへ移動（確かめる）、2 回目で確定"""
+        L = self.logic
+        if L.P is None: self._say("先に中心線を作ってください。"); return
+        m = L._mk(nm); pend = getattr(self, "_chipPend", None); self._chipPend = None
+        if m is not None and m.get("auto") and pend != nm and L._onPath(m) and abs(m["s"] - L.curS) > 1.0:
+            self._chipPend = nm; L.setPosition(m["s"]); self._say(f"{nm}（自動・?）の位置です。合っていればもう一度押す。違えば断面を枝の口に動かしてから押す。"); return
+        if m is not None and m.get("auto") and abs(m["s"] - L.curS) <= 1.0:
+            L.addMarker(nm, m["s"]); self._say(f"{nm} を確認しました（✓）。")
+        else:
+            L.addMarker(nm, float(L.curS)); self._say(f"{nm} を {L.rel(L.curS):+.0f} mm に置きました（Ctrl+Z で戻す）。")
+        self.refreshLists()
 
     def _tvRef(self, s):
         """位置を「いちばん近い近位の分枝 + mm」で（無ければベースラインから）"""
@@ -1312,6 +1340,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     # ---------------------------------------------------------------- 一覧（変更があった時だけ）
     def refreshLists(self):
         L = self.logic; import html
+        try: self._chipRefresh()
+        except Exception as e: print("chips:", e)
         if getattr(self, "lenBtn", None) is not None and self.lenBtn.checked and not getattr(self, "_lenBusy", False):   # 印を置き直したら長さも
             self._lenBusy = True
             try: L.drawLengths(self._tpl() if self._tpl() != "自由" else "EVAR", True)
@@ -1454,6 +1484,7 @@ MARK_EN = {"最下位腎動脈": "Low renal", "ネック終端（瘤の始まり
            "右内腸骨起始": "R IIA", "左内腸骨起始": "L IIA", "右遠位（総大腿）": "R CFA", "左遠位（総大腿）": "L CFA",
            "腕頭動脈": "BCA", "左総頸動脈": "LCCA", "左鎖骨下動脈": "LSCA", "近位ランディング": "Prox LZ",
            "瘤 / エントリー": "Entry", "遠位ランディング": "Dist LZ", "腹腔動脈": "Celiac"}
+MARK_EN.update({"上腸間膜動脈": "SMA", "右腎動脈": "R renal", "左腎動脈": "L renal"})
 NPOLY = 96          # 輪郭の内部表現の点数
 
 
