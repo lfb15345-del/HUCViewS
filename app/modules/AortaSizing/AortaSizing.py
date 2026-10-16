@@ -177,6 +177,26 @@ QWidget#saRoot QComboBox { background:#262a33; color:#e6e8ec; border:1px solid #
 
 class AortaSizingWidget(ScriptedLoadableModuleWidget):
     # ---------------------------------------------------------------- 部品
+    def _layWidgets(self, lay):
+        out = []
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            if it.widget() is not None: out.append(it.widget())
+            elif it.layout() is not None: out += self._layWidgets(it.layout())
+        return out
+
+    def _hideRow(self, wdg):
+        """wdg を含む行（カード直下の横並び。ラベル・入れ子のボタンごと）を隠す"""
+        par = wdg.parentWidget(); lay = par.layout() if par is not None else None
+        if lay is None: return
+        for i in range(lay.count()):
+            sub = lay.itemAt(i).layout()
+            if sub is None: continue
+            ws = self._layWidgets(sub)
+            if any(x == wdg for x in ws):
+                for x in ws: x.setVisible(False)
+                return
+
     def _card(self, parent_layout, title=None, sub=None):
         f = qt.QFrame(); f.setProperty("role", "card"); lay = qt.QVBoxLayout(f); lay.setContentsMargins(12, 10, 12, 12); lay.setSpacing(8)
         if title:
@@ -253,7 +273,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         r2 = qt.QHBoxLayout(); c.addLayout(r2)                              # 2 段に（パネルが狭くてもはみ出さない）
         self.editContBtn = self._btn("輪郭を直す", None, "断面の輪郭を点で手直し", checkable=True); r2.addWidget(self.editContBtn)
         self.wlBtn = self._btn("ウィンドウを戻す", None, "断面・ストレッチ像の濃さを最初（血管用 W800/L200）に戻す"); r2.addWidget(self.wlBtn)
-        hint = self._lab("断面: ホイール 1 mm（Shift 5 mm）・ストレッチ像（直交 2 方向）: クリック/ドラッグで移動、ホイールで回転・"
+        hint = self._hintTop = self._lab("断面: ホイール 1 mm（Shift 5 mm）・ストレッチ像（直交 2 方向）: クリック/ドラッグで移動、ホイールで回転・"
                          "Ctrl+クリック 中心線をそこへ（断面・ストレッチ像）・Enter 置く・P 記録・L 外周/内腔・Ctrl+Z 戻す・Esc 中止", "muted"); hint.setWordWrap(True); c.addWidget(hint)
 
         self.stack = qt.QStackedWidget(); v.addWidget(self.stack, 1)
@@ -428,7 +448,26 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                               "緑 = 非 SINE 群より小・黄 = 間・赤 = SINE 群以上。判定の基準ではありません。", "muted"))
         nxt = self._btn("次へ: 術後 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
+        usage = pl.itemAt(0).widget()
         gc = self.tvPick.parentWidget(); pl.removeWidget(gc); pl.insertWidget(0, gc)     # 仮想グラフト（範囲・フラップ・両端）をいちばん上に（スクロールせずに見える）
+        # スクロールしなくてよいように、ふだん使わないものはしまう（機能は残す）
+        sineNote = c.itemAt(c.count() - 1).widget()
+        if sineNote is not None: self.sineLab.setToolTip(sineNote.text); sineNote.setVisible(False)
+        for x in (usage, nxt, self.tvRound, self.tvSummary, self.entryBtn.parentWidget(), self.sineLab.parentWidget()): x.setVisible(False)
+        for x in (self.dpSpin, self.tvShowBtn, self.axisBtns[0], self.ovAorta): self._hideRow(x)
+        for lab_ in gc.findChildren(qt.QLabel):
+            if lab_.text in ("位置", "径（実測 → グラフト）"): lab_.setVisible(False)
+        gl = gc.layout()                                                      # 解離のボタンは 仮想グラフト の上の 1 行に
+        tlCard = self.tlBtn.parentWidget(); row = qt.QHBoxLayout(); row.setSpacing(6)
+        self.tlFixBtn.setText("真腔を直す"); self.flShowBtn.setText("偽腔を 3D に")
+        for b in (self.tlBtn, self.tlFixBtn, self.flShowBtn): row.addWidget(b, 1)
+        gl.insertLayout(1, row); tlCard.setVisible(False)
+        gl.removeWidget(self.tvPick); gl.removeWidget(self.tvLen)            # 範囲のボタンと長さを 1 行に
+        r0 = qt.QHBoxLayout(); r0.addWidget(self.tvPick, 1); r0.addWidget(self.tvLen); gl.insertLayout(2, r0)
+        self.tvPick.setText("近位 → 遠位 をクリック")
+        self.sineShort = qt.QLabel(""); self.sineShort.setTextFormat(qt.Qt.RichText); self.sineShort.setWordWrap(True)
+        self.sineShort.setStyleSheet("font-size:12px; color:#dfe6ee"); self.sineShort.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred); self.sineShort.setMinimumWidth(10)
+        gl.addWidget(self.sineShort)
 
         # ---- ページ 4: 術後（術後 CT を重ねて、計画との違いを見る）
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
@@ -466,6 +505,13 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                               "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属に楕円を当てはめた値。径 = 面積が同じ円の径、かっこ内は長径×短径）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
         nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(4)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
+        pl.itemAt(0).widget().setVisible(False); nxt.setVisible(False)
+        for lab_ in c.parentWidget().findChildren(qt.QLabel):
+            tx = lab_.text
+            if tx.startswith("断面で金色の点を"): self.alignBtn.setToolTip(tx); lab_.setVisible(False)
+            elif tx.startswith("ずれ: ＋"): self.postCmpBtn.setToolTip(self.postCmpBtn.toolTip + "\n" + tx); lab_.setVisible(False)
+        c.removeWidget(self.postStretchBtn); r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self.postStretchBtn, 1); r.addWidget(self.ovPost)
+        self.postStretchBtn.setText("右を術後のストレッチ像に"); self.ovPost.setText("3D に金属"); self.ovPost.setVisible(True)
 
         # ---- ページ 5: 出力
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10); self.stack.addWidget(pg)
@@ -595,7 +641,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         L = self.logic
         if L.P is None or not hasattr(self, "tvRows"): return
         pl = L.planInit()
-        if hasattr(self, "tvLen"): self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm　（{self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}）")
+        if hasattr(self, "tvLen"): self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm")
         try: (Dp, mp, ap), (Dd, md, ad) = L.planDiams()
         except Exception as e: print("tv:", e); return
         for key, s, D, mD, man in (("p", pl["p"], Dp, mp, ap), ("d", pl["d"], Dd, md, ad)):
@@ -683,12 +729,17 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if on and L.tlValid():
             d = L.tl["deq"]; self.tlInfo.setText(f"真腔をたどりました。グラフトは真腔の中心に置いています（真腔の径 {np.nanmin(d):.0f}〜{np.nanmax(d):.0f} mm）。断面の緑の線で確認してください。")
         elif not on: self.tlInfo.setText("大動脈の中心線に沿わせています。")
+        self._say(self.tlInfo.text)
 
     def _sineRefresh(self):
         L = self.logic
         try: si = L.sineIdx()
         except Exception as e: print("sine:", e); si = None
-        if not si: self.sineLab.setText("解離では「真腔に沿わせる」を押すと出ます。"); return
+        sh = getattr(self, "sineShort", None)
+        if not si:
+            self.sineLab.setText("解離では「真腔に沿わせる」を押すと出ます。")
+            if sh is not None: sh.setText("遠位端の SINE の目安: 「真腔に沿わせる」で出ます。")
+            return
         ref = L.SINE_REF; g = "color:#9aa7b4; font-size:11px"
         def cell(v, rr):
             if v is None or not np.isfinite(v): return "<td align='right'>—</td>"
@@ -705,6 +756,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             e = si["emr"]; h += "<tr><td>ミスマッチ（予測）</td>" + cell(e["mean"], ref["emr"]["mean"]) + cell(e["per"], ref["emr"]["per"]) + cell(e["area"], ref["emr"]["area"]) + "</tr>" + refrow(ref["emr"])
         h += "</table>"
         self.sineLab.setText(h)
+        if sh is not None:
+            def c1(v, rr):
+                if v is None or not np.isfinite(v): return "—"
+                col = "#5fd36e" if v < rr[0] else ("#ffcc33" if v < rr[1] else "#ff6b6b")
+                return f"<span style='color:{col}; font-weight:bold'>{v:.2f}</span>"
+            t = f"<b>遠位端の SINE の目安</b>　オーバーサイズ {c1(p['mean'], ref['pre']['mean'])}"
+            if "emr" in si: t += f"・ミスマッチ（予測） {c1(si['emr']['mean'], ref['emr']['mean'])}"
+            sh.setText(t)
+            sh.setToolTip(h + "<br><br>" + (self.sineLab.toolTip or ""))
 
     def _dropSameRange(self):
         b = getattr(self, "sameRangeBtn", None)
@@ -736,7 +796,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             if key == "p": pl["p"] = pl["d"] - 10.0
             else: pl["d"] = pl["p"] + 10.0
         self._dropSameRange(); L._queue(s=pl[key]); L._drawGreen()
-        self.tvRows[key][0].setText(self._tvRef(pl[key])); self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm　（{self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}）")
+        self.tvRows[key][0].setText(self._tvRef(pl[key])); self.tvLen.setText(f"長さ {pl['d'] - pl['p']:.0f} mm")
         t = getattr(self, "_nudgeT", None)
         if t is None:
             t = self._nudgeT = qt.QTimer(); t.setSingleShot(True); t.timeout.connect(lambda: (self._busy(self.logic.planDraw), self._tvRefresh()))
@@ -766,7 +826,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if pl["p"] <= st <= pl["d"]: t += f"グラフトはその {st - pl['p']:.0f} mm 近位から覆っています（入口側をふさぐ）。"
         elif st < pl["p"]: t += f"グラフトの近位端より {pl['p'] - st:.0f} mm 近位に偽腔があります（覆っていません）。"
         else: t += "グラフトより遠位です。"
-        self.flInfo.setText(t + " 穴（エントリー）は断面で確かめて「エントリーを置く」で印をつけると、覆うかどうかが下の表に出ます。")
+        self.flInfo.setText(t); self.flShowBtn.setToolTip(t)
 
     def onTvEnds(self):
         v = "push" if self.endBtns[0].checked else "asis"
@@ -838,7 +898,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if ps is not None: pst = f"。そのあと大動脈の外形で合わせ直し（ずれ 中央値 {np.median(ps['mag']):.1f}・最大 {ps['mag'].max():.1f} mm）"
         self.postInfo.setText(f"重ね合わせ（背骨）の誤差 {rms:.1f} mm{pst}・術後 CT のスライス間隔 {zr:.1f} mm（端の位置はおよそ ±{max(zr / 2, rms):.0f} mm）")
         if self.postStretchBtn.checked: self._busy(L.postStraight); L.showPostStretch(True)
-        L.showOverlay3D("post", self.ovPost.checked)
+        if not self.ovPost.checked: self.ovPost.checked = True
+        L.showOverlay3D("post", True)
         self._tvRefresh()
         c = L.comparePost()
         self._expRefresh()
@@ -979,6 +1040,16 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()
         self.logic._tvMode = tv
+        for x in (getattr(self, "pinBtn", None), getattr(self, "baseBtn", None), getattr(self, "editContBtn", None), getattr(self, "wlBtn", None), getattr(self, "_hintTop", None)):
+            if x is not None: x.setVisible(not tv)
+        vw = getattr(self, "_valW", None)                                     # 計画・術後では径の表もしまう（断面の右上に出ている）
+        if vw is None and hasattr(self, "vals"):
+            w0 = self.vals[("outer", "dmax")]; lay = w0.parentWidget().layout(); vw = []
+            for j in range(lay.count()):
+                sub = lay.itemAt(j).layout()
+                if sub is not None and any(x == w0 for x in self._layWidgets(sub)): vw = self._layWidgets(sub); break
+            self._valW = vw
+        for x in vw or []: x.setVisible(not tv)
         for btn, page in ((getattr(self, "tvPick", None), 2), (getattr(self, "tlFixBtn", None), 2), (getattr(self, "planEditBtn", None), 2), (getattr(self, "alignBtn", None), 3), (getattr(self, "tvRange", None), 2), (getattr(self, "entryBtn", None), 2)):
             if btn is not None and btn.checked and i != page: btn.checked = False
         if tv: self._tvEnter()
