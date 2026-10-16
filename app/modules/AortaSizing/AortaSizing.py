@@ -4051,7 +4051,16 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         from scipy import ndimage
         if not self.tlValid(): return None
         tl = self.tl; S, rows = [], []
-        for x in np.arange(0.0, self.length, step):
+        bif = self._mk("大動脈分岐"); sEnd = float(bif["s"]) if bif is not None and self._onPath(bif) else float(self.length)   # 解析は 基部 〜 大動脈分岐（腸骨は別に見る）
+        ilio = None
+        if bif is not None and self._onPath(bif):                                # 腸骨（この経路の側）への進展: 分岐の 5〜30 mm 先で真腔が大動脈（腸骨）の一部しかない
+            fr_ = []
+            for x in np.arange(sEnd + 5.0, min(sEnd + 30.0, self.length), step):
+                k = self._k(x); E = self._aortaIn(k, self.path)
+                if E is None or (E > 0).sum() < 20: continue
+                fr_.append((tl["masks"][k] & (E > 0)).sum() / (E > 0).sum())
+            ilio = (bool(np.median(fr_) < thrFrac) if fr_ else None)
+        for x in np.arange(0.0, sEnd + 1e-6, step):
             k = self._k(x); E = self._aortaIn(k, self.path)
             if E is None: continue
             A = E > 0; Tm = tl["masks"][k] & A
@@ -4060,10 +4069,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             rows.append((x, k, Tm.sum() / A.sum(), d[1], d[0], 2 * math.sqrt(A.sum() * STEP * STEP / math.pi)))
         if len(rows) < 10: return None
         R_ = np.array(rows); fr = ndimage.median_filter(R_[:, 2], 5); dis = fr < thrFrac
-        if not dis.any(): return dict(dissected=False)
+        if not dis.any(): return dict(dissected=False, sEnd=sEnd, iliac=ilio)
         lab, n = ndimage.label(dis); sz = np.bincount(lab.ravel())[1:]; j = int(np.argmax(sz)) + 1; idx = np.where(lab == j)[0]   # いちばん長い解離の区間
         seg = R_[idx]
-        if len(seg) < 5: return dict(dissected=False)
+        if len(seg) < 5: return dict(dissected=False, sEnd=sEnd, iliac=ilio)
         u = ndimage.gaussian_filter1d(seg[:, 3], 5.0 / step); v = ndimage.gaussian_filter1d(seg[:, 4], 5.0 / step)   # 10 mm ほどでならす
         th = np.unwrap(np.arctan2(v, u)); sgn = -1.0 if np.mean(np.einsum("ij,ij->i", np.cross(self.B[seg[:, 1].astype(int)], self.N[seg[:, 1].astype(int)]), self.T[seg[:, 1].astype(int)])) < 0 else 1.0
         rot = sgn * np.degrees(th - th[0])                                    # B→N の回転は (B×N) まわり → T まわり（右ねじ）を正に直す
@@ -4075,7 +4084,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         c0, c1 = clock(0), clock(len(seg) - 1)
         return dict(dissected=True, s0=float(seg[0, 0]), s1=float(seg[-1, 0]), length=L_, net=net, total=tot, perCm=net / max(L_, 1e-6) * 10.0,
                     hand=("右巻き" if net > 30 else ("左巻き" if net < -30 else "ほぼ回らない")), clock0=c0[1], clock1=c1[1], maxAbs=float(np.abs(rot).max()),
-                    tlFrac=float(np.median(seg[:, 2])), offMax=float(np.hypot(u, v).max()), Dmax=float(seg[:, 5].max()),
+                    tlFrac=float(np.median(seg[:, 2])), offMax=float(np.hypot(u, v).max()), Dmax=float(seg[:, 5].max()), sEnd=sEnd, iliac=ilio,
+                    zones=self._zoneRot(seg[:, 0], rot),
                     curve=list(zip(seg[:, 0].tolist(), rot.tolist())))
 
     def _appVersion(self):
@@ -4138,6 +4148,22 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         allfn = self.saveHelixCSV()
         return fn, allfn
 
+    def _zoneRot(self, S, rot):
+        """区間ごとの回転（度）: 弓部〜左鎖骨下・左鎖骨下〜腹腔動脈・腹腔動脈〜最下位腎動脈・最下位腎動脈〜分岐（解離の中の部分だけ。印が無ければ空）"""
+        names = [("弓部〜左鎖骨下", None, "左鎖骨下動脈"), ("左鎖骨下〜腹腔動脈", "左鎖骨下動脈", "腹腔動脈"),
+                 ("腹腔動脈〜最下位腎動脈", "腹腔動脈", "最下位腎動脈"), ("最下位腎動脈〜分岐", "最下位腎動脈", "大動脈分岐")]
+        out = []
+        for lab, a, b in names:
+            ma = self._mk(a) if a else None; mb = self._mk(b)
+            sa = (ma["s"] if ma is not None and self._onPath(ma) else (S[0] if a is None else None)); sb = mb["s"] if mb is not None and self._onPath(mb) else None
+            if a == "左鎖骨下動脈" and sb is None:                                # 腹腔動脈の印が無い時: 左鎖骨下〜最下位腎動脈 でまとめる
+                mr = self._mk("最下位腎動脈"); sb = mr["s"] if mr is not None and self._onPath(mr) else None; lab = "左鎖骨下〜最下位腎動脈" if sb is not None else lab
+            if a == "腹腔動脈" and sa is None: out.append((lab, None)); continue
+            if sa is None or sb is None: out.append((lab, None)); continue
+            lo, hi = max(sa, S[0]), min(sb, S[-1])
+            out.append((lab, float(np.interp(hi, S, rot) - np.interp(lo, S, rot)) if hi - lo >= 10.0 else None))
+        return out
+
     def helixRow(self):
         h = self.helixMetrics()
         vn = self.vol.GetName() if getattr(self, "vol", None) is not None else ""
@@ -4151,12 +4177,16 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         ncl = len([q for q in (getattr(self, "_hist", []) or []) if q and q[0] == "center"])
         audit = [("ソフトの版", self._appVersion()), ("真腔の閾値 HU", f"{(self.tl.get('thr') if self.tlValid() else 0) or 0:.0f}"), ("真腔の手直し（クリック数）", str(nfix)),
                  ("中心線の手直し（この作業中の回数）", str(ncl)), ("要確認の長さ mm（上下のたどりが食い違う）", str(nq) if qc is not None else "未確認")]
-        if not h.get("dissected"): return base + [("解離", "なし")] + [(k, "") for k in ("解離の始まり mm", "解離の終わり mm", "解離の長さ mm", "真腔の回転（正味）度", "真腔の回転（合計）度", "最大のずれ 度", "1 cm あたり 度", "巻き", "始まりの真腔の位置（時）", "終わりの真腔の位置（時）", "真腔/大動脈 面積比（中央値）", "真腔の偏り 最大 mm", "大動脈の最大径 mm（区間内）")] + audit
+        rng = [("解析範囲", "基部〜大動脈分岐" if self._mk("大動脈分岐") is not None else "基部〜経路の終わり（分岐の印なし）"),
+               ("腸骨への進展（この側）", {True: "あり", False: "なし", None: "不明"}[h.get("iliac")])]
+        zcols = ["回転 弓部〜左鎖骨下", "回転 左鎖骨下〜腹腔動脈（印が無ければ〜腎）", "回転 腹腔動脈〜最下位腎動脈", "回転 最下位腎動脈〜分岐"]
+        if not h.get("dissected"): return base + rng + [("解離", "なし")] + [(k, "") for k in ("解離の始まり mm", "解離の終わり mm", "解離の長さ mm", "真腔の回転（正味）度", "真腔の回転（合計）度", "最大のずれ 度", "1 cm あたり 度", "巻き", "始まりの真腔の位置（時）", "終わりの真腔の位置（時）", "真腔/大動脈 面積比（中央値）", "真腔の偏り 最大 mm", "大動脈の最大径 mm（区間内）")] + [(z, "") for z in zcols] + audit
         f = lambda x, n=1: f"{x:.{n}f}"
-        return base + [("解離", "あり"), ("解離の始まり mm", f(self.rel(h["s0"]))), ("解離の終わり mm", f(self.rel(h["s1"]))), ("解離の長さ mm", f(h["length"])),
+        zr = [(z, "" if v is None else f"{v:.0f}") for z, (_, v) in zip(zcols, h.get("zones") or [(None, None)] * 4)]
+        return base + rng + [("解離", "あり"), ("解離の始まり mm", f(self.rel(h["s0"]))), ("解離の終わり mm", f(self.rel(h["s1"]))), ("解離の長さ mm", f(h["length"])),
                        ("真腔の回転（正味）度", f(h["net"], 0)), ("真腔の回転（合計）度", f(h["total"], 0)), ("最大のずれ 度", f(h["maxAbs"], 0)), ("1 cm あたり 度", f(h["perCm"], 1)), ("巻き", h["hand"]),
                        ("始まりの真腔の位置（時）", f(h["clock0"])), ("終わりの真腔の位置（時）", f(h["clock1"])),
-                       ("真腔/大動脈 面積比（中央値）", f(h["tlFrac"], 2)), ("真腔の偏り 最大 mm", f(h["offMax"])), ("大動脈の最大径 mm（区間内）", f(h["Dmax"]))] + audit
+                       ("真腔/大動脈 面積比（中央値）", f(h["tlFrac"], 2)), ("真腔の偏り 最大 mm", f(h["offMax"])), ("大動脈の最大径 mm（区間内）", f(h["Dmax"]))] + zr + audit
 
     def saveHelixCSV(self, d=None):
         row = self.helixRow()
