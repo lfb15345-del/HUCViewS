@@ -385,12 +385,13 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         g2 = qt.QGridLayout(); g2.setHorizontalSpacing(10); g2.setVerticalSpacing(2); c.addLayout(g2); g2.setColumnStretch(3, 1)
         for j, t in enumerate(("", "計画", "術後", "ずれ")): g2.addWidget(self._lab(t, "colh"), 0, j)
         self.cmpLab = {}
-        for i, (key, name) in enumerate((("p", "近位端"), ("d", "遠位端"), ("len", "長さ")), 1):
+        for i, (key, name) in enumerate((("p", "近位端"), ("d", "遠位端"), ("len", "長さ"), ("dia", "径"), ("off", "中心のずれ")), 1):
             g2.addWidget(self._lab(name), i, 0)
             for j, col in enumerate(("plan", "post", "diff"), 1):
                 w_ = self._lab("—"); w_.setStyleSheet("font-size:12px; font-weight:bold; color:#ffffff"); g2.addWidget(w_, i, j); self.cmpLab[(key, col)] = w_
         self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
-        c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。白い線 = 計画、金色 = 術後。", "muted"))
+        c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。"
+                              "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属の輪に円を当てはめた値）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
         nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
@@ -523,6 +524,11 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
             vals = {("p", "plan"): self._tvRef(pl["p"]), ("p", "post"): self._tvRef(ac["lo"]), ("p", "diff"): f"{cmp_['dP']:+.0f} mm",
                     ("d", "plan"): self._tvRef(pl["d"]), ("d", "post"): self._tvRef(ac["hi"]), ("d", "diff"): f"{cmp_['dD']:+.0f} mm",
                     ("len", "plan"): f"{cmp_['planLen']:.0f} mm", ("len", "post"): f"{cmp_['realLen']:.0f} mm", ("len", "diff"): f"{cmp_['realLen'] - cmp_['planLen']:+.0f} mm"}
+            if "Dreal" in cmp_:
+                vals.update({("dia", "plan"): f"{cmp_['Dplan']:.0f} mm", ("dia", "post"): f"{cmp_['Dreal']:.0f} mm（{cmp_['DrealMin']:.0f}〜{cmp_['DrealMax']:.0f}）",
+                             ("dia", "diff"): f"{cmp_['Dreal'] - cmp_['Dplan']:+.0f} mm",
+                             ("off", "plan"): "真腔の中心" if pl.get("tl") else "大動脈の中心", ("off", "post"): f"中央値 {cmp_['offMed']:.0f} mm",
+                             ("off", "diff"): f"最大 {cmp_['offMax']:.0f} mm（{self._tvRef(cmp_['offAt'])}）"})
             for k, v in vals.items(): self.cmpLab[k].setText(v)
 
     def onTL(self, on):
@@ -1984,6 +1990,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if mm is None or (edit and md == self.mode): continue
             lines.append((W(mm["xy"]), col, True))
         try:
+            ac = getattr(self, "actual", None)
+            if ac is not None and ac.get("C") is not None and ac["path"] == self.path and ac["ks"][0] <= k <= ac["ks"][-1]:
+                i = k - ac["ks"][0]; cc_ = ac["C"][i] - P; th = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+                xy = np.c_[cc_ @ B + ac["R"][i] * np.cos(th), cc_ @ N + ac["R"][i] * np.sin(th)]
+                lines.append((W(xy), (1.0, 0.72, 0.2), True)); labels.append((W(xy[54:55])[0], f"Post {2 * ac['R'][i]:.0f}", (1.0, 0.72, 0.2), 14))
+        except Exception as e: print("post ring:", e)
+        try:
             if self.tlValid():
                 xy = self._tlXY(k)
                 if xy is not None:
@@ -3032,7 +3045,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         from scipy import ndimage
         R = ndimage.gaussian_filter1d(R, 4.0 / STEP, mode="nearest")
         C = F["P"]
-        if (getattr(self, "plan", None) or {}).get("tl") and path == self.path and self.tlValid(): C = self.tl["C"]   # 解離: 真腔の中心に沿わせる
+        if (getattr(self, "plan", None) or {}).get("tl") and path == self.path and self.tlValid():   # 解離: 真腔の中心に沿わせる
+            C = self.tl["C"].copy()
+            if self.prof is not None and self.mode == "outer":                     # 壁からはみ出す分だけ、大動脈の中心へ寄せる
+                Ro = self.prof[ks, 1] / 2.0; off = C[ks] - F["P"][ks]; dist = np.linalg.norm(off, axis=1) + 1e-9
+                exc = np.clip(np.where(np.isfinite(Ro), dist + R - Ro, 0.0), 0.0, dist)
+                Ck = C[ks] - off / dist[:, None] * exc[:, None]
+                C[ks] = ndimage.gaussian_filter1d(Ck, 3.0 / STEP, axis=0, mode="nearest")
         return F, ks, R, C
 
     def planDraw(self):
@@ -3389,17 +3408,35 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         except Exception: pass
         try: d.SetRenderPointsAsSpheres(True)
         except Exception: pass
-        # 実際の範囲の筒（うすい金色）。計画の白い筒と並べて比べる
-        F = self.frames[ac["path"]]; k0, k1 = self._k(ac["lo"], ac["path"]), self._k(ac["hi"], ac["path"]); ks = np.arange(k0, k1 + 1)
+        # 実際のグラフトの筒（うすい金色）: 断面ごとに金属の輪へ円を当てはめた中心と径。計画の白い筒と並べて比べる
+        self._fitRings()
+        if ac.get("C") is not None:
+            F = self.frames[ac["path"]]; ks = ac["ks"]
+            self._model("TEVAR 術後（範囲）", self._tubePD(ac["C"], F["N"][ks], F["B"][ks], ac["R"] + 0.6), (1.0, 0.75, 0.3), 0.25, spec=0.1)
+
+    def _fitRings(self):
+        """術後の金属を、中心線の各断面（前後 4 mm）で円に当てはめる → 実際のグラフトの中心と半径"""
+        ac = self.actual; F = self.frames[ac["path"]]
         from scipy.spatial import cKDTree
-        dd, kk = cKDTree(F["P"][ks]).query(ac["pts"]); R = np.full(len(ks), np.nan)
-        for i in range(0, len(ks), 8):
-            m_ = (kk >= i - 8) & (kk < i + 16)
-            if m_.sum() >= 5: R[i:i + 8] = np.median(dd[m_])
-        ok = np.isfinite(R)
-        if ok.sum() >= 2:
-            R = np.interp(np.arange(len(ks)), np.where(ok)[0], R[ok])
-            self._model("TEVAR 術後（範囲）", self._tubePD(F["P"][ks], F["N"][ks], F["B"][ks], R + 0.6), (1.0, 0.75, 0.3), 0.22, spec=0.1)
+        from scipy import ndimage
+        k0, k1 = self._k(ac["lo"], ac["path"]), self._k(ac["hi"], ac["path"]); ks = np.arange(k0, k1 + 1)
+        X = ac["pts"]; _, kk = cKDTree(F["P"]).query(X)
+        d = X - F["P"][kk]; u = (d * F["B"][kk]).sum(1); v = (d * F["N"][kk]).sum(1)
+        cu = np.full(len(ks), np.nan); cv = np.full(len(ks), np.nan); rr = np.full(len(ks), np.nan); w = int(4.0 / STEP)
+        for i in range(0, len(ks), 4):
+            m = np.abs(kk - ks[i]) <= w
+            if m.sum() < 12: continue
+            A = np.c_[u[m], v[m], np.ones(m.sum())]; b = u[m] ** 2 + v[m] ** 2
+            try: sol = np.linalg.lstsq(A, b, rcond=None)[0]
+            except Exception: continue
+            x0, y0 = sol[0] / 2, sol[1] / 2; r = math.sqrt(max(sol[2] + x0 * x0 + y0 * y0, 0))
+            ang = np.sort(np.arctan2(v[m] - y0, u[m] - x0)); gap = np.max(np.diff(np.r_[ang, ang[0] + 2 * np.pi]))
+            if 6.0 <= r <= 30.0 and gap < np.pi * 0.8: cu[i], cv[i], rr[i] = x0, y0, r      # 輪の半分以上に金属がある時だけ
+        ok = np.isfinite(rr)
+        if ok.sum() < 3: ac["C"] = None; return
+        idx = np.arange(len(ks)); sm = lambda a: ndimage.gaussian_filter1d(np.interp(idx, idx[ok], a[ok]), 3.0 / STEP, mode="nearest")
+        cu, cv, rr = sm(cu), sm(cv), sm(rr)
+        ac.update(ks=ks, C=F["P"][ks] + cu[:, None] * F["B"][ks] + cv[:, None] * F["N"][ks], R=rr, fitOK=ok)
 
     def comparePost(self):
         """計画と術後の違い（中心線に沿った mm。＋ は遠位＝足側へずれた）"""
@@ -3409,6 +3446,18 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         out = dict(dP=lo - pl["p"], dD=hi - pl["d"], planLen=pl["d"] - pl["p"], realLen=hi - lo, rms=getattr(self, "postRms", None),
                    zres=float(self.post.GetSpacing()[2]) if getattr(self, "post", None) is not None else None,
                    rows=self.coverage(lo, hi))
+        try:
+            if ac.get("C") is not None and pl["path"] == ac["path"]:
+                (Dp, _, _), (Dd, _, _) = self.planDiams()
+                F, ksP, Rp, Cp = self._graftGeom(pl["p"], pl["d"], Dp, Dd, pl["path"])
+                both = np.intersect1d(ksP, ac["ks"])
+                if len(both) > 4:
+                    iP = both - ksP[0]; iA = both - ac["ks"][0]
+                    off = np.linalg.norm(Cp[both] - ac["C"][iA], axis=1)
+                    out.update(Dplan=float(np.median(2 * Rp[iP])), Dreal=float(np.median(2 * ac["R"][iA])),
+                               DrealMin=float(np.min(2 * ac["R"][iA])), DrealMax=float(np.max(2 * ac["R"][iA])),
+                               offMed=float(np.median(off)), offMax=float(np.max(off)), offAt=float(self.frames[pl["path"]]["s"][both[int(np.argmax(off))]]))
+        except Exception as e: print("compare geom:", e)
         return out
 
     def postStraight(self):
