@@ -337,8 +337,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
         card, c = self._card(pl, "使い方")
-        c.addWidget(self._lab("① 断面を近位端の位置にして「近位端 ここに」　② 遠位端も同じように　③ 解離なら「真腔に沿わせる」"
-                              "　④ 断面でエントリーをクリックして置く　⑤ 術後 CT があれば「比べる」", "muted"))
+        c.addWidget(self._lab("① 「範囲をドラッグで決める」→ ストレッチ像で近位端から遠位端までドラッグ（白い線をつかむと端だけ動く）"
+                              "　② 解離なら「真腔に沿わせる」　③ 断面で穴をクリックしてエントリーを置く　④ 術後 CT があれば「比べる」", "muted"))
         card, c = self._card(pl, "解離（真腔）", "緑の線 = 断面の真腔")
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.tlBtn = self._btn("真腔に沿わせる", None, "中心線の点から、造影された真腔を断面ごとにたどり（フラップで止まる）、グラフトを真腔の中心に置きます", True); r.addWidget(self.tlBtn, 1)
@@ -348,6 +348,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.flShowBtn = self._btn("偽腔を 3D に（紫）", None, "造影される偽腔を紫で 3D に出す。グラフト（白）が偽腔の入口側をふさいでいるかを見る", True); r.addWidget(self.flShowBtn, 1)
         self.flInfo = self._lab("", "muted"); self.flInfo.setWordWrap(True); c.addWidget(self.flInfo)
         card, c = self._card(pl, "仮想グラフト", "置きたい範囲にカバードステントを描く")
+        self.tvRange = self._btn("範囲をドラッグで決める", "primary", "押してから、右のストレッチ像で 近位端 → 遠位端 までドラッグ（1 回で決まります）", True); c.addWidget(self.tvRange)
+        c.addWidget(self._lab("ストレッチ像の白い線（Plan P / Plan D）は、つかんでドラッグすると端だけ動きます。", "muted"))
         g = qt.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(6); c.addLayout(g)
         for j, t in enumerate(("", "位置", "径（実測 → グラフト）")): g.addWidget(self._lab(t, "colh"), 0, j)
         self.tvRows = {}
@@ -482,6 +484,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         for b in self.osBtns: b.connect("clicked()", self.onTvOversize)
         for b in self.flapBtns: b.connect("clicked()", self.onTvFlap)
         self.tvRound.connect("clicked()", self.onTvRound)
+        self.tvRange.connect("toggled(bool)", self.onTvRange)
         self.flShowBtn.connect("toggled(bool)", self.onFLShow)
         for b in self.axisBtns: b.connect("clicked()", self.onTvAxis)
         for b in self.endBtns: b.connect("clicked()", self.onTvEnds)
@@ -622,6 +625,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
     def onTvHere(self, key):
         self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
+
+    def onTvRange(self, on):
+        self.logic.rangeMode = bool(on)
+        if on: self._say("ストレッチ像で、近位端から遠位端までドラッグしてください。")
 
     def onTvRound(self):
         L = self.logic; r = L.roundLanding()
@@ -960,6 +967,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._say(self.logic.undoLast())
 
     def onKey(self, cmd):
+        if cmd == "tvplan":
+            self.tvRange.blockSignals(True); self.tvRange.checked = False; self.tvRange.blockSignals(False)
+            self._busy(self.logic.planDraw); self._tvRefresh(); pl = self.logic.plan
+            self._say(f"グラフト: {self._tvRef(pl['p'])} → {self._tvRef(pl['d'])}（{pl['d'] - pl['p']:.0f} mm）。白い線をつかむと端だけ動かせます。"); return
         if cmd == "editdone":
             if self.editButton.checked: self.editButton.checked = False
             return
@@ -2525,9 +2536,23 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if getattr(self, "fixMode", False) and not it.GetControlKey(): self.queueFix(k, p); return
             qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
         if it.GetShiftKey(): return
+        pl = getattr(self, "plan", None)
+        if getattr(self, "_tvMode", False) and pl is not None and pl.get("path") == self.path:   # TEVAR: 範囲をドラッグ / 白い線（近位・遠位端）をつかんで動かす
+            sC = self._sGreen(it, nm)
+            if getattr(self, "rangeMode", False): self._tvDrag = ("range", sC); pl["p"] = pl["d"] = sC; self._drawGreen(); self._abort(it); return
+            near = min((("p", abs(sC - pl["p"])), ("d", abs(sC - pl["d"]))), key=lambda t: t[1])
+            if near[1] <= 4.0: self._tvDrag = (near[0], sC); self._abort(it); return
         self._drag = True; self._queue(s=self._sGreen(it, nm)); self._abort(it)
 
     def _moveGreen(self, it, nm="Green"):
+        td = getattr(self, "_tvDrag", None)
+        if td is not None:
+            sC = self._sGreen(it, nm); pl = self.plan
+            if td[0] == "range": pl["p"], pl["d"] = min(td[1], sC), max(td[1], sC)
+            else: pl[td[0]] = sC
+            st = getattr(self, "onStatus", None)
+            if st: st(f"範囲: {self.rel(pl['p']):.0f} → {self.rel(pl['d']):.0f} mm（長さ {pl['d'] - pl['p']:.0f} mm）。離すとグラフトを描きます。")
+            self._drawGreen(); self._abort(it); return
         if self._drag: self._queue(s=self._sGreen(it, nm)); self._abort(it); return
         if self.P is not None:                                           # マウスを乗せた所の径をその場で表示（クリック不要）
             self._hoverS = self._sGreen(it, nm); self._drawGreen()
@@ -2799,6 +2824,12 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._hoverS = None; self._drawGreen()
 
     def _releaseGreen(self, it):
+        if getattr(self, "_tvDrag", None) is not None:
+            self._tvDrag = None; self.rangeMode = False; pl = self.plan
+            if pl["d"] < pl["p"] + 10.0: pl["d"] = min(pl["p"] + 10.0, self.length - 1.0)
+            self._abort(it); cb = getattr(self, "onKey", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb("tvplan"))
+            return
         if self._drag: self._drag = False; self._abort(it)
 
     def _press3D(self, it): self._p3 = it.GetEventPosition()
@@ -3208,6 +3239,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     #  急性（フラップが動く）: 壁の中で丸く広がる（グラフトの径まで、大動脈の内側が上限）
     #  解離でない所（真腔 = 内腔全体）は、内腔の中で径まで広がり、楕円の所は壁に押されて沿う
     GRAFT_END_MM = 20.0      # 「端はあるがまま」の時、両端のこの長さで、押し広げた形から真腔のあるがままの形へなめらかに戻る
+    ELL_RATIO = 0.82         # 解離（慢性）: 広がったグラフトの短径/長径。この症例の術後 CT で中央値 0.82（0.76〜0.86）
+    ELL_PLUS = 3.0           # 長径 = 真腔の長径 + 3 mm（同じく術後 CT で +2.9 mm）。グラフトの径が上限
     GRAFT_WALL_MM = 1.5      # 外周（壁の外側）から、この厚みぶん内側までしかグラフトは広がらない
     NTH = 72
 
@@ -3235,31 +3268,43 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         TLm = self.tl["masks"][k] if useTL else None
         if TLm is None or TLm.shape != Ai.shape or TLm.sum() < 8: TLm = Ai; useTL = False
         if useTL and flap == "fixed": return self._deployFixed(k, Rn, path, TLm, Ai, E)
-        r = Rn
+        r = Rn; ell = None
         if useTL and flap == "chronic":
             xy = self._tlXY(k); mt = _polyMetrics(xy) if xy is not None else None
-            if mt and mt["dmin"] / max(mt["dmax"], 1e-6) < 0.8: r = min(Rn, mt["dmax"] / 2.0)   # 三日月の真腔: 長径まで（周径に沿う）。丸い所は径まで広がる
+            if mt and mt["dmin"] / max(mt["dmax"], 1e-6) < 0.8:                 # 三日月・楕円の真腔: 楕円のまま広がる（長軸は真腔の長径の向き）
+                a_, b_ = mt["maxLine"]; phi = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
+                A = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0); ell = (A, A * self.ELL_RATIO, phi); r = A
         r = float(max(r, 2.0))                                                   # 壁より大きい所は、壁に当たって沿う（下の放射で切る）
-        key = (path, int(k), round(r, 1), useTL, id(E), axis)
+        key = (path, int(k), round(r, 1), useTL, id(E), axis, None if ell is None else (round(ell[1], 1), round(ell[2], 2)))
         cache = self.__dict__.setdefault("_depCache", {})
         if key in cache: return cache[key]
         if len(cache) > 6000: cache.clear()
         nu = Ai.shape[0]
+        def shapeK():
+            kr = int(math.ceil(r / STEP)); yy, xx = np.mgrid[-kr:kr + 1, -kr:kr + 1]
+            if ell is None: return ((xx * xx + yy * yy) * STEP * STEP <= r * r).astype(np.float32)
+            A, Bm, ph = ell; xu = (xx * math.cos(ph) + yy * math.sin(ph)) * STEP; yv = (-xx * math.sin(ph) + yy * math.cos(ph)) * STEP
+            return ((xu / A) ** 2 + (yv / Bm) ** 2 <= 1.0).astype(np.float32)
+        if ell is not None:                                                      # 楕円: 壁の中に入る中心だけ
+            for _ in range(8):                                                   # 壁の中に入らなければ、少しずつ小さくする
+                Kd = shapeK(); feasE = fftconvolve((~Ai).astype(np.float32), Kd, mode="same") < 0.5
+                if feasE.any() or r < 4: break
+                ell = (ell[0] * 0.92, ell[1] * 0.92, ell[2]); r = ell[0]
         if axis == "cl":                                                         # 作った中心線を軸にする。壁に当たる分だけ、近い所へずらす
             r0 = c0 = HALF / STEP
-            if E[int(r0), int(c0)] < r - 0.3:
-                feas = E >= r - 0.3
+            ok0 = feasE[int(r0), int(c0)] if ell is not None else E[int(r0), int(c0)] >= r - 0.3
+            if not ok0:
+                feas = feasE if ell is not None else E >= r - 0.3
                 if not feas.any(): feas = E >= E.max() - 0.3
                 pts = np.argwhere(feas); j = pts[np.argmin(((pts - (r0, c0)) ** 2).sum(1))]; r0, c0 = float(j[0]), float(j[1])
         else:                                                                    # 真腔をいちばん多く覆う位置へ動かす
-            kr = int(math.ceil(r / STEP)); yy, xx = np.mgrid[-kr:kr + 1, -kr:kr + 1]
-            Kd = ((xx * xx + yy * yy) * STEP * STEP <= r * r).astype(np.float32)
+            Kd = shapeK()
             ov = fftconvolve(TLm.astype(np.float32), Kd, mode="same")
-            feas = E >= r - 0.3
+            feas = feasE if ell is not None else E >= r - 0.3
             if not feas.any(): feas = E >= E.max() - 0.3
             ov[~feas] = -1
             rc, cc = np.argwhere(TLm).mean(0); best = ov.max()
-            cand = np.argwhere(ov >= best * 0.99); j = cand[np.argmin(((cand - (rc, cc)) ** 2).sum(1))]   # 同じなら真腔の中心に近い方
+            cand = np.argwhere(ov >= best - max(abs(best) * 0.01, 1e-3)); j = cand[np.argmin(((cand - (rc, cc)) ** 2).sum(1))]   # 同じなら真腔の中心に近い方
             r0, c0 = float(j[0]), float(j[1])
         th = np.linspace(0, 2 * np.pi, self.NTH, endpoint=False); rs = np.arange(0, r + 0.26, 0.25)
         R_ = r0 + np.sin(th)[:, None] * rs[None] / STEP; C_ = c0 + np.cos(th)[:, None] * rs[None] / STEP
@@ -3267,7 +3312,12 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         ins = np.zeros(ok.shape, bool); ins[ok] = Ai[np.round(R_[ok]).astype(int), np.round(C_[ok]).astype(int)]
         first = np.argmax(~ins, axis=1); first[ins.all(1)] = len(rs) - 1
         Rth = np.maximum(rs[np.maximum(first - 1, 0)], 1.0)                  # 壁に当たる所は壁に沿う
-        gy, gx = np.mgrid[0:nu, 0:nu]; G = Ai & (((gy - r0) ** 2 + (gx - c0) ** 2) * STEP * STEP <= r * r)
+        gy, gx = np.mgrid[0:nu, 0:nu]
+        if ell is not None:
+            A, Bm, ph = ell; Rth = np.minimum(Rth, A * Bm / np.sqrt((Bm * np.cos(th - ph)) ** 2 + (A * np.sin(th - ph)) ** 2))
+            xu = ((gx - c0) * math.cos(ph) + (gy - r0) * math.sin(ph)) * STEP; yv = (-(gx - c0) * math.sin(ph) + (gy - r0) * math.cos(ph)) * STEP
+            G = Ai & ((xu / A) ** 2 + (yv / Bm) ** 2 <= 1.0)
+        else: G = Ai & (((gy - r0) ** 2 + (gx - c0) ** 2) * STEP * STEP <= r * r)
         gut = float((TLm & ~G).sum() * STEP * STEP) if useTL else 0.0
         out = (c0 * STEP - HALF, r0 * STEP - HALF, Rth, gut, Rn)
         cache[key] = out; return out
