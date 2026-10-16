@@ -216,7 +216,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
         # ステップ
         sb = qt.QHBoxLayout(); sb.setSpacing(0); v.addLayout(sb); self.stepGrp = qt.QButtonGroup(root); self.stepBtns = []
-        for i, txt in enumerate(("1  中心線", "2  計測", "3  出力")):
+        for i, txt in enumerate(("1  中心線", "2  計測", "3  TEVAR", "4  出力")):
             b = self._btn(txt, "step", checkable=True); self.stepGrp.addButton(b, i); sb.addWidget(b); self.stepBtns.append(b)
             b.connect("clicked()", lambda i=i: self.showStep(i))
 
@@ -304,10 +304,64 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
 
         card, c = self._card(pl, "結果", "マーカーを置くと自動で更新")
         self.resultBox = qt.QTextBrowser(); self.resultBox.setMinimumHeight(200); c.addWidget(self.resultBox)
-        nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(2)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
+        nxt = self._btn("次へ: TEVAR ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(2)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
         pl.addStretch(1)
 
-        # ---- ページ 3: 出力
+        # ---- ページ 3: TEVAR（仮想グラフト・エントリー・術後との比較）
+        pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
+        sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
+        card, c = self._card(pl, "仮想グラフト", "置きたい範囲にカバードステントを描く")
+        g = qt.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(6); c.addLayout(g)
+        for j, t in enumerate(("", "位置", "径（実測 → グラフト）")): g.addWidget(self._lab(t, "colh"), 0, j)
+        self.tvRows = {}
+        for r, (key, name) in enumerate((("p", "近位端"), ("d", "遠位端")), 1):
+            g.addWidget(self._lab(name, "h"), r, 0)
+            pos = self._lab("—"); pos.setStyleSheet("font-size:13px; font-weight:bold; color:#ffffff"); g.addWidget(pos, r, 1)
+            dia = self._lab("—"); g.addWidget(dia, r, 2)
+            b = self._btn("ここに", None, f"今の断面の位置を{name}にする"); g.addWidget(b, r, 3)
+            b.connect("clicked()", lambda key=key: self.onTvHere(key))
+            self.tvRows[key] = (pos, dia)
+        g.setColumnStretch(2, 1)
+        r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("オーバーサイズ", "muted"))
+        self.osGrp, self.osBtns = self._seg(["0%", "5%", "10%", "15%", "20%"], r)
+        self.osBtns[2].checked = True
+        r = qt.QHBoxLayout(); c.addLayout(r); r.addWidget(self._lab("径を手で決める", "muted"))
+        self.dpSpin = qt.QSpinBox(); self.ddSpin = qt.QSpinBox()
+        for sp, tip in ((self.dpSpin, "近位の径（自動 = 実測 × オーバーサイズ）"), (self.ddSpin, "遠位の径（自動 = 実測 × オーバーサイズ）")):
+            sp.setRange(0, 60); sp.setSpecialValueText("自動"); sp.setSuffix(" mm"); sp.setToolTip(tip); r.addWidget(sp)
+        r.addStretch(1)
+        self.tvSummary = self._lab("", "muted"); self.tvSummary.setWordWrap(True); c.addWidget(self.tvSummary)
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.tvShowBtn = self._btn("3D に表示", None, "仮想グラフトを出す / 隠す", True); self.tvShowBtn.checked = True; r.addWidget(self.tvShowBtn)
+        self.tvGoP = self._btn("近位端へ"); r.addWidget(self.tvGoP)
+        self.tvGoD = self._btn("遠位端へ"); r.addWidget(self.tvGoD)
+
+        card, c = self._card(pl, "エントリーと分枝", "緑 覆う・黄 端に近い・赤 覆わない")
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.entryBtn = self._btn("エントリーを置く", "primary", "押してから、断面（X）でエントリーの穴をクリック", True); r.addWidget(self.entryBtn, 1)
+        self.entryDel = self._btn("選んだエントリーを消す"); r.addWidget(self.entryDel)
+        self.covTable = qt.QTableWidget(0, 4); self.covTable.setHorizontalHeaderLabels(["名前", "位置", "計画", "術後"])
+        self._tbl(self.covTable, 170); c.addWidget(self.covTable)
+
+        card, c = self._card(pl, "術後 CT と比べる", "背骨で重ねて、実際の位置を測る")
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.postLoadBtn = self._btn("術後 CT を読み込む", None, "術後 CT の DICOM フォルダを選ぶ（院内 PC の中で読むだけ）"); r.addWidget(self.postLoadBtn, 1)
+        self.postCmpBtn = self._btn("比べる", "primary", "重ね合わせ → 金属（ステント）を拾う → 計画とのずれ"); r.addWidget(self.postCmpBtn)
+        self.postInfo = self._lab("まだ読み込んでいません", "muted"); self.postInfo.setWordWrap(True); c.addWidget(self.postInfo)
+        g2 = qt.QGridLayout(); g2.setHorizontalSpacing(10); g2.setVerticalSpacing(2); c.addLayout(g2); g2.setColumnStretch(3, 1)
+        for j, t in enumerate(("", "計画", "術後", "ずれ")): g2.addWidget(self._lab(t, "colh"), 0, j)
+        self.cmpLab = {}
+        for i, (key, name) in enumerate((("p", "近位端"), ("d", "遠位端"), ("len", "長さ")), 1):
+            g2.addWidget(self._lab(name), i, 0)
+            for j, col in enumerate(("plan", "post", "diff"), 1):
+                w_ = self._lab("—"); w_.setStyleSheet("font-size:12px; font-weight:bold; color:#ffffff"); g2.addWidget(w_, i, j); self.cmpLab[(key, col)] = w_
+        self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
+        c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。白い線 = 計画、金色 = 術後。", "muted"))
+        nxt = self._btn("次へ: 出力 ›", "ghost"); nxt.connect("clicked()", lambda: self.showStep(3)); pl.addWidget(nxt, 0, qt.Qt.AlignRight)
+        pl.addStretch(1)
+
+        # ---- ページ 4: 出力
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10); self.stack.addWidget(pg)
         card, c = self._card(pl, "出力", "この PC の ドキュメント\\HeartView症例 に保存")
         self.pdfBtn = self._btn("サイジングシート（PDF）を作る", "primary"); c.addWidget(self.pdfBtn)
@@ -353,6 +407,14 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.measureButton.connect("clicked()", self.onMeasure)
         self.neckButton.connect("clicked()", lambda: self._showText(L.neckMeasurement()))
         self.pdfBtn.connect("clicked()", self.onPDF)
+        for b in self.osBtns: b.connect("clicked()", self.onTvOversize)
+        self.dpSpin.connect("valueChanged(int)", lambda v: self.onTvDiam()); self.ddSpin.connect("valueChanged(int)", lambda v: self.onTvDiam())
+        self.tvShowBtn.connect("toggled(bool)", self.onTvShow)
+        self.tvGoP.connect("clicked()", lambda: L.setPosition(L.planInit()["p"])); self.tvGoD.connect("clicked()", lambda: L.setPosition(L.planInit()["d"]))
+        self.entryBtn.connect("toggled(bool)", self.onEntry); self.entryDel.connect("clicked()", self.onEntryDel)
+        self.covTable.connect("cellClicked(int,int)", lambda r, c: L.setPosition(self._covRows[r]["s"]) if r < len(getattr(self, "_covRows", [])) else None)
+        self.postLoadBtn.connect("clicked()", self.onPostLoad); self.postCmpBtn.connect("clicked()", self.onPostCompare)
+        self.postStretchBtn.connect("toggled(bool)", self.onPostStretch)
         self.pngBtn.connect("clicked()", self.onPNG)
         self.secBtn.connect("clicked()", self.onSecPNG)
         self.openBtn.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self._lastDir)))
@@ -365,6 +427,119 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         inter = slicer.app.applicationLogic().GetInteractionNode()
         self._interTag = inter.AddObserver(inter.InteractionModeChangedEvent, lambda c, e: self._syncTools())
         self.showStep(0); self.onTemplate(); self._syncPathButtons()
+
+    # ---------------------------------------------------------------- TEVAR（仮想グラフト・術後との比較）
+    SHORT = {"腕頭動脈": "腕頭", "左総頸動脈": "左総頸", "左鎖骨下動脈": "左鎖骨下", "腹腔動脈": "腹腔", "上腸間膜動脈": "SMA", "最下位腎動脈": "腎動脈"}
+
+    def _tvRef(self, s):
+        """位置を「いちばん近い近位の分枝 + mm」で（無ければベースラインから）"""
+        L = self.logic; best = None
+        for m in L.markers:
+            nm = m["name"].replace("（推定）", "")
+            if nm in self.SHORT and m["s"] <= s + 0.5 and (best is None or m["s"] > best[1]): best = (nm, m["s"])
+        return f"{self.SHORT[best[0]]} +{s - best[1]:.0f} mm" if best else f"{L.rel(s):+.0f} mm"
+
+    def _tvEnter(self):
+        L = self.logic
+        if L.P is None: self._say("先に中心線を作ってください"); return
+        pl = L.planInit()
+        try: self.osBtns[[0.0, 0.05, 0.10, 0.15, 0.20].index(round(pl["os"], 2))].checked = True
+        except Exception: pass
+        for sp, key in ((self.dpSpin, "dp"), (self.ddSpin, "dd")):
+            sp.blockSignals(True); sp.value = int(pl.get(key) or 0); sp.blockSignals(False)
+        self.tvShowBtn.blockSignals(True); self.tvShowBtn.checked = bool(pl.get("on", True)); self.tvShowBtn.blockSignals(False)
+        self._busy(L.planDraw); self._tvRefresh()
+
+    def _tvRefresh(self):
+        L = self.logic
+        if L.P is None or not hasattr(self, "tvRows"): return
+        pl = L.planInit()
+        try: (Dp, mp, ap), (Dd, md, ad) = L.planDiams()
+        except Exception as e: print("tv:", e); return
+        for key, s, D, mD, man in (("p", pl["p"], Dp, mp, ap), ("d", pl["d"], Dd, md, ad)):
+            pos, dia = self.tvRows[key]; pos.setText(self._tvRef(s))
+            dia.setText(("—" if mD is None else f"{mD:.1f}") + " → " + ("—" if D is None else f"<b>{D:.0f} mm</b>") + ("（手入力）" if man else ""))
+        if Dp and Dd:
+            self.tvSummary.setText(f"長さ {pl['d'] - pl['p']:.0f} mm・径 {Dp:.0f} → {Dd:.0f} mm（{'テーパー' if abs(Dp - Dd) > 0.5 else 'ストレート'}）"
+                                   f"・オーバーサイズ {pl['os'] * 100:.0f}%　白い筒 = 計画（断面にも輪郭）")
+        ac = getattr(L, "actual", None)
+        post = {r["name"]: r for r in L.coverage(ac["lo"], ac["hi"])} if ac else {}
+        rows = L.coverage(pl["p"], pl["d"]); t = self.covTable; t.setRowCount(len(rows)); self._covRows = rows
+        col = {"cover": "#5fd36e", "edge": "#ffcc33", "open": "#ff6b6b", "block": "#ff6b6b", "ok": "#9cc9ff"}
+        for i, rw in enumerate(rows):
+            vals = [rw["name"], self._tvRef(rw["s"]), rw["text"], post.get(rw["name"], {}).get("text", "")]
+            for j, v in enumerate(vals):
+                it = qt.QTableWidgetItem(v)
+                if j == 2: it.setForeground(qt.QBrush(qt.QColor(col[rw["state"]])))
+                if j == 3 and rw["name"] in post: it.setForeground(qt.QBrush(qt.QColor(col[post[rw["name"]]["state"]])))
+                t.setItem(i, j, it)
+        t.resizeColumnsToContents()
+        cmp_ = L.comparePost()
+        if cmp_:
+            vals = {("p", "plan"): self._tvRef(pl["p"]), ("p", "post"): self._tvRef(ac["lo"]), ("p", "diff"): f"{cmp_['dP']:+.0f} mm",
+                    ("d", "plan"): self._tvRef(pl["d"]), ("d", "post"): self._tvRef(ac["hi"]), ("d", "diff"): f"{cmp_['dD']:+.0f} mm",
+                    ("len", "plan"): f"{cmp_['planLen']:.0f} mm", ("len", "post"): f"{cmp_['realLen']:.0f} mm", ("len", "diff"): f"{cmp_['realLen'] - cmp_['planLen']:+.0f} mm"}
+            for k, v in vals.items(): self.cmpLab[k].setText(v)
+
+    def onTvHere(self, key):
+        self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
+
+    def onTvOversize(self):
+        v = [0.0, 0.05, 0.10, 0.15, 0.20][[b.checked for b in self.osBtns].index(True)]
+        self._busy(lambda: self.logic.planSet(os=v)); self._tvRefresh()
+
+    def onTvDiam(self):
+        self._busy(lambda: self.logic.planSet(dp=self.dpSpin.value or None, dd=self.ddSpin.value or None)); self._tvRefresh()
+
+    def onTvShow(self, on):
+        L = self.logic; L.planInit()["on"] = bool(on)
+        if on: self._busy(L.planDraw)
+        else: L.planShow(False)
+
+    def onEntry(self, on):
+        L = self.logic
+        if not on: L._entryCb = None; return
+        def done(ras):
+            name = L.addEntry(ras); self.entryBtn.blockSignals(True); self.entryBtn.checked = False; self.entryBtn.blockSignals(False)
+            self._tvRefresh(); self._say(f"{name} を置きました（中心線 {self._tvRef(L.curS)}）。")
+        L._entryCb = done; self._say("断面（X）でエントリーの穴をクリックしてください。")
+
+    def onEntryDel(self):
+        r = self.covTable.currentRow(); rows = getattr(self, "_covRows", [])
+        if 0 <= r < len(rows) and rows[r]["kind"] == "entry": self.logic.removeEntry(rows[r]["name"]); self._tvRefresh()
+        else: self._say("表でエントリーを選んでください")
+
+    def onPostLoad(self):
+        d = qt.QFileDialog.getExistingDirectory(None, "術後 CT の DICOM フォルダを選ぶ")
+        if not d: return
+        n = self._busy(self.logic.loadPostFolder, d, self._say)
+        if n is not None:
+            sp = n.GetSpacing(); self.postInfo.setText(f"術後 CT: {slicer.util.arrayFromVolume(n).shape[0]} 枚・スライス間隔 {sp[2]:.1f} mm。「比べる」を押してください。")
+
+    def onPostCompare(self):
+        L = self.logic
+        if getattr(L, "post", None) is None or not slicer.mrmlScene.IsNodePresent(L.post):
+            self.onPostLoad()
+            if getattr(L, "post", None) is None: return
+        def run():
+            M, rms = L.registerPost(self._say)
+            L.extractStent(status=self._say)
+            return rms
+        rms = self._busy(run)
+        if rms is None: return
+        zr = L.post.GetSpacing()[2]
+        self.postInfo.setText(f"重ね合わせ（背骨）の誤差 {rms:.1f} mm・術後 CT のスライス間隔 {zr:.1f} mm（端の位置はおよそ ±{max(zr / 2, rms):.0f} mm）")
+        self._tvRefresh()
+        c = L.comparePost()
+        if c: self._say(f"術後のグラフト: 近位端 {c['dP']:+.0f} mm・遠位端 {c['dD']:+.0f} mm（計画との差。＋ = 遠位へ）")
+
+    def onPostStretch(self, on):
+        L = self.logic
+        if on and getattr(L, "postT", None) is None:
+            self.postStretchBtn.blockSignals(True); self.postStretchBtn.checked = False; self.postStretchBtn.blockSignals(False)
+            self._say("先に「比べる」を押してください"); return
+        if on: self._busy(L.postStraight)
+        L.orangeOff = 0.0 if on else 90.0; L.showPostStretch(on); L.setRotation(L.rot)
 
     def _tbl(self, t, h):
         t.setSelectionBehavior(qt.QAbstractItemView.SelectRows); t.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
@@ -384,6 +559,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         try: self.logic.resume()
         except Exception: _err("enter")
         qt.QTimer.singleShot(300, self._autoStart)
+        if self.stack.currentIndex == 2: qt.QTimer.singleShot(500, lambda: self.showStep(2))   # TEVAR の画面に戻ってきた時も半透明の設定に
 
     def _autoStart(self):
         """開いたら、中心線がまだ無ければ自動で作って計測の画面にする（ボタンを探さなくてよい）"""
@@ -399,12 +575,29 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.onAuto()
 
     def exit(self):
+        try:
+            if getattr(self, "_tvRen", None) is not None:
+                ren = slicer.app.layoutManager().threeDWidget(0).threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+                ren.SetUseDepthPeeling(self._tvRen[0]); ren.SetUseSSAO(self._tvRen[1]); self._tvRen = None
+            vm = getattr(self.logic, "vesselModel", None)
+            if vm is not None and slicer.mrmlScene.IsNodePresent(vm): vm.GetDisplayNode().SetOpacity(1.0)
+        except Exception: pass
         try: self.logic.suspend()
         except Exception: _err("exit")
 
     def showStep(self, i):
-        i = max(0, min(2, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
+        i = max(0, min(3, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
         if i == 1: self.refreshLists()
+        if i == 2: self._tvEnter()
+        try:                                                                  # TEVAR の時は血管を半透明にして、中のグラフトを見せる
+            vm = getattr(self.logic, "vesselModel", None)
+            if vm is not None and slicer.mrmlScene.IsNodePresent(vm): vm.GetDisplayNode().SetOpacity(0.3 if i == 2 else 1.0)
+            ren = slicer.app.layoutManager().threeDWidget(0).threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+            if i == 2 and getattr(self, "_tvRen", None) is None:               # 半透明（血管・グラフトの布）をきちんと描く（重ねた描画層では深さの剥離が効かない）
+                self._tvRen = (ren.GetUseDepthPeeling(), ren.GetUseSSAO()); ren.SetUseDepthPeeling(False); ren.SetUseSSAO(False)
+            elif i != 2 and getattr(self, "_tvRen", None) is not None:
+                ren.SetUseDepthPeeling(self._tvRen[0]); ren.SetUseSSAO(self._tvRen[1]); self._tvRen = None
+        except Exception: pass
 
     def _say(self, m):
         self.status.setText(m); print("[AortaSizing]", m); slicer.app.processEvents()
@@ -587,6 +780,9 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
     # ---------------------------------------------------------------- 一覧（変更があった時だけ）
     def refreshLists(self):
         L = self.logic; import html
+        if self.stack.currentIndex == 2:
+            try: self._tvRefresh()
+            except Exception as e: print("tv refresh:", e)
         # テンプレートの手順
         st = self._steps(); self.stepList.clear()
         for i, nm in enumerate(st):
@@ -1672,7 +1868,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         gn.SetSliceToRASByNTP(-s, c, 0, -c, -s, 0, 0, 0, -self.length / 2, 0)
         ow = slicer.app.layoutManager().sliceWidget("Orange")                # もう 1 枚のストレッチ像は 90° 回した向き（直交 2 方向を同時に見る）
         if ow is not None:
-            c2, s2 = math.cos(th + math.pi / 2), math.sin(th + math.pi / 2)
+            off = math.radians(getattr(self, "orangeOff", 90.0)); c2, s2 = math.cos(th + off), math.sin(th + off)
             ow.mrmlSliceNode().SetSliceToRASByNTP(-s2, c2, 0, -c2, -s2, 0, 0, 0, -self.length / 2, 0)
         self._fitViews()
         self.setPosition(self.curS); self._drawMarkers()
@@ -1732,7 +1928,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     def _drawGreen(self):
         """ストレッチ像: 現在位置（赤）・ベースライン（緑）・マーカー（水色）・マウスの位置（白）を軽く描く"""
         if self.P is None: return
-        for ovn, vn, rot in (("ovGreen", "Green", self.rot), ("ovOrange", "Orange", self.rot + 90.0)):
+        for ovn, vn, rot in (("ovGreen", "Green", self.rot), ("ovOrange", "Orange", self.rot + getattr(self, "orangeOff", 90.0))):
             o = getattr(self, ovn, None)
             if o is not None: self._drawStretch(o, vn, rot)
 
@@ -1756,6 +1952,21 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             kk = int(min(max(round(hs / STEP), 0), len(self.prof) - 1)); dmax, dmin = self.prof[kk, 2], self.prof[kk, 3]
             ab = G(hs); lines.append((ab, (0.85, 0.85, 0.85), False))
             if np.isfinite(dmax): labels.append((ab[1], f"{self.rel(hs):+.0f} mm  {dmax:.1f}/{dmin:.1f}", (1, 1, 1), 13))
+        pl = getattr(self, "plan", None)
+        if pl is not None and pl.get("on", True) and pl.get("path") == self.path:
+            for sx, nm in ((pl["p"], "Plan P"), (pl["d"], "Plan D")):
+                ab = G(sx); lines.append((ab, (0.95, 0.95, 1.0), False))
+                if vn == "Green": labels.append((ab[1], nm, (0.95, 0.95, 1.0), 12))
+        ac = getattr(self, "actual", None)
+        if ac is not None and ac.get("path") == self.path:
+            for sx, nm in ((ac["lo"], "Post P"), (ac["hi"], "Post D")):
+                ab = G(sx); lines.append((ab, (1.0, 0.72, 0.2), False))
+                if vn != "Green" or getattr(self, "orangeOff", 90.0) != 0: labels.append((ab[0], nm, (1.0, 0.72, 0.2), 12))
+        if pl is not None:
+            st = {r["name"]: r["state"] for r in self.coverage(pl["p"], pl["d"]) if r["kind"] == "entry"}
+            for e in getattr(self, "entries", []):
+                if e.get("path") == self.path or e["s"] <= getattr(self, "sharedLen", 0) + 2:
+                    lines.append((G(e["s"], 0.3), self.STATE_COL.get(st.get(e["name"], "open")), False))
         ab = G(self.curS); lines.append((ab, (1.0, 0.3, 0.25), False))
         o.set(lines, labels)
 
@@ -1774,7 +1985,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             c2.SetText(2, f"{PATH_EN.get(self.path, '')}\n{base}\nrot {self.rot:.0f} deg"); c2.GetTextProperty().SetColor(1, 0.9, 0.3); g.scheduleRender()
             ow = lm.sliceWidget("Orange")
             if ow is not None:
-                c4 = ow.sliceView().cornerAnnotation(); c4.SetText(2, f"rot {(self.rot + 90) % 360:.0f} deg"); c4.GetTextProperty().SetColor(1, 0.75, 0.35); ow.sliceView().scheduleRender()
+                c4 = ow.sliceView().cornerAnnotation(); c4.SetText(2, f"rot {(self.rot + getattr(self, 'orangeOff', 90.0)) % 360:.0f} deg" + ("  POST-OP" if getattr(self, "orangeOff", 90.0) == 0 else "")); c4.GetTextProperty().SetColor(1, 0.75, 0.35); ow.sliceView().scheduleRender()
             y = lm.sliceWidget("Yellow").sliceView(); c3 = y.cornerAnnotation(); c3.SetText(2, "Axial (original)"); c3.GetTextProperty().SetColor(1, 0.9, 0.3)
         except Exception as e:
             print("annotate:", e)
@@ -1830,7 +2041,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         hidden = getattr(self, "_hiddenNodes", None) or []
         for n in list(slicer.util.getNodesByClass("vtkMRMLDisplayableNode")):
             try:
-                if not (n.GetName().startswith("SA ") or n.GetAttribute("SA.measure")): continue
+                if not (n.GetName().startswith(("SA ", "TEVAR ")) or n.GetAttribute("SA.measure")): continue
                 d = n.GetDisplayNode()
                 if d is not None and d.GetVisibility(): d.SetVisibility(False); hidden.append(n)
             except Exception: pass
@@ -1999,6 +2210,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             self._queue(s=float(np.clip(self.curS + d, 0, self.length))); self._abort(it)
 
     def _clickRed(self, it):
+        if getattr(self, "_entryCb", None) is not None and self.P is not None:      # TEVAR: エントリーを断面のクリックで置く
+            x, y = it.GetEventPosition(); sn = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
+            M = sn.GetXYToRAS(); ras = np.array([sum(M.GetElement(r, c) * v for c, v in enumerate((x, y, 0, 1))) for r in range(3)])
+            cb = self._entryCb; self._entryCb = None
+            try: cb(ras)
+            except Exception as e: print("entry:", e)
+            self._abort(it); return
         if self.P is not None and it.GetControlKey() and self._clockCb is None and not self._editing and not self._placing():
             p = self._rasAt(it, "Red"); k = self._k()                    # Ctrl+クリック: この断面の中心をクリックした所へ
             self._abort(it); qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
@@ -2425,6 +2643,436 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 if l: return l["s"] + 10.0, self.path
         except Exception as e: print("suggest:", e)
         return None
+
+    # ================================================================ TEVAR 計画（仮想グラフト）と術後 CT との比較
+    # 中心線の上に、置きたい範囲（近位端〜遠位端）でカバードステントを描く。エントリー・分枝を覆うかを色で示す。
+    # 術後 CT は背骨で術前に重ね合わせ、金属（ステントの骨組み）から実際のグラフトの範囲を出して、計画とのずれを中心線に沿って測る。
+    OVERSIZE = 0.10
+    BRANCH_NAMES = ("腕頭動脈", "左総頸動脈", "左鎖骨下動脈", "腹腔動脈", "上腸間膜動脈", "最下位腎動脈", "右腎動脈", "左腎動脈")
+    STATE_COL = {"cover": (0.25, 0.85, 0.35), "edge": (1.0, 0.8, 0.2), "open": (1.0, 0.3, 0.3), "block": (1.0, 0.3, 0.3), "ok": (0.6, 0.8, 1.0)}
+
+    def planInit(self, force=False):
+        """計画の初期値: テンプレートの近位/遠位ランディング（無ければ左鎖骨下 +10 mm から 150 mm）"""
+        pl = getattr(self, "plan", None)
+        if pl is not None and not force and pl.get("path") in self.frames: return pl
+        p = self._mk("近位ランディング"); d = self._mk("遠位ランディング"); l = self._mk("左鎖骨下動脈")
+        sp = p["s"] if p else ((l["s"] + 10.0) if l else float(self.curS))
+        sd = d["s"] if d else sp + 150.0
+        sd = min(max(sd, sp + 20.0), self.length - 1.0)
+        self.plan = dict(path=self.path, p=float(sp), d=float(sd), os=self.OVERSIZE, dp=None, dd=None, on=True)
+        return self.plan
+
+    def _landD(self, s, path=None):
+        """ランディング部の外径（Deq、前後 5 mm の中央値）"""
+        vals = []
+        F = self.frames[path or self.path]
+        for x in np.arange(s - 5.0, s + 5.01, 2.5):
+            try:
+                m = self._dia(float(np.clip(x, 0, F["length"])), path, "outer")
+                if m and np.isfinite(m["deq"]): vals.append(m["deq"])
+            except Exception: pass
+        return float(np.median(vals)) if vals else None
+
+    def planDiams(self):
+        """[(近位の径, 実測径, 手入力か), (遠位 …)]  径はオーバーサイズを掛けて 2 mm 刻みに切り上げ"""
+        pl = self.plan; out = []
+        for key, s in (("dp", pl["p"]), ("dd", pl["d"])):
+            base = self._landD(s, pl["path"])
+            if pl.get(key): out.append((float(pl[key]), base, True)); continue
+            nom = None if base is None else 2.0 * math.ceil(base * (1.0 + pl["os"]) / 2.0)
+            out.append((nom, base, False))
+        return out
+
+    def planSet(self, **kw):
+        pl = self.planInit()
+        for k, v in kw.items():
+            if k in ("p", "d") and v is not None: v = float(np.clip(v, 0.0, self.frames[pl["path"]]["length"]))
+            pl[k] = v
+        if pl["d"] < pl["p"] + 10: pl["d"] = pl["p"] + 10
+        self.planDraw()
+
+    def _tubePD(self, P, N, B, R, nseg=56):
+        from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+        n = len(P); th = np.linspace(0, 2 * np.pi, nseg, endpoint=False)
+        pts = (P[:, None, :] + R[:, None, None] * (np.cos(th)[None, :, None] * N[:, None, :] + np.sin(th)[None, :, None] * B[:, None, :])).reshape(-1, 3)
+        i = np.arange(n - 1)[:, None]; j = np.arange(nseg)[None, :]; j2 = (j + 1) % nseg
+        q = np.stack([i * nseg + j, i * nseg + j2, (i + 1) * nseg + j2, (i + 1) * nseg + j], -1).reshape(-1, 4)
+        cells = np.c_[np.full(len(q), 4), q].astype(np.int64).ravel()
+        vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(np.ascontiguousarray(pts, np.float64), deep=True))
+        ca = vtk.vtkCellArray(); ca.SetCells(len(q), numpy_to_vtkIdTypeArray(cells, deep=True))
+        pd = vtk.vtkPolyData(); pd.SetPoints(vp); pd.SetPolys(ca)
+        nm = vtk.vtkPolyDataNormals(); nm.SetInputData(pd); nm.SplittingOff(); nm.ConsistencyOn(); nm.Update()
+        return nm.GetOutput()
+
+    def _zStentsPD(self, F, ks, R, pitch=17.0, height=12.0, apices=5):
+        """Z 型ステント（金属の骨組み）を、グラフトの筒の上に輪で並べる"""
+        s = F["s"]; s0, s1 = s[ks[0]], s[ks[-1]]
+        app = vtk.vtkAppendPolyData(); c = s0 + 1.0 + height / 2
+        th = np.linspace(0, 2 * np.pi, apices * 24, endpoint=False)
+        u = th * apices / (2 * np.pi); tri = 4.0 * np.abs(u - np.floor(u) - 0.5) - 1.0
+        while c + height / 2 <= s1 - 0.5:
+            ss = c + tri * height / 2
+            kk = np.clip(np.round(ss / STEP).astype(int), ks[0], ks[-1]); rr = R[kk - ks[0]] * 1.01
+            pts = F["P"][kk] + rr[:, None] * (np.cos(th)[:, None] * F["N"][kk] + np.sin(th)[:, None] * F["B"][kk])
+            vp = vtk.vtkPoints()
+            for p in pts: vp.InsertNextPoint(*p)
+            pl = vtk.vtkPolyLine(); pl.GetPointIds().SetNumberOfIds(len(pts) + 1)
+            for i in range(len(pts)): pl.GetPointIds().SetId(i, i)
+            pl.GetPointIds().SetId(len(pts), 0)
+            ca = vtk.vtkCellArray(); ca.InsertNextCell(pl); pd = vtk.vtkPolyData(); pd.SetPoints(vp); pd.SetLines(ca)
+            tf = vtk.vtkTubeFilter(); tf.SetInputData(pd); tf.SetRadius(0.4); tf.SetNumberOfSides(8); tf.Update()
+            app.AddInputData(tf.GetOutput()); c += pitch
+        for k, sgn in ((ks[0], 1), (ks[-1], -1)):                            # 両端の金のマーカー（X 線で見える印）
+            kk = int(np.clip(k + sgn * int(1.5 / STEP), ks[0], ks[-1]))
+            for a in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
+                p = F["P"][kk] + R[kk - ks[0]] * 1.02 * (np.cos(a) * F["N"][kk] + np.sin(a) * F["B"][kk])
+                sp = vtk.vtkSphereSource(); sp.SetCenter(*p); sp.SetRadius(1.1); sp.SetThetaResolution(12); sp.SetPhiResolution(8); sp.Update()
+                app.AddInputData(sp.GetOutput())
+        app.Update(); return app.GetOutput()
+
+    def _model(self, name, pd, color, opacity=1.0, slice2D=False, spec=0.3):
+        m = slicer.mrmlScene.GetFirstNodeByName(name)
+        if m is None or not m.IsA("vtkMRMLModelNode"):
+            m = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", name); m.CreateDefaultDisplayNodes()
+        m.SetAndObservePolyData(pd); d = m.GetDisplayNode()
+        d.SetColor(*color); d.SetOpacity(opacity); d.SetScalarVisibility(False); d.SetBackfaceCulling(False)
+        d.SetSpecular(spec); d.SetPower(30); d.SetAmbient(0.15); d.SetDiffuse(0.8)
+        d.SetVisibility2D(bool(slice2D)); d.SetSliceIntersectionThickness(2)
+        d.RemoveAllViewNodeIDs(); d.AddViewNodeID("vtkMRMLViewNode1")
+        if slice2D: d.AddViewNodeID("vtkMRMLSliceNodeRed")
+        d.SetVisibility(True); return m
+
+    def _graftGeom(self, lo, hi, Dp, Dd, path):
+        F = self.frames[path]; k0, k1 = self._k(lo, path), self._k(hi, path); ks = np.arange(k0, k1 + 1)
+        t = np.linspace(0.0, 1.0, len(ks)); R = (Dp + (Dd - Dp) * t) / 2.0
+        if path == self.path and self.prof is not None and self.mode == "outer":   # 大動脈の壁より外へは広がらない（壁に沿う）
+            loc = self.prof[ks, 1] / 2.0
+            ok = np.isfinite(loc); R = np.where(ok, np.minimum(R, np.where(ok, loc, R) + 0.5), R)
+        from scipy import ndimage
+        R = ndimage.gaussian_filter1d(R, 4.0 / STEP, mode="nearest")
+        return F, ks, R
+
+    def planDraw(self):
+        pl = self.planInit()
+        if not pl.get("on", True): self.planShow(False); return
+        (Dp, _, _), (Dd, _, _) = self.planDiams()
+        if not Dp or not Dd: return
+        F, ks, R = self._graftGeom(pl["p"], pl["d"], Dp, Dd, pl["path"])
+        if len(ks) < 4: return
+        self._model("TEVAR 計画（布）", self._tubePD(F["P"][ks], F["N"][ks], F["B"][ks], R), (0.88, 0.93, 1.0), 0.45, slice2D=True, spec=0.15)
+        self._model("TEVAR 計画（ステント）", self._zStentsPD(F, ks, R), (0.78, 0.8, 0.85), 1.0, spec=0.8)
+        self._drawEntries(); self._drawGreen()
+
+    def planShow(self, on):
+        for nm in ("TEVAR 計画（布）", "TEVAR 計画（ステント）"):
+            m = slicer.mrmlScene.GetFirstNodeByName(nm)
+            if m is not None and m.GetDisplayNode(): m.GetDisplayNode().SetVisibility(bool(on))
+
+    # ---- エントリー（断面をクリックして置く）
+    def addEntry(self, ras):
+        es = self.__dict__.setdefault("entries", [])
+        name = f"エントリー{len(es) + 1}"
+        es.append(dict(name=name, s=float(self.curS), path=self.path, xyz=[float(x) for x in ras]))
+        self._drawEntries(); self._listsChanged(); return name
+
+    def removeEntry(self, name):
+        self.entries = [e for e in getattr(self, "entries", []) if e["name"] != name]
+        for i, e in enumerate(self.entries): e["name"] = f"エントリー{i + 1}"
+        self._drawEntries(); self._listsChanged()
+
+    def coverage(self, lo, hi):
+        """エントリー・分枝を、範囲 lo〜hi（中心線の mm）のグラフトが覆うか"""
+        rows = []
+        for e in getattr(self, "entries", []):
+            s = e["s"]
+            if lo <= s <= hi:
+                m = min(s - lo, hi - s)
+                rows.append(dict(kind="entry", name=e["name"], s=s, state="cover" if m >= 10 else "edge",
+                                 text=f"覆う（端まで {m:.0f} mm）" if m >= 10 else f"覆うが端に近い（{m:.0f} mm）"))
+            else:
+                rows.append(dict(kind="entry", name=e["name"], s=s, state="open", text=f"覆わない（{(lo - s) if s < lo else (s - hi):.0f} mm 外）"))
+        for mk in self.markers:
+            nm = mk["name"].replace("（推定）", "")
+            if not (nm in self.BRANCH_NAMES or (nm.endswith("動脈") and not nm.startswith("入口"))): continue
+            s = mk["s"]
+            if lo <= s <= hi: rows.append(dict(kind="branch", name=nm, s=s, state="block", text="この分枝を覆う"))
+            else:
+                gap = (lo - s) if s < lo else (s - hi)
+                rows.append(dict(kind="branch", name=nm, s=s, state="ok", text=f"{'近位端' if s < lo else '遠位端'}まで {gap:.0f} mm"))
+        rows.sort(key=lambda r: r["s"]); return rows
+
+    def _drawEntries(self):
+        pl = getattr(self, "plan", None); lo, hi = (pl["p"], pl["d"]) if pl else (1e9, -1e9)
+        st = {e["name"]: r["state"] for r in self.coverage(lo, hi) for e in getattr(self, "entries", []) if r["name"] == e["name"]}
+        for state, label in (("cover", "覆う"), ("edge", "端"), ("open", "覆わない")):
+            n = self._node("vtkMRMLMarkupsFiducialNode", f"TEVAR エントリー（{label}）", ("vtkMRMLViewNode1", "vtkMRMLSliceNodeRed"),
+                           self.STATE_COL[state], glyph=3.0, text=3.0)
+            wasMod = n.StartModify(); n.RemoveAllControlPoints()
+            for e in getattr(self, "entries", []):
+                if st.get(e["name"], "open") == state:
+                    i = n.AddControlPoint(vtk.vtkVector3d(*e["xyz"])); n.SetNthControlPointLabel(i, "E" + e["name"][len("エントリー"):])
+            n.EndModify(wasMod)
+
+    # ---- 術後 CT
+    def loadPostFolder(self, folder, status=print):
+        """術後 CT のフォルダから、造影・軸位で一番薄いシリーズを選んで読み込む（院内 PC の中だけ）"""
+        import pydicom
+        from concurrent.futures import ThreadPoolExecutor
+        files = [os.path.join(dp, f) for dp, dn, fn in os.walk(folder) for f in fn]
+        status(f"術後 CT: {len(files)} ファイルを調べています…")
+        def hdr(p):
+            try:
+                d = pydicom.dcmread(p, stop_before_pixels=True, force=True)
+                it = str(getattr(d, "ImageType", ""))
+                if "LOCALIZER" in it or "SECONDARY" in it or str(getattr(d, "Modality", "")) != "CT": return None
+                iop = [float(x) for x in d.ImageOrientationPatient]
+                if abs(iop[0]) < 0.9 or abs(iop[4]) < 0.9: return None             # 軸位だけ
+                return (p, str(d.SeriesInstanceUID), bool(str(getattr(d, "ContrastBolusAgent", "")).strip()), "ORIGINAL" in it,
+                        float(getattr(d, "SliceThickness", 0) or 0), int(d.Rows))
+            except Exception: return None
+        with ThreadPoolExecutor(8) as ex: H = [h for h in ex.map(hdr, files) if h]
+        by = {}
+        for h in H: by.setdefault(h[1], []).append(h)
+        cand = [(v[0][2], -v[0][4], len(v) * max(v[0][4], 0.5), v[0][3], uid) for uid, v in by.items() if len(v) >= 30 and v[0][5] >= 256]
+        if not cand: raise RuntimeError("術後 CT の軸位シリーズが見つかりませんでした")
+        cand.sort(reverse=True); uid = cand[0][-1]; paths = [h[0] for h in by[uid]]
+        status(f"術後 CT: {len(paths)} 枚（{-cand[0][1]:g} mm）を読み込み中…")
+        def rd(p):
+            d = pydicom.dcmread(p, force=True)
+            a = d.pixel_array.astype(np.float32) * float(getattr(d, "RescaleSlope", 1) or 1) + float(getattr(d, "RescaleIntercept", 0) or 0)
+            return [float(x) for x in d.ImagePositionPatient], [float(x) for x in d.PixelSpacing], [float(x) for x in d.ImageOrientationPatient], np.clip(a, -1024, 4000).astype(np.int16)
+        with ThreadPoolExecutor(8) as ex: S = list(ex.map(rd, paths))
+        r = np.array(S[0][2][:3]); c = np.array(S[0][2][3:]); n = np.cross(r, c)
+        S.sort(key=lambda x: float(np.dot(x[0], n)))
+        pos = np.array([float(np.dot(x[0], n)) for x in S]); dz = float(np.median(np.diff(pos))) if len(S) > 1 else 1.0
+        arr = np.stack([x[3] for x in S]); ps = S[0][1]; o = np.array(S[0][0])
+        M = np.eye(4); M[:3, 0] = r * ps[1]; M[:3, 1] = c * ps[0]; M[:3, 2] = n * dz; M[:3, 3] = o
+        M = np.diag([-1, -1, 1, 1]) @ M                                              # LPS → RAS
+        node = slicer.mrmlScene.GetFirstNodeByName("術後 CT")
+        if node is None: node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "術後 CT")
+        slicer.util.updateVolumeFromArray(node, arr)
+        m = vtk.vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4): m.SetElement(i, j, float(M[i, j]))
+        node.SetIJKToRASMatrix(m); node.CreateDefaultDisplayNodes()
+        dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False); dn.SetWindowLevel(800, 200)
+        self.post = node; self.postT = None
+        status(f"術後 CT を読み込みました（{arr.shape[0]} 枚・{dz:.1f} mm 間隔）")
+        return node
+
+    @staticmethod
+    def _volPts(vol, mask, stride=(1, 1, 1)):
+        idx = np.argwhere(mask) * np.array(stride)
+        m = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(m)
+        A = np.array([[m.GetElement(r, c) for c in range(4)] for r in range(4)])
+        return idx[:, ::-1] @ A[:3, :3].T + A[:3, 3]
+
+    def registerPost(self, status=print):
+        """術後 CT を術前に重ねる（グラフトのまわりの背骨・肋骨で剛体の位置合わせ）。戻り値: 4×4（術後 → 術前）と誤差 mm"""
+        from scipy.spatial import cKDTree
+        post = getattr(self, "post", None)
+        if post is None: raise RuntimeError("先に術後 CT を読み込んでください")
+        pl = self.planInit(); F = self.frames[pl["path"]]
+        def stride(vol):
+            sp = vol.GetSpacing(); return tuple(int(max(1, round(2.0 / x))) for x in (sp[2], sp[1], sp[0]))
+        a0 = slicer.util.arrayFromVolume(self.vol); s0 = stride(self.vol)
+        a1 = slicer.util.arrayFromVolume(post); s1 = stride(post)
+        bo = self._boneRaw()                                                          # 術前は AI の骨ラベルの中だけ（造影された血管・心臓を骨と取り違えない）
+        m0 = a0[::s0[0], ::s0[1], ::s0[2]] > 400
+        if bo is not None: m0 &= bo[::s0[0], ::s0[1], ::s0[2]]
+        B0 = self._volPts(self.vol, m0, s0)
+        B1 = self._volPts(post, a1[::s1[0], ::s1[1], ::s1[2]] > 400, s1)             # 術後は皮質骨くらいの高さ（造影の血管より上）
+        self._regPts = (B0, B1)
+        lo, hi = max(0.0, pl["p"] - 60.0), min(F["length"], pl["d"] + 60.0)
+        C = F["P"][self._k(lo, pl["path"]):self._k(hi, pl["path"]) + 1:4]
+        d0, _ = cKDTree(C).query(B0, distance_upper_bound=90.0); T0 = B0[np.isfinite(d0)]          # グラフトのまわり 9 cm の骨
+        if len(T0) < 500: raise RuntimeError("位置合わせに使う骨が足りません")
+        status(f"位置合わせ: 骨の点 術前 {len(T0)} / 術後 {len(B1)}")
+        # 1) 体軸方向のずれ: 骨の量の縦の分布をずらして合わせる
+        bins = np.arange(-1500, 3000, 5.0)
+        h0 = np.histogram(B0[:, 2], bins)[0].astype(float); h1 = np.histogram(B1[:, 2], bins)[0].astype(float)
+        h0 = (h0 - h0.mean()) / (h0.std() + 1e-9); h1 = (h1 - h1.mean()) / (h1.std() + 1e-9)
+        best = max(range(-140, 141), key=lambda k: float(np.dot(h0, np.roll(h1, k))))
+        dz = best * 5.0
+        zlo, zhi = T0[:, 2].min() - dz, T0[:, 2].max() - dz
+        S1 = B1[(B1[:, 2] > zlo - 40) & (B1[:, 2] < zhi + 40)]
+        t = np.array([np.median(T0[:, 0]) - np.median(S1[:, 0]), np.median(T0[:, 1]) - np.median(S1[:, 1]), dz])
+        Rm = np.eye(3); tree = cKDTree(T0)
+        if len(S1) > 60000: S1 = S1[np.random.default_rng(0).choice(len(S1), 60000, replace=False)]
+        # 2) ICP（近い点どうしを少しずつ合わせる。遠い点は外す）
+        rms = None
+        for it in range(60):
+            X = S1 @ Rm.T + t; d, j = tree.query(X)
+            lim = max(4.0, 25.0 * (0.92 ** it)); ok = d < lim
+            if ok.sum() < 200: break
+            ok &= d <= np.percentile(d[ok], 85)
+            A, Bq = X[ok], T0[j[ok]]; ca, cb = A.mean(0), Bq.mean(0)
+            U, _, Vt = np.linalg.svd((A - ca).T @ (Bq - cb)); D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
+            dR = Vt.T @ D @ U.T; Rm = dR @ Rm; t = dR @ (t - ca) + cb
+            rms = float(np.sqrt(np.mean(d[ok] ** 2)))
+        M = np.eye(4); M[:3, :3] = Rm; M[:3, 3] = t
+        self.postT = M; self.postRms = rms
+        tn = slicer.mrmlScene.GetFirstNodeByName("術後→術前") or slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "術後→術前")
+        vm = vtk.vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4): vm.SetElement(i, j, float(M[i, j]))
+        tn.SetMatrixTransformToParent(vm); post.SetAndObserveTransformNodeID(tn.GetID())
+        status(f"位置合わせ: 骨のずれ {rms:.1f} mm（体軸方向 {dz:.0f} mm 移動）")
+        return M, rms
+
+    @staticmethod
+    def _icp(S, tree, T0, Rm, t, iters=40, lim0=25.0):
+        rms = None
+        for it in range(iters):
+            X = S @ Rm.T + t; d, j = tree.query(X)
+            lim = max(3.0, lim0 * (0.9 ** it)); ok = d < lim
+            if ok.sum() < 150: return Rm, t, None
+            ok &= d <= np.percentile(d[ok], 85)
+            A, Bq = X[ok], T0[j[ok]]; ca, cb = A.mean(0), Bq.mean(0)
+            U, _, Vt = np.linalg.svd((A - ca).T @ (Bq - cb)); D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
+            dR = Vt.T @ D @ U.T; Rm = dR @ Rm; t = dR @ (t - ca) + cb
+            rms = float(np.sqrt(np.mean(d[ok] ** 2)))
+        return Rm, t, rms
+
+    def extractStent(self, thr=450.0, status=print):
+        """術後 CT の金属（ステントの骨組み）を拾い、中心線に沿った範囲を出す。
+        体の曲がり方は術前と術後で少し違うので、中心線に沿って 4 cm ごとに背骨で合わせ直してから拾う（区間ごとの剛体）"""
+        from scipy.spatial import cKDTree
+        post = self.post; M = self.postT; pl = self.planInit(); path = pl["path"]; F = self.frames[path]
+        B0, B1 = self._regPts
+        a1 = slicer.util.arrayFromVolume(post)
+        Y = self._volPts(post, a1 > thr)                                             # 術後の座標の金属・骨の候補
+        Xg = Y @ M[:3, :3].T + M[:3, 3]
+        dg, kg = cKDTree(F["P"]).query(Xg); sg = F["s"][kg]
+        self._ensureArrF(); A = self._rasToIjk; aoD, boD = self._tvMasks(); sh = self.arr.shape
+        t0 = cKDTree(B0); B1g = B1 @ M[:3, :3].T + M[:3, 3]
+        keepX, keepS, segs = [], [], []
+        L_ = F["length"]; c = 0.0
+        while c < L_:
+            lo, hi = c - 20.0, c + 20.0; c += 30.0
+            sel = (sg >= lo) & (sg < hi) & (dg < 45.0)
+            if sel.sum() == 0: continue
+            k0, k1 = self._k(max(lo, 0), path), self._k(min(hi, L_), path); C = F["P"][k0:k1 + 1:4]
+            cT = cKDTree(C); dT, _ = cT.query(B0, distance_upper_bound=80.0); T0 = B0[np.isfinite(dT)]
+            dS, _ = cT.query(B1g, distance_upper_bound=95.0); S = B1[np.isfinite(dS)]
+            if len(T0) < 300 or len(S) < 300: continue
+            if len(S) > 30000: S = S[np.random.default_rng(1).choice(len(S), 30000, replace=False)]
+            Rm, t, rms = self._icp(S, cKDTree(T0), T0, M[:3, :3].copy(), M[:3, 3].copy(), iters=30, lim0=8.0)
+            segs.append((c - 30.0, rms)); self.__dict__.setdefault("_segT", {})[c - 30.0] = (Rm, t)
+            if rms is None or rms > 3.5: continue                                     # この区間は骨が合わない → 使わない
+            X = Y[sel] @ Rm.T + t
+            I = np.round(X @ A[:3, :3].T + A[:3, 3]).astype(int)
+            inb = (I[:, 0] >= 0) & (I[:, 0] < sh[2]) & (I[:, 1] >= 0) & (I[:, 1] < sh[1]) & (I[:, 2] >= 0) & (I[:, 2] < sh[0])
+            X, I = X[inb], I[inb]
+            ok = self.arr[I[:, 2], I[:, 1], I[:, 0]] < 600.0                           # 術前から高い所（骨・石灰化）は除く
+            if aoD is not None: ok &= aoD[I[:, 2], I[:, 1], I[:, 0]]                    # 術前の大動脈（少し広げる）の中だけ
+            if boD is not None: ok &= ~boD[I[:, 2], I[:, 1], I[:, 0]]                   # 骨（少し広げる）は除く
+            X = X[ok]
+            if len(X) == 0: continue
+            d, k = cKDTree(F["P"]).query(X); s = F["s"][k]; m = (s >= c - 45.0) & (s < c - 15.0)    # 区間の真ん中 3 cm だけ使う（重なりなし）
+            keepX.append(X[m]); keepS.append(s[m])
+        self._segRms = segs
+        if not keepX or sum(len(x) for x in keepX) < 30: raise RuntimeError("術後 CT にステントの金属が見つかりませんでした")
+        X = np.concatenate(keepX); s = np.concatenate(keepS)
+        # 中心線に沿って 2 mm ごとに数え、すき間 20 mm 以内でつながる、いちばん点の多い範囲をグラフトとする
+        b = np.floor(s / 2.0).astype(int); cnt = np.bincount(b, minlength=b.max() + 1); occ = np.where(cnt >= 3)[0]
+        runs = []; st = occ[0]; pv = occ[0]
+        for x in occ[1:]:
+            if (x - pv) * 2.0 > 20.0: runs.append((st, pv)); st = x
+            pv = x
+        runs.append((st, pv)); r0, r1 = max(runs, key=lambda r: cnt[r[0]:r[1] + 1].sum())
+        lo, hi = r0 * 2.0, (r1 + 1) * 2.0
+        sel = (s >= lo - 2) & (s <= hi + 2); X, s = X[sel], s[sel]
+        self.actual = dict(lo=float(lo), hi=float(hi), pts=X, s=s, path=path)
+        bad = [f"{a:.0f}" for a, r in segs if r is None or r > 3.5]
+        status(f"術後のグラフト: 中心線 {lo:.0f}〜{hi:.0f} mm（{hi - lo:.0f} mm）・金属 {len(X)} 点" + (f"（骨が合わない区間 {len(bad)} か所は除外）" if bad else ""))
+        self._drawActual(); self._drawGreen()
+        return self.actual
+
+    def _tvMasks(self):
+        if getattr(self, "_tvMask", None) is None or self._tvMask[2] is not self.vol:
+            from scipy import ndimage
+            sp = self.vol.GetSpacing(); it = lambda mm, ax: max(1, int(round(mm / sp[ax])))
+            def dil(m, mm):
+                if m is None: return None
+                st = np.zeros((3, 3, 3), bool); st[1, 1, :] = st[1, :, 1] = st[:, 1, 1] = True
+                out = m
+                for _ in range(max(it(mm, 0), it(mm, 2))): out = ndimage.binary_dilation(out, st)
+                return out
+            ao = self._mask(("aorta",))
+            bo = self._mask(("vertebra", "rib", "sternum", "clavicula", "scapula", "hip", "sacrum", "femur", "humerus", "costal"))
+            self._tvMask = (dil(ao, 3.0), dil(bo, 1.5), self.vol, bo)
+        return self._tvMask[0], self._tvMask[1]
+
+    def _boneRaw(self):
+        self._tvMasks(); return self._tvMask[3]
+
+    def _drawActual(self):
+        ac = getattr(self, "actual", None)
+        if ac is None: return
+        from vtk.util.numpy_support import numpy_to_vtk
+        vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(np.ascontiguousarray(ac["pts"], np.float64), deep=True))
+        pd = vtk.vtkPolyData(); pd.SetPoints(vp)
+        vg = vtk.vtkVertexGlyphFilter(); vg.SetInputData(pd); vg.Update()
+        m = self._model("TEVAR 術後（金属）", vg.GetOutput(), (1.0, 0.72, 0.2), 1.0, spec=0.6)
+        d = m.GetDisplayNode(); d.SetPointSize(4.0)
+        try: d.SetRepresentation(d.PointsRepresentation)
+        except Exception: pass
+        try: d.SetRenderPointsAsSpheres(True)
+        except Exception: pass
+        # 実際の範囲の筒（うすい金色）。計画の白い筒と並べて比べる
+        F = self.frames[ac["path"]]; k0, k1 = self._k(ac["lo"], ac["path"]), self._k(ac["hi"], ac["path"]); ks = np.arange(k0, k1 + 1)
+        from scipy.spatial import cKDTree
+        dd, kk = cKDTree(F["P"][ks]).query(ac["pts"]); R = np.full(len(ks), np.nan)
+        for i in range(0, len(ks), 8):
+            m_ = (kk >= i - 8) & (kk < i + 16)
+            if m_.sum() >= 5: R[i:i + 8] = np.median(dd[m_])
+        ok = np.isfinite(R)
+        if ok.sum() >= 2:
+            R = np.interp(np.arange(len(ks)), np.where(ok)[0], R[ok])
+            self._model("TEVAR 術後（範囲）", self._tubePD(F["P"][ks], F["N"][ks], F["B"][ks], R + 0.6), (1.0, 0.75, 0.3), 0.22, spec=0.1)
+
+    def comparePost(self):
+        """計画と術後の違い（中心線に沿った mm。＋ は遠位＝足側へずれた）"""
+        pl = self.planInit(); ac = getattr(self, "actual", None)
+        if ac is None: return None
+        lo, hi = ac["lo"], ac["hi"]
+        out = dict(dP=lo - pl["p"], dD=hi - pl["d"], planLen=pl["d"] - pl["p"], realLen=hi - lo, rms=getattr(self, "postRms", None),
+                   zres=float(self.post.GetSpacing()[2]) if getattr(self, "post", None) is not None else None,
+                   rows=self.coverage(lo, hi))
+        return out
+
+    def postStraight(self):
+        """術後 CT を、術前の中心線に沿って伸ばした画像（術前と同じ位置で並べて見られる）"""
+        from scipy import ndimage
+        post = self.post; Minv = np.linalg.inv(self.postT)
+        a = slicer.util.arrayFromVolume(post).astype(np.float32)
+        m = vtk.vtkMatrix4x4(); post.GetIJKToRASMatrix(m)
+        A = np.linalg.inv(np.array([[m.GetElement(r, c) for c in range(4)] for r in range(4)])) @ Minv
+        u = np.arange(-HALF, HALF + 1e-6, STEP); nu = len(u); UU, VV = np.meshgrid(u, u)
+        K = len(self.P); out = np.zeros((K, nu, nu), np.int16)
+        for k0 in range(0, K, 64):
+            k1 = min(K, k0 + 64)
+            Q = self.P[k0:k1, None, None, :] + UU[None, :, :, None] * self.B[k0:k1, None, None, :] + VV[None, :, :, None] * self.N[k0:k1, None, None, :]
+            H = Q.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
+            out[k0:k1] = ndimage.map_coordinates(a, [H[:, 2], H[:, 1], H[:, 0]], order=1, mode="nearest").reshape(k1 - k0, nu, nu).astype(np.int16)
+        node = slicer.mrmlScene.GetFirstNodeByName("SA stretched post") or slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "SA stretched post")
+        slicer.util.updateVolumeFromArray(node, out)
+        node.SetSpacing(STEP, STEP, STEP); node.SetOrigin(-HALF, -HALF, 0.0)
+        mm = vtk.vtkMatrix4x4(); mm.Identity(); mm.SetElement(2, 2, -1.0); node.SetIJKToRASDirectionMatrix(mm)
+        node.CreateDefaultDisplayNodes(); dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False); dn.SetWindowLevel(800, 200)
+        return node
+
+    def showPostStretch(self, on):
+        """右のストレッチ像（S2）を術後 CT にする / 戻す"""
+        try:
+            cn = slicer.app.layoutManager().sliceWidget("Orange").mrmlSliceCompositeNode()
+            if on:
+                n = slicer.mrmlScene.GetFirstNodeByName("SA stretched post") or self.postStraight()
+                cn.SetBackgroundVolumeID(n.GetID()); self.orangeRot = getattr(self, "orangeRot", None)
+            else:
+                st = self.straight; cn.SetBackgroundVolumeID(st.GetID() if st is not None else None)
+        except Exception as e: print("post stretch:", e)
 
     # ---------------------------------------------------------------- クロック位置
     def startClock(self, cb):
