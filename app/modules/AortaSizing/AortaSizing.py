@@ -336,6 +336,14 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         pg = qt.QWidget(); pl = qt.QVBoxLayout(pg); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(10)
         sc = qt.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(qt.QFrame.NoFrame); sc.setWidget(pg); sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         sc.setStyleSheet("QScrollArea{background:transparent} QScrollArea > QWidget > QWidget{background:transparent}"); self.stack.addWidget(sc)
+        card, c = self._card(pl, "使い方")
+        c.addWidget(self._lab("① 断面を近位端の位置にして「近位端 ここに」　② 遠位端も同じように　③ 解離なら「真腔に沿わせる」"
+                              "　④ 断面でエントリーをクリックして置く　⑤ 術後 CT があれば「比べる」", "muted"))
+        card, c = self._card(pl, "解離（真腔）", "緑の線 = 断面の真腔")
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.tlBtn = self._btn("真腔に沿わせる", None, "中心線の点から、造影された真腔を断面ごとにたどり（フラップで止まる）、グラフトを真腔の中心に置きます", True); r.addWidget(self.tlBtn, 1)
+        self.tlShowBtn = self._btn("真腔を 3D に", None, "たどった真腔をうすい水色で 3D に出す", True); self.tlShowBtn.checked = True; r.addWidget(self.tlShowBtn)
+        self.tlInfo = self._lab("中心線が真腔を通っていれば、ボタン 1 つで真腔をたどります（数秒）。", "muted"); self.tlInfo.setWordWrap(True); c.addWidget(self.tlInfo)
         card, c = self._card(pl, "仮想グラフト", "置きたい範囲にカバードステントを描く")
         g = qt.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(6); c.addLayout(g)
         for j, t in enumerate(("", "位置", "径（実測 → グラフト）")): g.addWidget(self._lab(t, "colh"), 0, j)
@@ -445,6 +453,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.covTable.connect("cellClicked(int,int)", lambda r, c: L.setPosition(self._covRows[r]["s"]) if r < len(getattr(self, "_covRows", [])) else None)
         self.postLoadBtn.connect("clicked()", self.onPostLoad); self.postCmpBtn.connect("clicked()", self.onPostCompare)
         self.postStretchBtn.connect("toggled(bool)", self.onPostStretch)
+        self.tlBtn.connect("toggled(bool)", self.onTL)
+        self.tlShowBtn.connect("toggled(bool)", lambda on: (lambda m: m and m.GetDisplayNode().SetVisibility(on))(slicer.mrmlScene.GetFirstNodeByName("TEVAR 真腔")))
         self.pngBtn.connect("clicked()", self.onPNG)
         self.secBtn.connect("clicked()", self.onSecPNG)
         self.openBtn.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self._lastDir)))
@@ -475,6 +485,7 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         pl = L.planInit()
         try: self.osBtns[[0.0, 0.05, 0.10, 0.15, 0.20].index(round(pl["os"], 2))].checked = True
         except Exception: pass
+        self.tlBtn.blockSignals(True); self.tlBtn.checked = bool(pl.get("tl")); self.tlBtn.blockSignals(False)
         for sp, key in ((self.dpSpin, "dp"), (self.ddSpin, "dd")):
             sp.blockSignals(True); sp.value = int(pl.get(key) or 0); sp.blockSignals(False)
         self.tvShowBtn.blockSignals(True); self.tvShowBtn.checked = bool(pl.get("on", True)); self.tvShowBtn.blockSignals(False)
@@ -488,7 +499,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         except Exception as e: print("tv:", e); return
         for key, s, D, mD, man in (("p", pl["p"], Dp, mp, ap), ("d", pl["d"], Dd, md, ad)):
             pos, dia = self.tvRows[key]; pos.setText(self._tvRef(s))
-            dia.setText(("—" if mD is None else f"{mD:.1f}") + " → " + ("—" if D is None else f"<b>{D:.0f} mm</b>") + ("（手入力）" if man else ""))
+            tlt = ""
+            if pl.get("tl") and L.tlValid():
+                dq = L.tl["deq"][L._k(s)]; tlt = f"・真腔 {dq:.0f}" if np.isfinite(dq) else ""
+            dia.setText(("—" if mD is None else f"{mD:.1f}") + tlt + " → " + ("—" if D is None else f"<b>{D:.0f} mm</b>") + ("（手入力）" if man else ""))
         if Dp and Dd:
             self.tvSummary.setText(f"長さ {pl['d'] - pl['p']:.0f} mm・径 {Dp:.0f} → {Dd:.0f} mm（{'テーパー' if abs(Dp - Dd) > 0.5 else 'ストレート'}）"
                                    f"・オーバーサイズ {pl['os'] * 100:.0f}%　白い筒 = 計画（断面にも輪郭）")
@@ -510,6 +524,16 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
                     ("d", "plan"): self._tvRef(pl["d"]), ("d", "post"): self._tvRef(ac["hi"]), ("d", "diff"): f"{cmp_['dD']:+.0f} mm",
                     ("len", "plan"): f"{cmp_['planLen']:.0f} mm", ("len", "post"): f"{cmp_['realLen']:.0f} mm", ("len", "diff"): f"{cmp_['realLen'] - cmp_['planLen']:+.0f} mm"}
             for k, v in vals.items(): self.cmpLab[k].setText(v)
+
+    def onTL(self, on):
+        L = self.logic; pl = L.planInit(); pl["tl"] = bool(on)
+        def run():
+            if on and not L.tlValid(): L.extractTL(self._say)
+            L.planDraw()
+        self._busy(run); self._tvRefresh()
+        if on and L.tlValid():
+            d = L.tl["deq"]; self.tlInfo.setText(f"真腔をたどりました。グラフトは真腔の中心に置いています（真腔の径 {np.nanmin(d):.0f}〜{np.nanmax(d):.0f} mm）。断面の緑の線で確認してください。")
+        elif not on: self.tlInfo.setText("大動脈の中心線に沿わせています。")
 
     def onTvHere(self, key):
         self.logic.planSet(**{key: float(self.logic.curS)}); self._tvRefresh()
@@ -1959,6 +1983,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for mm, col, md in ((mO, self.OUTER_COL, "outer"), (mL, self.LUMEN_COL, "lumen")):
             if mm is None or (edit and md == self.mode): continue
             lines.append((W(mm["xy"]), col, True))
+        try:
+            if self.tlValid():
+                xy = self._tlXY(k)
+                if xy is not None:
+                    lines.append((W(xy), (0.3, 1.0, 0.45), True)); d = self.tl["deq"][k]
+                    if np.isfinite(d): labels.append((W(xy[24:25])[0], f"TL {d:.1f}", (0.3, 1.0, 0.45), 14))
+        except Exception as e: print("tl contour:", e)
         if m is not None:
             for key, lab, col in (("maxLine", "dmax", (1.0, 0.35, 0.3)), ("minLine", "dmin", (0.35, 0.65, 1.0))):
                 a, b = m[key]; ab = W(np.array([a, b]))
@@ -2954,7 +2985,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         nm = vtk.vtkPolyDataNormals(); nm.SetInputData(pd); nm.SplittingOff(); nm.ConsistencyOn(); nm.Update()
         return nm.GetOutput()
 
-    def _zStentsPD(self, F, ks, R, pitch=17.0, height=12.0, apices=5):
+    def _zStentsPD(self, F, ks, R, pitch=17.0, height=12.0, apices=5, C=None):
         """Z 型ステント（金属の骨組み）を、グラフトの筒の上に輪で並べる"""
         s = F["s"]; s0, s1 = s[ks[0]], s[ks[-1]]
         app = vtk.vtkAppendPolyData(); c = s0 + 1.0 + height / 2
@@ -2963,7 +2994,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         while c + height / 2 <= s1 - 0.5:
             ss = c + tri * height / 2
             kk = np.clip(np.round(ss / STEP).astype(int), ks[0], ks[-1]); rr = R[kk - ks[0]] * 1.01
-            pts = F["P"][kk] + rr[:, None] * (np.cos(th)[:, None] * F["N"][kk] + np.sin(th)[:, None] * F["B"][kk])
+            pts = (F["P"] if C is None else C)[kk] + rr[:, None] * (np.cos(th)[:, None] * F["N"][kk] + np.sin(th)[:, None] * F["B"][kk])
             vp = vtk.vtkPoints()
             for p in pts: vp.InsertNextPoint(*p)
             pl = vtk.vtkPolyLine(); pl.GetPointIds().SetNumberOfIds(len(pts) + 1)
@@ -2975,7 +3006,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         for k, sgn in ((ks[0], 1), (ks[-1], -1)):                            # 両端の金のマーカー（X 線で見える印）
             kk = int(np.clip(k + sgn * int(1.5 / STEP), ks[0], ks[-1]))
             for a in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
-                p = F["P"][kk] + R[kk - ks[0]] * 1.02 * (np.cos(a) * F["N"][kk] + np.sin(a) * F["B"][kk])
+                p = (F["P"] if C is None else C)[kk] + R[kk - ks[0]] * 1.02 * (np.cos(a) * F["N"][kk] + np.sin(a) * F["B"][kk])
                 sp = vtk.vtkSphereSource(); sp.SetCenter(*p); sp.SetRadius(1.1); sp.SetThetaResolution(12); sp.SetPhiResolution(8); sp.Update()
                 app.AddInputData(sp.GetOutput())
         app.Update(); return app.GetOutput()
@@ -3000,23 +3031,111 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             ok = np.isfinite(loc); R = np.where(ok, np.minimum(R, np.where(ok, loc, R) + 0.5), R)
         from scipy import ndimage
         R = ndimage.gaussian_filter1d(R, 4.0 / STEP, mode="nearest")
-        return F, ks, R
+        C = F["P"]
+        if (getattr(self, "plan", None) or {}).get("tl") and path == self.path and self.tlValid(): C = self.tl["C"]   # 解離: 真腔の中心に沿わせる
+        return F, ks, R, C
 
     def planDraw(self):
         pl = self.planInit()
         if not pl.get("on", True): self.planShow(False); return
         (Dp, _, _), (Dd, _, _) = self.planDiams()
         if not Dp or not Dd: return
-        F, ks, R = self._graftGeom(pl["p"], pl["d"], Dp, Dd, pl["path"])
+        if pl.get("tl") and pl["path"] == self.path and not self.tlValid(): self.extractTL(getattr(self, "onStatus", None) or print)
+        F, ks, R, C = self._graftGeom(pl["p"], pl["d"], Dp, Dd, pl["path"])
         if len(ks) < 4: return
-        self._model("TEVAR 計画（布）", self._tubePD(F["P"][ks], F["N"][ks], F["B"][ks], R), (0.88, 0.93, 1.0), 0.45, slice2D=True, spec=0.15)
-        self._model("TEVAR 計画（ステント）", self._zStentsPD(F, ks, R), (0.78, 0.8, 0.85), 1.0, spec=0.8)
+        self._model("TEVAR 計画（布）", self._tubePD(C[ks], F["N"][ks], F["B"][ks], R), (0.88, 0.93, 1.0), 0.45, slice2D=True, spec=0.15)
+        self._model("TEVAR 計画（ステント）", self._zStentsPD(F, ks, R, C=C), (0.78, 0.8, 0.85), 1.0, spec=0.8)
         self._drawEntries(); self._drawGreen()
 
     def planShow(self, on):
         for nm in ("TEVAR 計画（布）", "TEVAR 計画（ステント）"):
             m = slicer.mrmlScene.GetFirstNodeByName(nm)
             if m is not None and m.GetDisplayNode(): m.GetDisplayNode().SetVisibility(bool(on))
+
+    # ================================================================ 真腔（解離）: 伸ばした画像の各断面で、中心線から造影された内腔をたどる（フラップで止まる）
+    def tlValid(self):
+        tl = getattr(self, "tl", None)
+        return tl is not None and tl.get("path") == self.path and tl.get("K") == len(self.P) and tl.get("vol") is self.straight
+
+    def extractTL(self, status=print):
+        """真腔: 断面ごとに、中心線の点から造影された内腔を広げる。細いすき間（フラップの切れ目・エントリー）は 1 mm の「開き」で切って偽腔へ漏れないようにする"""
+        from scipy import ndimage
+        if self.straight is None: raise RuntimeError("先に中心線を作ってください")
+        a = slicer.util.arrayFromVolume(self.straight); K, nu, _ = a.shape; c0 = nu // 2
+        thr = max(120.0, float(self.thr) - 20.0)
+        rr, cc = np.mgrid[-2:3, -2:3]; disk = (rr ** 2 + cc ** 2) <= 4
+        masks = np.zeros(a.shape, bool); cen = np.full((K, 2), np.nan); area = np.zeros(K)
+        prev = (c0, c0); t0 = time.time(); hist = []
+        for k in range(K):
+            im = a[k]
+            pr, pc = int(prev[0]), int(prev[1])
+            cv = float(np.median(im[c0 - 2:c0 + 3, c0 - 2:c0 + 3]))
+            if cv < thr: cv = float(np.median(im[max(pr - 2, 0):pr + 3, max(pc - 2, 0):pc + 3]))
+            if cv < thr: continue
+            comp = None
+            for f in (0.7, 0.8, 0.88):                                       # 真腔の明るさの 7 割で区切る（フラップの部分容積で漏れない）。急に広がったら上げる
+                m = im > max(thr, f * cv)
+                lab, n = ndimage.label(ndimage.binary_opening(m, structure=disk))
+                if n == 0: break
+                l = lab[c0, c0] or lab[pr, pc]
+                if not l:
+                    idx = np.argwhere(lab > 0); d = ((idx - (c0, c0)) ** 2).sum(1); j = int(np.argmin(d))
+                    if d[j] > (10.0 / STEP) ** 2: break
+                    l = lab[tuple(idx[j])]
+                comp = ndimage.binary_fill_holes(ndimage.binary_dilation(lab == l, structure=disk) & m)
+                ref = np.median(hist[-40:]) if len(hist) >= 10 else None
+                if ref is None or comp.sum() < 1.8 * ref: break
+            if comp is None or not comp.any(): continue
+            masks[k] = comp; r_, c_ = np.nonzero(comp); cen[k] = (r_.mean(), c_.mean()); area[k] = comp.sum() * STEP * STEP; prev = cen[k]; hist.append(comp.sum())
+            if k % 200 == 0: status(f"真腔をたどっています… {100 * k // K}%")
+        ok = np.isfinite(cen[:, 0])
+        if ok.sum() < 10: raise RuntimeError("真腔が見つかりませんでした（中心線が真腔を通っているか確認）")
+        for j in range(2): cen[:, j] = ndimage.gaussian_filter1d(np.interp(np.arange(K), np.where(ok)[0], cen[ok, j]), 3.0 / STEP)
+        u = cen[:, 1] * STEP - HALF; v = cen[:, 0] * STEP - HALF
+        C = self.P + u[:, None] * self.B + v[:, None] * self.N
+        deq = np.sqrt(4 * area / np.pi); deq[~ok] = np.nan
+        self.tl = dict(path=self.path, K=K, vol=self.straight, masks=masks, cen2=cen, C=C, deq=deq)
+        status(f"真腔をたどりました（{time.time() - t0:.0f} 秒）。緑の線 = 断面の真腔")
+        self._drawTL(); self._showContour(exact=False)
+        return self.tl
+
+    def _tlXY(self, k):
+        """断面 k の真腔の輪郭（中心からの放射でふち）。(u, v) mm"""
+        tl = self.tl; m = tl["masks"][k]
+        if not m.any(): return None
+        r0, c0 = tl["cen2"][k] if np.isfinite(tl["cen2"][k][0]) else np.argwhere(m).mean(0)
+        if not (0 <= int(r0) < m.shape[0] and 0 <= int(c0) < m.shape[1]) or not m[int(r0), int(c0)]:
+            r0, c0 = np.argwhere(m).mean(0)
+        th = np.linspace(0, 2 * np.pi, 96, endpoint=False); out = []
+        for t in th:
+            dr, dc = math.sin(t), math.cos(t); s_ = 0.0
+            while True:
+                r, c = int(round(r0 + dr * (s_ + 0.5))), int(round(c0 + dc * (s_ + 0.5)))
+                if not (0 <= r < m.shape[0] and 0 <= c < m.shape[1]) or not m[r, c]: break
+                s_ += 0.5
+            out.append(((c0 + dc * s_) * STEP - HALF, (r0 + dr * s_) * STEP - HALF))
+        return np.array(out)
+
+    def _drawTL(self):
+        """真腔の 3D（うすい水色）"""
+        tl = getattr(self, "tl", None)
+        if tl is None: return
+        from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+        from scipy import ndimage
+        m = ndimage.binary_closing(tl["masks"], iterations=1).astype(np.uint8)
+        img = vtk.vtkImageData(); K, nu, _ = m.shape; img.SetDimensions(nu, nu, K)
+        img.GetPointData().SetScalars(numpy_to_vtk(m.ravel(), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR))
+        fe = vtk.vtkDiscreteFlyingEdges3D(); fe.SetInputData(img); fe.SetValue(0, 1); fe.Update()
+        sm = vtk.vtkWindowedSincPolyDataFilter(); sm.SetInputConnection(fe.GetOutputPort()); sm.SetNumberOfIterations(25); sm.SetPassBand(0.05); sm.NormalizeCoordinatesOn(); sm.Update()
+        pd = sm.GetOutput()
+        if pd.GetNumberOfPoints() == 0: return
+        X = vtk_to_numpy(pd.GetPoints().GetData()).astype(float)          # (列, 行, k) → 3D
+        kf = np.clip(X[:, 2], 0, K - 1); k0 = np.floor(kf).astype(int); k1 = np.minimum(k0 + 1, K - 1); f = (kf - k0)[:, None]
+        lerp = lambda A: A[k0] * (1 - f) + A[k1] * f
+        Q = lerp(self.P) + (X[:, 0] * STEP - HALF)[:, None] * lerp(self.B) + (X[:, 1] * STEP - HALF)[:, None] * lerp(self.N)
+        pd.GetPoints().SetData(numpy_to_vtk(np.ascontiguousarray(Q), deep=True))
+        nm = vtk.vtkPolyDataNormals(); nm.SetInputData(pd); nm.SplittingOff(); nm.ConsistencyOn(); nm.AutoOrientNormalsOn(); nm.Update()
+        self._model("TEVAR 真腔", nm.GetOutput(), (0.35, 0.75, 1.0), 0.35, spec=0.2)
 
     # ---- エントリー（断面をクリックして置く）
     def addEntry(self, ras):
