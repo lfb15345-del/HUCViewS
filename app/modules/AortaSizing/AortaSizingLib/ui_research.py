@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""大動脈サイジング: 6 研究（隠しタブ）。Ctrl+Shift+R で出す / 隠す（設定に覚える）。
+"""大動脈サイジング: 6 研究（解析用のタブ。ふだんから出ている。Ctrl+Shift+R で隠す / 出す・設定に覚える）。
 ふだんの画面を使いやすいままにするため、解析用の機能はここにまとめる。AortaSizingWidget の一部（ResearchUIMixin）。"""
 from .common import *
 
@@ -36,7 +36,7 @@ class ResearchUIMixin:
         card, c = self._card(pl, "解析用の CSV")
         for b in (getattr(self, "helixCsvBtn", None), getattr(self, "sineCsvBtn", None)):
             if b is not None: c.addWidget(b)
-        c.addWidget(self._lab("この「6 研究」は Ctrl+Shift+R で出す / 隠す。解析用の数値で、診療の判断には使いません。", "muted"))
+        c.addWidget(self._lab("このタブは解析用の数値で、診療の判断には使いません。使わない PC では Ctrl+Shift+R で隠せます（もう一度押すと出る）。", "muted"))
         pl.addStretch(1)
         self.plqBtn.connect("clicked()", self.onPlaque); self.plqShow.connect("toggled(bool)", lambda on: self.logic.drawPlaque(on))
         self.plqCsvBtn.connect("clicked()", self.onPlaqueCsv); self.plqMaskBtn.connect("clicked()", self.onPlaqueMask)
@@ -48,7 +48,8 @@ class ResearchUIMixin:
         except Exception: pass
         self._resShortcut = qt.QShortcut(qt.QKeySequence("Ctrl+Shift+R"), mw); self._resShortcut.setObjectName("hucvsResearchShortcut")
         self._resShortcut.setContext(qt.Qt.ApplicationShortcut); self._resShortcut.connect("activated()", self._toggleResearch)
-        on = str(qt.QSettings().value(self.RESEARCH_KEY) or "").lower() in ("true", "1")
+        v = qt.QSettings().value(self.RESEARCH_KEY)                              # ふだんから出しておく（Ctrl+Shift+R で隠せる）
+        on = True if v is None or str(v) == "" else str(v).lower() in ("true", "1")
         self._setResearch(on, save=False)
 
     def _setResearch(self, on, save=True):
