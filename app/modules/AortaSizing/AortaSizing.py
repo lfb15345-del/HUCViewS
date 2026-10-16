@@ -397,6 +397,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.tvGoP = self._btn("近位端へ"); r.addWidget(self.tvGoP)
         self.tvGoD = self._btn("遠位端へ"); r.addWidget(self.tvGoD)
         r = qt.QHBoxLayout(); c.addLayout(r)
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.planEditBtn = self._btn("断面でシミュレーションを直す", None, "白い輪の中をドラッグ = ずらす、輪のふちをドラッグ = 太さ。前後 2 cm がなめらかについてくる。Ctrl+Z で 1 つ戻す", True); r.addWidget(self.planEditBtn, 1)
+        self.planAdjReset = self._btn("直しを消す", None, "手で直した分をすべて消して、計算どおりに戻す"); r.addWidget(self.planAdjReset)
+        r = qt.QHBoxLayout(); c.addLayout(r)
         self.ovAorta = self._btn("大動脈を重ねる", None, "3D に大動脈（外周）をうすく重ねる", True); self.ovAorta.checked = True; r.addWidget(self.ovAorta)
         self.ovPost = self._btn("術後を重ねる", None, "術後 CT の実際のグラフト（金色）を 3D に重ねる", True); r.addWidget(self.ovPost)
         self.fit3d = self._btn("3D を合わせる", None, "3D をグラフトの範囲に合わせる（左前斜位。押すたびに 左前斜位 → 正面 → 左側面）"); r.addWidget(self.fit3d)
@@ -443,6 +447,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         c.addWidget(self.expLab)
         self.expCsvBtn = self._btn("広がりの表を CSV に保存", None, "断面 2 mm ごとの 実際の長径・短径・面積・周径 と 術前の真腔 と その比（ドキュメント\\HeartView症例）"); c.addWidget(self.expCsvBtn)
         self.sameRangeBtn = self._btn("実際と同じ範囲で描いて比べる", None, "仮想グラフトを、術後の実際のグラフトと同じ範囲に置き直して、形（太さ・位置）だけを比べる。もう一度押すと元の計画に戻る", True); c.addWidget(self.sameRangeBtn)
+        r = qt.QHBoxLayout(); c.addLayout(r)
+        self.alignBtn = self._btn("重ね合わせを手で直す", "primary", "断面: 金色の点（実際の金属）をドラッグ → その高さの前後 3 cm をずらす。ストレッチ像: 上下にドラッグ → 頭尾方向。Ctrl+Z で 1 つ戻す", True); r.addWidget(self.alignBtn, 1)
+        self.alignReset = self._btn("手直しを消す", None, "手で直した分をすべて消して、自動の重ね合わせに戻す"); r.addWidget(self.alignReset)
+        c.addWidget(self._lab("断面で金色の点を内腔の壁などに合わせてドラッグ、ストレッチ像で上下にドラッグすると頭尾方向。離すと金属を拾い直し、表も更新します。", "muted"))
         self.postStretchBtn = self._btn("右のストレッチ像を術後にする", None, "右のストレッチ像（S2）を術後 CT にして、左と同じ向きで並べる", True); c.addWidget(self.postStretchBtn)
         c.addWidget(self._lab("ずれ: ＋ = 計画より遠位（足側）、− = 近位（頭側）。中心線に沿った長さ。術後 CT のスライス間隔の半分ほどの誤差があります。"
                               "径・中心のずれ = 計画と術後が重なる範囲での比較（術後は金属の輪に円を当てはめた値）。断面: 白 = 計画、金色 = 術後、緑 = 術前の真腔。", "muted"))
@@ -519,6 +527,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.postStretchBtn.connect("toggled(bool)", self.onPostStretch)
         self.sameRangeBtn.connect("toggled(bool)", self.onSameRange)
         self.expCsvBtn.connect("clicked()", self.onExpCsv)
+        self.alignBtn.connect("toggled(bool)", self.onAlignMode); self.alignReset.connect("clicked()", self.onAlignReset)
+        self.planEditBtn.connect("toggled(bool)", self.onPlanEdit); self.planAdjReset.connect("clicked()", self.onPlanAdjReset)
         self.tlBtn.connect("toggled(bool)", self.onTL)
         self.tlShowBtn.connect("toggled(bool)", lambda on: (lambda m: m and m.GetDisplayNode().SetVisibility(on))(slicer.mrmlScene.GetFirstNodeByName("TEVAR 真腔")))
         self.pngBtn.connect("clicked()", self.onPNG)
@@ -774,6 +784,35 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         fn = L.saveExpansionCSV()
         if fn: self._done(os.path.dirname(fn), "広がりの表")
         else: self._say("先に「比べる」を押してください。")
+
+    def onAlignMode(self, on):
+        L = self.logic
+        if on and getattr(L, "actual", None) is None:
+            self.alignBtn.blockSignals(True); self.alignBtn.checked = False; self.alignBtn.blockSignals(False); self._say("先に「比べる」を押してください"); return
+        L.alignMode = bool(on)
+        if on:
+            L.planEditMode = False; self.planEditBtn.blockSignals(True); self.planEditBtn.checked = False; self.planEditBtn.blockSignals(False)
+            L.showOverlay3D("post", True); self._say("断面で金色の点をドラッグ（その高さの前後 3 cm）、ストレッチ像で上下にドラッグ（頭尾方向）。Ctrl+Z で戻す。")
+
+    def _afterAlign(self):
+        L = self.logic
+        def run():
+            L._restent(self._say)
+            if self.postStretchBtn.checked: L.postStraight()
+        self._busy(run); self._tvRefresh(); self._expRefresh(); L._showContour(exact=False)
+        n = len(getattr(L, "postManual", []) or []); self._say(f"重ね合わせを手で直しました（{n} か所）。Ctrl+Z で戻す・「手直しを消す」で自動に戻る。")
+
+    def onAlignReset(self):
+        self.logic.postManual = []; self._afterAlign()
+
+    def onPlanEdit(self, on):
+        L = self.logic; L.planEditMode = bool(on)
+        if on:
+            L.alignMode = False; self.alignBtn.blockSignals(True); self.alignBtn.checked = False; self.alignBtn.blockSignals(False)
+            self._say("断面の白い輪: 中をドラッグ = ずらす、ふちをドラッグ = 太さ（前後 2 cm がなめらかに）。Ctrl+Z で戻す。")
+
+    def onPlanAdjReset(self):
+        L = self.logic; L.planInit()["adj"] = []; self._busy(L.planDraw); self._tvRefresh(); self._say("シミュレーションの手直しを消しました。")
 
     def onSameRange(self, on):
         L = self.logic; ac = getattr(L, "actual", None); pl = L.planInit()
@@ -1039,6 +1078,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._say(self.logic.undoLast())
 
     def onKey(self, cmd):
+        if cmd == "align": self._afterAlign(); return
+        if cmd == "planadj":
+            L = self.logic; self._busy(L.planDraw); self._tvRefresh(); L._showContour(exact=False)
+            self._say(f"シミュレーションを直しました（{len(L.plan.get('adj', []))} か所）。Ctrl+Z で戻す・「直しを消す」で元どおり。"); return
+        if cmd == "adjundo":
+            L = self.logic
+            if getattr(L, "alignMode", False) and getattr(L, "postManual", None): L.postManual.pop(); self._afterAlign()
+            elif getattr(L, "planEditMode", False) and L.planInit().get("adj"): L.plan["adj"].pop(); self._busy(L.planDraw); self._tvRefresh(); L._showContour(exact=False); self._say("1 つ戻しました。")
+            return
         if cmd == "tvplan":
             self.tvRange.blockSignals(True); self.tvRange.checked = False; self.tvRange.blockSignals(False)
             self._busy(self.logic.planDraw); self._tvRefresh(); pl = self.logic.plan
@@ -2239,6 +2287,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             if gr is not None and gr["path"] == self.path and gr["ks"][0] <= k <= gr["ks"][-1] and (getattr(self, "plan", None) or {}).get("on", True):
                 i = k - gr["ks"][0]; Rt = gr["Rth"][i]; th = np.linspace(0, 2 * np.pi, len(Rt), endpoint=False)
                 xy = np.c_[gr["cu"][i] + Rt * np.cos(th), gr["cv"][i] + Rt * np.sin(th)]
+                pd_ = getattr(self, "_pdDrag", None)
+                if pd_ is not None:                                                    # シミュレーションをドラッグ中
+                    cc_ = np.array([gr["cu"][i], gr["cv"][i]])
+                    xy = xy + pd_["d"] if pd_["kind"] == "move" else cc_ + (xy - cc_) * pd_["sc"]
                 a_ = 0.5 * abs(np.dot(xy[:, 0], np.roll(xy[:, 1], -1)) - np.dot(xy[:, 1], np.roll(xy[:, 0], -1)))
                 lines.append((W(xy), (0.95, 0.97, 1.0), True))
                 labels.append((W(xy[27:28])[0], f"Plan {2 * math.sqrt(a_ / math.pi):.0f} ({2 * gr['Rn'][i]:.0f})", (0.95, 0.97, 1.0), 14))
@@ -2265,7 +2317,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 xy = np.c_[cc_ @ B + ac["R"][i] * np.cos(th), cc_ @ N + ac["R"][i] * np.sin(th)]
                 lines.append((W(xy), (1.0, 0.72, 0.2), True)); labels.append((W(xy[54:55])[0], f"Post {2 * ac['R'][i]:.0f}", (1.0, 0.72, 0.2), 14))
             if ac is not None and ac.get("path") == self.path:                          # 実際の金属（この断面の前後 2.5 mm）を金色の点で
-                Tk = np.cross(B, N); dX = ac["pts"] - P; mm_ = np.abs(dX @ Tk) <= 2.5
+                Tk = np.cross(B, N); dX = ac["pts"] + self._liveAlign() - P; mm_ = np.abs(dX @ Tk) <= 2.5
                 if mm_.any():
                     q = dX[mm_]; uu, vv = q @ B, q @ N
                     if len(uu) > 400: j_ = np.random.default_rng(0).choice(len(uu), 400, replace=False); uu, vv = uu[j_], vv[j_]
@@ -2516,6 +2568,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 add(E.MouseWheelForwardEvent, lambda c, e: self._wheelRed(c, -1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelRed(c, +1))
                 add(E.KeyPressEvent, lambda c, e: self._keyRed(c))
                 add(E.LeftButtonPressEvent, lambda c, e: self._clickRed(c))
+                add(E.MouseMoveEvent, lambda c, e: self._moveRed(c)); add(E.LeftButtonReleaseEvent, lambda c, e: self._releaseRed(c))
             elif nm in ("Green", "Orange"):
                 add(E.MouseWheelForwardEvent, lambda c, e: self._wheelGreen(c, +1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelGreen(c, -1))
                 add(E.LeftButtonPressEvent, lambda c, e, nm=nm: self._pressGreen(c, nm)); add(E.MouseMoveEvent, lambda c, e, nm=nm: self._moveGreen(c, nm))
@@ -2575,6 +2628,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _keyAny(self, it):
         key = it.GetKeySym() or ""; ctrl = bool(it.GetControlKey())
+        if ctrl and key in ("z", "Z") and (getattr(self, "alignMode", False) or getattr(self, "planEditMode", False)):
+            cb = getattr(self, "onKey", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb("adjundo"))
+            self._abort(it); return
         cmd = None
         if getattr(self, "fixMode", False) and key in ("Return", "KP_Enter", "BackSpace", "Delete", "Escape"):
             cmd = {"Return": "fixapply", "KP_Enter": "fixapply", "BackSpace": "undo", "Delete": "undo", "Escape": "fixexit"}[key]
@@ -2597,7 +2654,52 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if d is not None and self.P is not None:
             self._queue(s=float(np.clip(self.curS + d, 0, self.length))); self._abort(it)
 
+    def _uvRed(self, it):
+        k = self._k(); r = self._rasAt(it, "Red") - self.P[k]; return k, np.array([r @ self.B[k], r @ self.N[k]])
+
+    def _moveRed(self, it):
+        d = getattr(self, "_alDrag", None)
+        if d is not None and d[0] == "xy":
+            k, uv = self._uvRed(it); dd = (uv - d[1])[0] * self.B[k] + (uv - d[1])[1] * self.N[k]
+            self._alDrag = (d[0], d[1], dd, d[3]); self._showContour(exact=False); self._abort(it); return
+        p = getattr(self, "_pdDrag", None)
+        if p is not None:
+            k, uv = self._uvRed(it)
+            if p["kind"] == "move": p["d"] = uv - p["uv0"]
+            else: p["sc"] = float(np.clip(np.linalg.norm(uv - p["c"]) / max(p["r0"], 1.0), 0.5, 1.5))
+            st = getattr(self, "onStatus", None)
+            msg = f"シミュレーション: ずらす {np.linalg.norm(p['d']):.1f} mm" if p["kind"] == "move" else f"シミュレーション: 太さ {(p['sc'] - 1) * 100:+.0f}%"
+            if st: st(msg + f"（離すと前後 {self.ADJ_SOFT:.0f} mm がなめらかについてきます）")
+            self._showContour(exact=False); self._abort(it)
+
+    def _releaseRed(self, it):
+        cb = getattr(self, "onKey", None)
+        d = getattr(self, "_alDrag", None)
+        if d is not None and d[0] == "xy":
+            self._alDrag = None; self._abort(it)
+            if np.linalg.norm(d[2]) > 0.2:
+                self.__dict__.setdefault("postManual", []).append((d[3], -np.asarray(d[2])))
+                if cb: qt.QTimer.singleShot(0, lambda: cb("align"))
+            return
+        p = getattr(self, "_pdDrag", None)
+        if p is not None:
+            self._pdDrag = None; self._abort(it); pl = self.plan
+            if (p["kind"] == "move" and np.linalg.norm(p["d"]) > 0.2) or (p["kind"] == "size" and abs(p["sc"] - 1) > 0.01):
+                du, dv = (p["d"] if p["kind"] == "move" else (0.0, 0.0)); sc = p["sc"] if p["kind"] == "size" else 1.0
+                pl.setdefault("adj", []).append((p["s0"], float(du), float(dv), float(sc)))
+                if cb: qt.QTimer.singleShot(0, lambda: cb("planadj"))
+
     def _clickRed(self, it):
+        if getattr(self, "alignMode", False) and getattr(self, "actual", None) is not None and self.P is not None:   # 術後の重ね合わせを手で直す
+            k, uv = self._uvRed(it); self._alDrag = ("xy", uv, np.zeros(3), float(self.s[k])); self._abort(it); return
+        gr = getattr(self, "_graftRad", None)
+        if getattr(self, "planEditMode", False) and gr is not None and gr["path"] == self.path and self.P is not None:   # シミュレーションを手で直す
+            k, uv = self._uvRed(it)
+            if gr["ks"][0] <= k <= gr["ks"][-1]:
+                i = k - gr["ks"][0]; c = np.array([gr["cu"][i], gr["cv"][i]]); dvec = uv - c; r = float(np.linalg.norm(dvec))
+                Rt = float(_radAt(gr["Rth"], np.array([i]), np.array([math.atan2(dvec[1], dvec[0])]))[0])
+                if abs(r - Rt) <= 2.5: self._pdDrag = dict(kind="size", c=c, r0=r, sc=1.0, d=np.zeros(2), s0=float(self.s[k])); self._abort(it); return
+                if r < Rt: self._pdDrag = dict(kind="move", uv0=uv, d=np.zeros(2), sc=1.0, c=c, r0=r, s0=float(self.s[k])); self._abort(it); return
         if getattr(self, "_entryCb", None) is not None and self.P is not None:      # TEVAR: エントリーを断面のクリックで置く
             x, y = it.GetEventPosition(); sn = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
             M = sn.GetXYToRAS(); ras = np.array([sum(M.GetElement(r, c) * v for c, v in enumerate((x, y, 0, 1))) for r in range(3)])
@@ -2632,6 +2734,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _pressGreen(self, it, nm="Green"):
         if self.P is None or self._placing() or self._editing: return
+        if getattr(self, "alignMode", False) and getattr(self, "actual", None) is not None:     # 術後を頭尾方向にずらす
+            sC = self._sGreen(it, nm); ac = self.actual; self._alDrag = ("s", sC, 0.0, sC, ac["lo"], ac["hi"]); self._abort(it); return
         if it.GetControlKey() or getattr(self, "fixMode", False):         # Ctrl+クリック（合わせるモードではクリック）: その高さの中心線を、クリックした所へ動かす
             q = self._rasAt(it, nm); s = float(np.clip(-q[2], 0, self.length)); k = self._k(s)
             p = self.P[k] + q[0] * self.B[k] + q[1] * self.N[k]
@@ -2648,6 +2752,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._drag = True; self._queue(s=self._sGreen(it, nm)); self._abort(it)
 
     def _moveGreen(self, it, nm="Green"):
+        d = getattr(self, "_alDrag", None)
+        if d is not None and d[0] == "s":
+            ds = self._sGreen(it, nm) - d[1]; self._alDrag = (d[0], d[1], ds, d[3], d[4], d[5])
+            self.actual["lo"], self.actual["hi"] = d[4] + ds, d[5] + ds; self._drawGreen()
+            st = getattr(self, "onStatus", None)
+            if st: st(f"術後を頭尾方向に {ds:+.1f} mm（＋ = 足側）。離すと金属を拾い直します。")
+            self._abort(it); return
         td = getattr(self, "_tvDrag", None)
         if td is not None:
             sC = self._sGreen(it, nm); pl = self.plan
@@ -2927,6 +3038,14 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self._hoverS = None; self._drawGreen()
 
     def _releaseGreen(self, it):
+        d = getattr(self, "_alDrag", None)
+        if d is not None and d[0] == "s":
+            self._alDrag = None; self.actual["lo"], self.actual["hi"] = d[4], d[5]; self._abort(it)
+            if abs(d[2]) > 0.2:
+                k = self._k(d[3]); self.__dict__.setdefault("postManual", []).append((d[3], -d[2] * self.T[k]))
+                cb = getattr(self, "onKey", None)
+                if cb: qt.QTimer.singleShot(0, lambda: cb("align"))
+            return
         if getattr(self, "_tvDrag", None) is not None:
             self._tvDrag = None; self.rangeMode = False; pl = self.plan
             if pl["d"] < pl["p"] + 10.0: pl["d"] = min(pl["p"] + 10.0, self.length - 1.0)
@@ -3491,6 +3610,10 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                         cu = sm(np.interp(x, idx, [r[0] for _, r in res]), 5.0); cv = sm(np.interp(x, idx, [r[1] for _, r in res]), 5.0)
                     Rs = np.array([r[2] for _, r in res]); Rth = np.stack([np.interp(x, idx, Rs[:, j]) for j in range(Rs.shape[1])], 1)
                     Rth = ndimage.gaussian_filter1d(sm(Rth, 1.5), 1.0, axis=1, mode="wrap"); Rth = np.minimum(Rth, Rn[:, None])
+                    for s0, du, dv, sc in pl.get("adj", []) or []:                    # 手で直した分（断面でドラッグ）
+                        wgt = self._adjW(F["s"][ks], s0, self.ADJ_SOFT); cu = cu + wgt * du; cv = cv + wgt * dv
+                        Rth = Rth * (1.0 + wgt * (sc - 1.0))[:, None]
+                    Rth = np.minimum(Rth, Rn[:, None])
                     lim = np.stack([self._rayLimit(int(ks[i]), path, cu[i], cv[i]) for i in idx])          # なめらかにした後も、壁は越えない
                     Rth = np.minimum(Rth, np.stack([np.interp(x, idx, lim[:, j]) for j in range(lim.shape[1])], 1))
                     C[ks] = F["P"][ks] + cu[:, None] * F["B"][ks] + cv[:, None] * F["N"][ks]
@@ -4048,12 +4171,26 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         except Exception as e: print("compare geom:", e)
         return out
 
+    ALIGN_SOFT = 30.0        # 重ね合わせを手で直した時、前後どのくらい（mm）がなめらかについてくるか
+    ADJ_SOFT = 20.0          # シミュレーションを手で直した時の、同じ長さ
+
+    @staticmethod
+    def _adjW(x, s0, W):
+        d = np.abs(np.asarray(x, float) - s0); return np.where(d < W, 0.5 + 0.5 * np.cos(np.pi * np.minimum(d / W, 1.0)), 0.0)
+
     def _postShiftAt(self, ks):
-        """断面 ks での、大動脈の外形で合わせ直したずれ（術前の座標で 3D のベクトル、mm）。無ければ 0"""
+        """断面 ks での、術後 CT のずれ（術前の座標で 3D のベクトル、mm）= 大動脈の外形で合わせ直した分 ＋ 手で直した分"""
+        ks = np.asarray(ks); x = self.s[ks]; out = np.zeros((len(ks), 3))
         ps = getattr(self, "postShift", None)
-        if ps is None or ps.get("path") != self.path: return np.zeros((len(ks), 3))
-        x = self.s[np.asarray(ks)]
-        return np.stack([np.interp(x, ps["s"], ps["t"][:, j]) for j in range(3)], 1)
+        if ps is not None and ps.get("path") == self.path:
+            out += np.stack([np.interp(x, ps["s"], ps["t"][:, j]) for j in range(3)], 1)
+        for s0, vec in getattr(self, "postManual", None) or []:
+            out += self._adjW(x, s0, self.ALIGN_SOFT)[:, None] * np.asarray(vec)[None, :]
+        return out
+
+    def _liveAlign(self):
+        d = getattr(self, "_alDrag", None)
+        return d[2] if d is not None and d[0] == "xy" else np.zeros(3)
 
     def refinePost(self, status=print, lo=None, hi=None, seg=15.0, half=20.0):
         """背骨で合わせた術後 CT を、中心線に沿った区間ごとに大動脈の外形でもう一度合わせる（3D の平行移動、区間どうしはなめらかに）。
