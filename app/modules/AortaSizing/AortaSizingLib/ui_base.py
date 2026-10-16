@@ -99,7 +99,7 @@ class WidgetBaseMixin:
         except Exception: _err("exit")
 
     def showStep(self, i):
-        i = max(0, min(4, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
+        i = max(0, min(5 if getattr(self, "_research", False) else 4, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
         tv = i in (2, 3)                                                      # 計画・術後（TEVAR）
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
         if i == 1: self.refreshLists()

@@ -29,7 +29,7 @@ class WidgetBuildMixin:
         h.addWidget(self._lab("研究・教育用", "muted"))
 
         # ステップ
-        sb = qt.QHBoxLayout(); sb.setSpacing(0); v.addLayout(sb); self.stepGrp = qt.QButtonGroup(root); self.stepBtns = []
+        sb = qt.QHBoxLayout(); sb.setSpacing(0); v.addLayout(sb); self.stepGrp = qt.QButtonGroup(root); self.stepBtns = []; self._stepBar = sb
         for i, txt in enumerate(("1 中心線", "2 計測", "3 計画", "4 術後", "5 出力")):
             b = self._btn(txt, "step", checkable=True); self.stepGrp.addButton(b, i); sb.addWidget(b); self.stepBtns.append(b)
             b.connect("clicked()", lambda i=i: self.showStep(i))
@@ -399,4 +399,5 @@ class WidgetBuildMixin:
         self._step = 0; self._lastDir = ""
         inter = slicer.app.applicationLogic().GetInteractionNode()
         self._interTag = inter.AddObserver(inter.InteractionModeChangedEvent, lambda c, e: self._syncTools())
+        self._buildResearch()                                              # 6 研究（隠しタブ）
         self.showStep(0); self.onTemplate(); self._syncPathButtons()
