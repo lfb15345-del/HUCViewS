@@ -32,6 +32,18 @@ LAYOUT_XML = """
  </item>
 </layout>
 """
+FIX_LAYOUT_ID = 5604                 # 中心線を合わせる時の画面: 大きな軸位 ＋ 3D ＋ ストレッチ像
+FIX_LAYOUT_XML = """
+<layout type="horizontal" split="true">
+ <item splitSize="700"><view class="vtkMRMLSliceNode" singletontag="Yellow"><property name="orientation" action="default">Axial</property><property name="viewlabel" action="default">A</property><property name="viewcolor" action="default">#EDD54C</property></view></item>
+ <item splitSize="300">
+  <layout type="vertical" split="true">
+   <item splitSize="500"><view class="vtkMRMLViewNode" singletontag="1"><property name="viewlabel" action="default">1</property></view></item>
+   <item splitSize="500"><view class="vtkMRMLSliceNode" singletontag="Green"><property name="orientation" action="default">Coronal</property><property name="viewlabel" action="default">S</property><property name="viewcolor" action="default">#6EB04B</property></view></item>
+  </layout>
+ </item>
+</layout>
+"""
 LUMEN_KEYS = ("aorta", "iliac artery")
 PATH_COLORS = {"大動脈→右腸骨": (1.0, 0.6, 0.2), "大動脈→左腸骨": (0.3, 0.85, 1.0), "大動脈": (1.0, 0.85, 0.2)}
 PATH_EN = {"大動脈→右腸骨": "Aorta-R iliac", "大動脈→左腸骨": "Aorta-L iliac", "大動脈": "Aorta"}
@@ -252,10 +264,15 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.autoButton = self._btn("自動で中心線を作る（1 分ほど）", "primary"); c.addWidget(self.autoButton)
         c.addWidget(self._lab("経路", "muted"))
         self.pathGrp, (self.rightBtn, self.leftBtn, self.aortaBtn) = self._seg(["右（橙）", "左（水色）", "大動脈のみ"], c)
-        self.fixButton = self._btn("中心線を合わせる（画像をクリック）", "primary", "オンの間、軸位（A）・断面（X）・ストレッチ像をクリックすると、そこへ中心線を動かします", True); c.addWidget(self.fixButton)
-        self.fixHint = self._lab("オンの間: 軸位（A）で真腔の中心をクリック、または赤い点をつかんで中心へドラッグ。"
-                                 "断面（X）・ストレッチ像のクリックでも動きます。水色の点 = この高さを通るほかの中心線。Ctrl+Z で戻す。", "muted")
+        self.fixButton = self._btn("中心線を合わせる（大きな軸位でクリック）", "primary", "大きな軸位の画面で、真腔の中心を上から順にクリックしていくだけ。最後に Enter で反映", True); c.addWidget(self.fixButton)
+        self.fixHint = self._lab("真腔の中心をクリックすると黄色い点が置かれ、自動で 1 cm 先の高さへ進みます（計算はまだしません）。"
+                                 "ずれている所だけクリックすれば OK。ホイールで上下、Enter で反映、Backspace で 1 つ戻す、Esc で終わる（残った点は反映）。", "muted")
         self.fixHint.setWordWrap(True); self.fixHint.hide(); c.addWidget(self.fixHint)
+        self.fixRow = qt.QWidget(); fr = qt.QHBoxLayout(self.fixRow); fr.setContentsMargins(0, 0, 0, 0); c.addWidget(self.fixRow)
+        fr.addWidget(self._lab("進む幅", "muted")); self.fixStepGrp, self.fixStepBtns = self._seg(["5", "10", "20 mm"], fr); self.fixStepBtns[1].checked = True
+        self.fixApply = self._btn("反映して作り直す（0 点）", "primary", "置いた修正点で、中心線をまとめて 1 回だけ作り直す"); fr.addWidget(self.fixApply, 1)
+        self.fixClear = self._btn("点を消す", None, "反映していない修正点を全部消す"); fr.addWidget(self.fixClear)
+        self.fixRow.hide()
         self.editButton = self._btn("中心線を直す（点をドラッグ・右クリックで削除）", None, None, True); c.addWidget(self.editButton)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.addPtButton = self._btn("通る点を追加"); r.addWidget(self.addPtButton)
@@ -386,6 +403,10 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self.aortaBtn.connect("clicked()", lambda: self._pick("大動脈"))
         self.editButton.connect("toggled(bool)", self.onEdit)
         self.fixButton.connect("toggled(bool)", self.onFix)
+        self.fixApply.connect("clicked()", lambda: self._busy(L.applyFixes, self._say))
+        for b, v in zip(self.fixStepBtns, (5.0, 10.0, 20.0)): b.connect("clicked()", lambda v=v: (setattr(L, "fixStep", v), L._fixHud(True) if getattr(L, "_fixLab", None) else None))
+        self.fixClear.connect("clicked()", L.clearFixes)
+        L.onFixChanged = self._fixChanged
         self.addPtButton.connect("clicked()", self.onAddPoint)
         self.centerHereButton.connect("clicked()", lambda: self._recenter(False))
         self.centerAllButton.connect("clicked()", lambda: self._recenter(True))
@@ -640,10 +661,20 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._busy(lambda: (self.logic.selectPath(name, self._say), self.refreshReadout(), self.refreshLists()))
         self._syncPathButtons()
 
+    def _fixChanged(self):
+        n = len(getattr(self.logic, "pendingFix", []) or [])
+        self.fixApply.setText(f"反映して作り直す（{n} 点）"); self.fixApply.enabled = n > 0; self.fixClear.enabled = n > 0
+        self.fixRow.setVisible(self.fixButton.checked or n > 0)
+
     def onFix(self, on):
-        L = self.logic; L.setFixMode(on); self.fixHint.setVisible(on)
+        L = self.logic
+        if L.P is None:
+            self.fixButton.blockSignals(True); self.fixButton.checked = False; self.fixButton.blockSignals(False); self._say("先に中心線を作ってください"); return
+        if not on and (getattr(L, "pendingFix", None) or []): self._busy(L.applyFixes, self._say)     # 終わる時に残った点は反映
+        L.setFixMode(on); self.fixHint.setVisible(on); self._fixChanged()
+        self._busy(L.fixLayout, on)
         if on and self.editButton.checked: self.editButton.checked = False
-        self._say("中心線を合わせるモード: 軸位（A）で真腔の中心をクリックしてください（赤い点のドラッグでも可）。" if on else "合わせるモードを終えました。")
+        self._say("中心線を合わせるモード: 軸位（A）か断面（X）で真腔の中心をクリック → ホイールで次の高さへ → … → 「反映して作り直す」。" if on else "合わせるモードを終えました。")
 
     def onEdit(self, on):
         self.logic.editMode(on, self.logic.path)
@@ -767,6 +798,8 @@ class AortaSizingWidget(ScriptedLoadableModuleWidget):
         self._say(self.logic.undoLast())
 
     def onKey(self, cmd):
+        if cmd == "fixapply": self._busy(self.logic.applyFixes, self._say); return
+        if cmd == "fixexit": self.fixButton.checked = False; return
         if cmd == "enter": self.onPlace()
         elif cmd == "pin": self.onPin()
         elif cmd == "mode": self._mode("lumen" if self.logic.mode == "outer" else "outer")
@@ -1845,7 +1878,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         try:
             yn = slicer.app.layoutManager().sliceWidget("Yellow").mrmlSliceNode()
             if yn.GetOrientation() != "Axial": yn.SetOrientationToAxial()
-            yn.JumpSliceByCentering(P[0], P[1], P[2])
+            if not getattr(self, "fixMode", False): yn.JumpSliceByCentering(P[0], P[1], P[2])
             if self.posNode is not None: self.posNode.SetNthControlPointPosition(0, *P)
             self._drawAxialCenters()
             self._resliceMode(True)
@@ -2153,7 +2186,7 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 add(E.LeftButtonReleaseEvent, lambda c, e: self._releaseGreen(c))
                 add(E.LeaveEvent, lambda c, e: self._leaveGreen(c))
             else:                                   # Yellow 軸位: ホイールは断面位置に合わせる（勝手にスクロールさせない）
-                add(E.MouseWheelForwardEvent, lambda c, e: self._wheelRed(c, -1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelRed(c, +1))
+                add(E.MouseWheelForwardEvent, lambda c, e: self._wheelAx(c, +1)); add(E.MouseWheelBackwardEvent, lambda c, e: self._wheelAx(c, -1))
                 add(E.LeftButtonPressEvent, lambda c, e: self._pressAx(c)); add(E.MouseMoveEvent, lambda c, e: self._moveAx(c))
                 add(E.LeftButtonReleaseEvent, lambda c, e: self._releaseAx(c))
         for nm in [n for n in ("Red", "Green", "Orange", "Yellow") if lm.sliceWidget(n) is not None] + ["3D"]:   # どのビューで操作したか（計測の置き場所）と、共通のキー
@@ -2207,6 +2240,11 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
     def _keyAny(self, it):
         key = it.GetKeySym() or ""; ctrl = bool(it.GetControlKey())
         cmd = None
+        if getattr(self, "fixMode", False) and key in ("Return", "KP_Enter", "BackSpace", "Delete", "Escape"):
+            cmd = {"Return": "fixapply", "KP_Enter": "fixapply", "BackSpace": "undo", "Delete": "undo", "Escape": "fixexit"}[key]
+            try: getattr(self, "onKey", lambda c: None)(cmd)
+            except Exception: _err("key")
+            self._abort(it); return
         if key in ("Return", "KP_Enter"): cmd = "enter"
         elif key in ("p", "P") and not ctrl: cmd = "pin"
         elif key in ("l", "L") and not ctrl: cmd = "mode"
@@ -2233,7 +2271,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
             self._abort(it); return
         if self.P is not None and (it.GetControlKey() or getattr(self, "fixMode", False)) and self._clockCb is None and not self._editing and not self._placing():
             p = self._rasAt(it, "Red"); k = self._k()                    # Ctrl+クリック: この断面の中心をクリックした所へ
-            self._abort(it); qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
+            self._abort(it)
+            if getattr(self, "fixMode", False) and not it.GetControlKey(): self.queueFix(k, p); return
+            qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
         if self._clockCb is None or self.P is None: return
         x, y = it.GetEventPosition(); sn = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
         M = sn.GetXYToRAS(); ras = np.array([sum(M.GetElement(r, c) * v for c, v in enumerate((x, y, 0, 1))) for r in range(3)])
@@ -2259,7 +2299,9 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if it.GetControlKey() or getattr(self, "fixMode", False):         # Ctrl+クリック（合わせるモードではクリック）: その高さの中心線を、クリックした所へ動かす
             q = self._rasAt(it, nm); s = float(np.clip(-q[2], 0, self.length)); k = self._k(s)
             p = self.P[k] + q[0] * self.B[k] + q[1] * self.N[k]
-            self._abort(it); qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
+            self._abort(it)
+            if getattr(self, "fixMode", False) and not it.GetControlKey(): self.queueFix(k, p); return
+            qt.QTimer.singleShot(0, lambda: self._ctrlMove(k, p)); return
         if it.GetShiftKey(): return
         self._drag = True; self._queue(s=self._sGreen(it, nm)); self._abort(it)
 
@@ -2276,22 +2318,86 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
 
     def _axNodes(self):
         YEL = "vtkMRMLSliceNodeYellow"
-        a = self._node("vtkMRMLMarkupsFiducialNode", "SA 軸位の中心線", (YEL,), (0.3, 0.9, 1.0), glyph=2.2)
+        a = self._node("vtkMRMLMarkupsFiducialNode", "SA 軸位の中心線", (YEL,), (0.3, 0.9, 1.0), glyph=3.2)
         g = self._node("vtkMRMLMarkupsFiducialNode", "SA 移動先", (YEL,), (1.0, 0.9, 0.2), glyph=3.0)
         return a, g
 
     def _drawAxialCenters(self):
         """軸位の今の高さを中心線が通る所（水色の点）。赤い点 = 今の位置"""
         if self.P is None: return
-        a, g = self._axNodes()
-        z = self.P[self._k()][2]; dz = self.P[:, 2] - z
-        idx = np.where(np.sign(dz[:-1]) != np.sign(dz[1:]))[0]
+        a, g = self._axNodes(); fix = getattr(self, "fixMode", False)
+        z = self._axZ() if fix else self.P[self._k()][2]
         wasMod = a.StartModify(); a.RemoveAllControlPoints()
-        for i in idx:
-            t = dz[i] / (dz[i] - dz[i + 1] + 1e-9); p = self.P[i] + t * (self.P[i + 1] - self.P[i])
-            if np.linalg.norm(p - self.P[self._k()]) < 3: continue
+        for p in self._crossings(z):
+            if not fix and np.linalg.norm(p - self.P[self._k()]) < 3: continue
             a.AddControlPoint(vtk.vtkVector3d(*p))
         a.EndModify(wasMod)
+
+    def _crossings(self, z):
+        dz = self.P[:, 2] - z; idx = np.where(np.sign(dz[:-1]) != np.sign(dz[1:]))[0]; out = []
+        for i in idx:
+            t = dz[i] / (dz[i] - dz[i + 1] + 1e-9); out.append(self.P[i] + t * (self.P[i + 1] - self.P[i]))
+        return out
+
+    def _axZ(self):
+        return float(slicer.app.layoutManager().sliceWidget("Yellow").mrmlSliceNode().GetSliceOffset())
+
+    def fixLayout(self, on):
+        """合わせるモードの画面: 大きな軸位で、上から順にクリックしていく"""
+        lm = slicer.app.layoutManager()
+        if on:
+            ln = lm.layoutLogic().GetLayoutNode()
+            if not ln.IsLayoutDescription(FIX_LAYOUT_ID): ln.AddLayoutDescription(FIX_LAYOUT_ID, FIX_LAYOUT_XML)
+            lm.setLayout(FIX_LAYOUT_ID); slicer.app.processEvents()
+            yw = lm.sliceWidget("Yellow"); yn = yw.mrmlSliceNode(); yn.SetOrientationToAxial(); yw.sliceController().setVisible(False)
+            cn = yw.sliceLogic().GetSliceCompositeNode(); cn.SetBackgroundVolumeID(self.vol.GetID()); cn.SetForegroundVolumeID(None); cn.SetLabelVolumeID(None)
+            fov = yn.GetFieldOfView(); r = fov[1] / max(fov[0], 1e-6); yn.SetFieldOfView(170.0, 170.0 * r, fov[2])
+            self._fixDir = -1.0; self.fixStep = getattr(self, "fixStep", 10.0)
+            p = self.P[self._k()]; yn.JumpSliceByCentering(p[0], p[1], p[2])
+            if getattr(self, "posNode", None) is not None: self.posNode.GetDisplayNode().SetVisibility(False)
+            self._watch(); self._drawAxialCenters(); self._fixHud(True)
+        else:
+            self._fixHud(False)
+            if getattr(self, "posNode", None) is not None: self.posNode.GetDisplayNode().SetVisibility(True)
+            self.showLayout()
+            try: self.setPosition(self.curS)
+            except Exception: pass
+
+    def _fixHud(self, on):
+        lab = getattr(self, "_fixLab", None)
+        if not on:
+            if lab is not None:
+                try: lab.hide(); lab.setParent(None); lab.deleteLater()
+                except Exception: pass
+            self._fixLab = None; return
+        try:
+            v = slicer.app.layoutManager().sliceWidget("Yellow").sliceView()
+            if lab is None:
+                lab = qt.QLabel(v); lab.setAttribute(qt.Qt.WA_TransparentForMouseEvents, True); lab.setTextFormat(qt.Qt.RichText)
+                lab.setStyleSheet("QLabel{background:rgba(14,16,20,190); color:#e6e8ec; border-radius:8px; padding:8px 12px; font-size:13px;}")
+                self._fixLab = lab
+            n = len(getattr(self, "pendingFix", []) or [])
+            lab.setText(f"<b style='color:#ffd84d'>真腔の中心をクリック</b>　→ 自動で {getattr(self, 'fixStep', 10.0):.0f} mm {'足側' if self._fixDir < 0 else '頭側'}へ<br>"
+                        f"<span style='color:#9aa3ad'>水色の点 = 今の中心線　ホイール: 上下に移動（Shift で 1 cm）<br>"
+                        f"Enter: 反映して作り直す　Backspace: 1 つ戻す　Esc: 終わる</span><br><b>置いた点: {n}</b>")
+            lab.adjustSize(); lab.move(10, 10); lab.show(); lab.raise_()
+        except Exception as e: print("fix hud:", e)
+
+    def _wheelAx(self, it, d):
+        if not getattr(self, "fixMode", False): self._wheelRed(it, -d); return
+        yn = slicer.app.layoutManager().sliceWidget("Yellow").mrmlSliceNode()
+        step = 10.0 if it.GetShiftKey() else max(1.0, float(self.vol.GetSpacing()[2]))
+        yn.SetSliceOffset(yn.GetSliceOffset() + d * step); self._fixDir = 1.0 if d > 0 else -1.0
+        self._drawAxialCenters(); self._fixHud(True); self._abort(it)
+
+    def _fixAdvance(self, near):
+        """クリックしたら、同じ向きへ少し進めて、次の中心を画面の真ん中に"""
+        yn = slicer.app.layoutManager().sliceWidget("Yellow").mrmlSliceNode()
+        z = self._axZ() + self._fixDir * getattr(self, "fixStep", 10.0); pts = self._crossings(z)
+        if pts:
+            c = min(pts, key=lambda q: np.linalg.norm(q[:2] - near[:2])); yn.JumpSliceByCentering(c[0], c[1], z)
+        else: yn.SetSliceOffset(z)
+        self._drawAxialCenters(); self._fixHud(True)
 
     def _nearestK(self, p):
         near = np.where(np.abs(self.P[:, 2] - p[2]) < 2.0)[0]
@@ -2319,6 +2425,8 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         drag = math.hypot(x1 - x0, y1 - y0) > 6
         k = self._nearestK(p0 if drag else p1)                          # ドラッグ: つかんだ所の中心線を離した所へ / クリック: いちばん近い中心線をそこへ
         self._abort(it)
+        if getattr(self, "fixMode", False) and not it.GetControlKey():
+            self.queueFix(k, p1); self._fixAdvance(p1); return
         def go():
             s0 = float(self.s[k]); self._ctrlMove(k, p1)
             try: self.setPosition(s0)
@@ -2339,6 +2447,12 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         if np.linalg.norm(off) > 45: status("中心から遠すぎます（血管の中をクリック）"); return
         cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
         self._hist = getattr(self, "_hist", []); self._hist.append(("center", (self.path, cps.copy())))
+        self._offsetCurve(c, P0, off)
+        self._rebuildKeep(status)
+        status(f"中心線を {np.linalg.norm(off):.1f} mm 動かしました（Ctrl+Z で戻す）")
+
+    def _offsetCurve(self, c, P0, off):
+        cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
         d = np.linalg.norm(cps - P0, axis=1); i = int(np.argmin(d))
         if d[i] < 3: c.SetNthControlPointPositionWorld(i, *(cps[i] + off))
         else:
@@ -2348,8 +2462,51 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
                 dd = np.linalg.norm(a + t * ab - P0)
                 if dd < best: best, bi = dd, j
             c.InsertControlPoint(bi + 1, vtk.vtkVector3d(*(P0 + off)))
-        self._rebuildKeep(status)
-        status(f"中心線を {np.linalg.norm(off):.1f} mm 動かしました（Ctrl+Z で戻す）")
+
+    # ---- 合わせるモード: クリックは「修正点」を置くだけ（すぐ計算しない）。「反映」でまとめて 1 回作り直す
+    def queueFix(self, k, p, status=None):
+        status = status or getattr(self, "onStatus", None) or print
+        k = int(np.clip(k, 0, len(self.P) - 1)); p = np.asarray(p, float); off = p - self.P[k]
+        if np.linalg.norm(off) > 60: status("今の中心線から 6 cm 以上離れています（大動脈の中をクリック）"); return
+        pend = self.__dict__.setdefault("pendingFix", [])
+        sk = float(self.s[k]); pend[:] = [q for q in pend if abs(q[2] - sk) > 4.0]          # 近い高さの点は置き換え
+        pend.append((k, p, sk)); self._drawPending()
+        if getattr(self, "_fixLab", None) is not None: self._fixHud(True)
+        status(f"修正点 {len(pend)} 個（まだ計算していません）。ホイールで次の高さへ → クリック … 最後に「反映」")
+        cb = getattr(self, "onFixChanged", None)
+        if cb: cb()
+
+    def clearFixes(self):
+        self.pendingFix = []; self._drawPending()
+        if getattr(self, "_fixLab", None) is not None: self._fixHud(True)
+        cb = getattr(self, "onFixChanged", None)
+        if cb: cb()
+
+    def applyFixes(self, status=print):
+        pend = list(getattr(self, "pendingFix", []) or [])
+        c = self.curves.get(self.path)
+        if not pend or c is None: return 0
+        cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
+        self._hist = getattr(self, "_hist", []); self._hist.append(("center", (self.path, cps.copy())))
+        for k, p, sk in sorted(pend, key=lambda q: q[2]): self._offsetCurve(c, self.P[k], p - self.P[k])
+        self.pendingFix = []; self._drawPending()
+        s0 = self.curS
+        try: self._rebuildKeep(status)
+        finally:
+            cb = getattr(self, "onFixChanged", None)
+            if cb: cb()
+        try: self.setPosition(min(s0, self.length))
+        except Exception: pass
+        if getattr(self, "fixMode", False): self._drawAxialCenters(); self._fixHud(True)
+        status(f"修正点 {len(pend)} 個で中心線を作り直しました（Ctrl+Z で戻す）")
+        return len(pend)
+
+    def _drawPending(self):
+        n = self._node("vtkMRMLMarkupsFiducialNode", "SA 修正点", ("vtkMRMLViewNode1", "vtkMRMLSliceNodeYellow", "vtkMRMLSliceNodeRed"), (1.0, 0.85, 0.15), glyph=3.0)
+        wasMod = n.StartModify(); n.RemoveAllControlPoints()
+        for i, (k, p, sk) in enumerate(getattr(self, "pendingFix", []) or []):
+            j = n.AddControlPoint(vtk.vtkVector3d(*p)); n.SetNthControlPointLabel(j, "")
+        n.EndModify(wasMod)
 
     def _rebuildKeep(self, status=print):
         rot0, s0 = self.rot, self.curS
@@ -2649,6 +2806,13 @@ class AortaSizingLogic(ScriptedLoadableModuleLogic):
         self.measures = []; self._listsChanged()
 
     def undoLast(self):
+        pend = getattr(self, "pendingFix", None)
+        if pend:
+            pend.pop(); self._drawPending()
+            if getattr(self, "_fixLab", None) is not None: self._fixHud(True)
+            cb = getattr(self, "onFixChanged", None)
+            if cb: cb()
+            return "最後の修正点を消しました"
         """最後にしたこと（計測 or マーカー）を 1 つ戻す"""
         hist = getattr(self, "_hist", [])
         while hist:
