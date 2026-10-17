@@ -304,4 +304,33 @@ class _Overlay:
         self.sv.scheduleRender()
 
 
+_CT_PROTO_CACHE = {}
+
+
+def _ctProtocol(vol):
+    """解析用: CT の撮影・再構成の条件（DICOM から自動）。[(列名, 値)]。読めなければ空欄"""
+    keys = [("CT 機種", None), ("管電圧 kV", "0018,0060"), ("再構成関数", "0018,1210"), ("スライス厚 mm", "0018,0050"), ("スライス間隔 mm", None),
+            ("画素 mm", "0028,0030"), ("造影剤（DICOM）", "0018,0010"), ("管電流 mA", "0018,1151")]
+    if vol is None: return [(k, "") for k, _ in keys]
+    ck = (vol.GetID(), vol.GetName())
+    if ck in _CT_PROTO_CACHE: return _CT_PROTO_CACHE[ck]
+    val = {}
+    try:
+        db = slicer.dicomDatabase; uids = (vol.GetAttribute("DICOM.instanceUIDs") or "").split()
+        f = db.fileForInstance(uids[len(uids) // 2]) if (db is not None and uids) else ""
+        if f:
+            g = lambda t: (db.fileValue(f, t) or "").strip()
+            val["CT 機種"] = " ".join(x for x in (g("0008,0070"), g("0008,1090")) if x)
+            for k, t in keys:
+                if t: val[k] = g(t)
+            px = val.get("画素 mm", "")
+            if px: val["画素 mm"] = "×".join(f"{float(x):.3f}" for x in px.split("\\") if x)
+    except Exception as e: print("ct protocol:", e)
+    try: val["スライス間隔 mm"] = f"{vol.GetSpacing()[2]:.3f}"
+    except Exception: pass
+    out = [(k, val.get(k, "")) for k, _ in keys]
+    _CT_PROTO_CACHE[ck] = out
+    return out
+
+
 __all__ = [n for n in list(globals()) if not n.startswith("__")]   # 部品から * で全部（_ で始まる名前も）使えるように

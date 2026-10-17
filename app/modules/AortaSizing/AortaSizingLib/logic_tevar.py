@@ -410,6 +410,7 @@ class TevarPlanMixin:
         except Exception: c = None
         row += [("術後 近位端のずれ mm", f(c.get("dP") if c else None, 1)), ("術後 遠位端のずれ mm", f(c.get("dD") if c else None, 1)),
                 ("術後 実際の長さ mm", f(c.get("realLen") if c else None, 1)), ("術後 実際の径 mm", f(c.get("Dreal") if c else None, 1))]
+        row += [("ソフトの版", self._appVersion())] + _ctProtocol(getattr(self, "vol", None))
         return row
 
     def saveSineCSV(self, d=None):

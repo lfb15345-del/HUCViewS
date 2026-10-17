@@ -226,7 +226,7 @@ class PlaqueMixin:
         return [("ソフトの版", self._appVersion()), ("範囲", s["range"]), ("範囲 mm", f"{s['s0']:.0f}–{s['s1']:.0f}"), ("拾う厚み mm", f"{s['thr']:g}"),
                 ("断面の間隔 mm", f"{self.PLQ_DS:g}"), ("方向の数", str(self.PLQ_NTH)), ("低い CT 値の目安 HU", f"{self.PLQ_HU_LOW:g}"),
                 ("縁を除く mm", f"{self.PLQ_EDGE:g}"), ("くぼみの目安 mm", f"{self.PLQ_NOTCH:g}"),
-                ("元の CT の画素間隔 x/y/z mm", "/".join(f"{v:.2f}" for v in s["spacing"])), ("輪郭の手直し（範囲内の断面数）", str(nov))]
+                ("元の CT の画素間隔 x/y/z mm", "/".join(f"{v:.2f}" for v in s["spacing"])), ("輪郭の手直し（範囲内の断面数）", str(nov))] + _ctProtocol(getattr(self, "vol", None))
 
     def savePlaqueCSV(self):
         import csv

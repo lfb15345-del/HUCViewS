@@ -144,7 +144,7 @@ class DissectionMixin:
         nfix = len([q for q in ((getattr(self, "plan", None) or {}).get("tlfix") or []) if q.get("path") == self.path])
         ncl = len([q for q in (getattr(self, "_hist", []) or []) if q and q[0] == "center"])
         audit = [("ソフトの版", self._appVersion()), ("真腔の閾値 HU", f"{(self.tl.get('thr') if self.tlValid() else 0) or 0:.0f}"), ("真腔の手直し（クリック数）", str(nfix)),
-                 ("中心線の手直し（この作業中の回数）", str(ncl)), ("要確認の長さ mm（上下のたどりが食い違う）", str(nq) if qc is not None else "未確認")]
+                 ("中心線の手直し（この作業中の回数）", str(ncl)), ("要確認の長さ mm（上下のたどりが食い違う）", str(nq) if qc is not None else "未確認")] + _ctProtocol(getattr(self, "vol", None))
         rng = [("解析範囲", "基部〜大動脈分岐" if self._mk("大動脈分岐") is not None else "基部〜経路の終わり（分岐の印なし）"),
                ("腸骨への進展（この側）", {True: "あり", False: "なし", None: "不明"}[h.get("iliac")])]
         zcols = ["回転 弓部〜左鎖骨下", "回転 左鎖骨下〜腹腔動脈（印が無ければ〜腎）", "回転 腹腔動脈〜最下位腎動脈", "回転 最下位腎動脈〜分岐"]
