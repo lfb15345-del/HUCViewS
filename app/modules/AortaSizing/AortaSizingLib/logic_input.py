@@ -149,6 +149,10 @@ class InputMixin:
         if self.P is None or self._placing() or self._editing: return
         if getattr(self, "alignMode", False) and getattr(self, "actual", None) is not None:     # 術後を頭尾方向にずらす
             sC = self._sGreen(it, nm); ac = self.actual; self._alDrag = ("s", sC, 0.0, sC, ac["lo"], ac["hi"]); self._abort(it); return
+        if getattr(self, "branchPick", None) and not it.GetControlKey():   # 枝を選んでいる: クリックした高さに その枝の印
+            sC = self._sGreen(it, nm); self._queue(s=sC); self._abort(it); cb = getattr(self, "onBranchPicked", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb(sC))
+            return
         if it.GetControlKey() or getattr(self, "fixMode", False):         # Ctrl+クリック（合わせるモードではクリック）: その高さの中心線を、クリックした所へ動かす
             q = self._rasAt(it, nm); s = float(np.clip(-q[2], 0, self.length)); k = self._k(s)
             p = self.P[k] + q[0] * self.B[k] + q[1] * self.N[k]
@@ -240,7 +244,12 @@ class InputMixin:
             i = int(np.argmin(dist))
             if dist[i] < best[0]: best = (float(dist[i]), name, float(s[i]))
         dist, name, s = best
-        if name is None or dist > 15: return
+        bp = getattr(self, "branchPick", None)
+        if name is None or dist > (40 if bp else 15): return                    # 枝を選んでいる時は、枝の少し先をクリックしても拾う
+        if bp and (name == self.path or s <= getattr(self, "sharedLen", 0) + 2):
+            self._queue(s=s); cb = getattr(self, "onBranchPicked", None)
+            if cb: qt.QTimer.singleShot(0, lambda: cb(s))
+            return
         if name != self.path and getattr(self, "_tvMode", False): return              # TEVAR: 計画の経路のまま
         if getattr(self, "_tvMode", False) and getattr(self, "pickPD", None): self._pickAt(s); return
         if name != self.path and s > getattr(self, "sharedLen", 0) + 2:

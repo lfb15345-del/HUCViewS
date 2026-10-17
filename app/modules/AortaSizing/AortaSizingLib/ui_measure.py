@@ -18,19 +18,36 @@ class MeasureUIMixin:
             if m is None: b.setText(base); b.setStyleSheet("padding:3px 4px; font-size:11px")
             elif m.get("auto"): b.setText(base + " ?"); b.setStyleSheet("padding:3px 4px; font-size:11px; color:#ffcc33")
             else: b.setText(base + " ✓"); b.setStyleSheet("padding:3px 4px; font-size:11px; color:#5fd36e")
+            if getattr(self, "_chipSel", None) == nm: b.setStyleSheet(b.styleSheet + "; border:2px solid #ffcc33; font-weight:bold")
 
     def onBranchChip(self, nm):
-        """枝の印: 押す = 今の断面に置く。? の印は 1 回目でそこへ移動（確かめる）、2 回目で確定"""
+        """枝の印: チップを押して選ぶ → 3D かストレッチ像で枝の口をクリック（今の断面でよければ Enter かもう一度押す）。Esc でやめる。
+        ? の自動の印は、選ぶとその位置へ移動するので、合っていれば Enter（違えばクリックで置き直す）"""
         L = self.logic
         if L.P is None: self._say("先に中心線を作ってください。"); return
-        m = L._mk(nm); pend = getattr(self, "_chipPend", None); self._chipPend = None
-        if m is not None and m.get("auto") and pend != nm and L._onPath(m) and abs(m["s"] - L.curS) > 1.0:
-            self._chipPend = nm; L.setPosition(m["s"]); self._say(f"{nm}（自動・?）の位置です。合っていればもう一度押す。違えば断面を枝の口に動かしてから押す。"); return
-        if m is not None and m.get("auto") and abs(m["s"] - L.curS) <= 1.0:
-            L.addMarker(nm, m["s"]); self._say(f"{nm} を確認しました（✓）。")
-        else:
-            L.addMarker(nm, float(L.curS)); self._say(f"{nm} を {L.rel(L.curS):+.0f} mm に置きました（Ctrl+Z で戻す）。")
-        self.refreshLists()
+        if getattr(self, "_chipSel", None) == nm: self._placeChip(float(L.curS)); return      # 同じチップをもう一度 = 今の位置に
+        self._chipSel = nm; L.branchPick = nm; L.onBranchPicked = self._placeChip; self._chipRefresh()
+        m = L._mk(nm)
+        if m is not None and L._onPath(m):
+            L.setPosition(m["s"])
+            self._say(f"{nm}{'（自動・?）' if m.get('auto') else ''}: 今の位置です。合っていれば Enter。違えば 3D かストレッチ像で枝の口をクリック。Esc でやめる。")
+        else: self._say(f"{nm}: 3D かストレッチ像で枝の口をクリック（今の断面でよければ Enter）。Esc でやめる。")
+
+    def _placeChip(self, s):
+        L = self.logic; nm = getattr(self, "_chipSel", None)
+        if not nm: return
+        self._chipSel = None; L.branchPick = None
+        m = L._mk(nm); same = m is not None and m.get("auto") and abs(m["s"] - s) <= 1.0
+        L.addMarker(nm, float(s)); self.refreshLists()
+        order = list(self.BR_CHIPS); j = order.index(nm) if nm in order else -1
+        nxt = next((x for x in order[j + 1:] + order[:j + 1] if L._mk(x) is None or L._mk(x).get("auto")), None)   # 次（並びで後ろから）
+        self._say((f"{nm} を確認しました（✓）。" if same else f"{nm} を {L.rel(s):+.0f} mm に置きました（Ctrl+Z で戻す）。")
+                  + (f" 次は「{self.SHORT.get(nxt) or self._BR_SHORT.get(nxt, nxt)}」など、チップを押して続けられます。" if nxt else " 枝の印は全部そろいました。"))
+
+    def _chipCancel(self, say=True):
+        if getattr(self, "_chipSel", None):
+            self._chipSel = None; self.logic.branchPick = None; self._chipRefresh()
+            if say: self._say("枝の印をやめました。")
 
     # ---------------------------------------------------------------- 1 中心線
     def onAuto(self):
@@ -219,6 +236,8 @@ class MeasureUIMixin:
         if cmd == "fixexit": self.fixButton.checked = False; return
         if cmd == "enter" and self.stack.currentIndex == 2 and getattr(self.logic, "_tvMode", False): self.onTvEnter(); return
         if cmd == "esc" and getattr(self.logic, "pickPD", None): self.tvPick.checked = False; self._say("端の選びを取り消しました。"); return
+        if cmd == "enter" and getattr(self, "_chipSel", None): self._placeChip(float(self.logic.curS)); return
+        if cmd == "esc" and getattr(self, "_chipSel", None): self._chipCancel(); return
         if cmd == "enter": self.onPlace()
         elif cmd == "pin": self.onPin()
         elif cmd == "mode": self._mode("lumen" if self.logic.mode == "outer" else "outer")

@@ -102,6 +102,7 @@ class WidgetBaseMixin:
         i = max(0, min(5 if getattr(self, "_research", False) else 4, i)); self.stack.setCurrentIndex(i); self.stepBtns[i].checked = True
         tv = i in (2, 3)                                                      # 計画・術後（TEVAR）
         if i != 0 and getattr(self, "fixButton", None) is not None and self.fixButton.checked: self.fixButton.checked = False
+        if i != 1 and getattr(self, "_chipSel", None): self._chipCancel(say=False)       # ページを移ったら 枝の選びはやめる
         if i == 1: self.refreshLists()
         self.logic._tvMode = tv
         for x in (getattr(self, "pinBtn", None), getattr(self, "baseBtn", None), getattr(self, "editContBtn", None), getattr(self, "wlBtn", None), getattr(self, "_hintTop", None)):

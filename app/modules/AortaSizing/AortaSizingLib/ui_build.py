@@ -111,7 +111,7 @@ class WidgetBuildMixin:
         c.removeWidget(self.lenBtn); c.removeWidget(self.lenLab); self._lenSlot.addWidget(self.lenBtn); self._lenSlot.addWidget(self.lenLab)
         bg = qt.QGridLayout(); bg.setHorizontalSpacing(4); bg.setVerticalSpacing(4); self._lenSlot.addLayout(bg); self.brChips = {}
         for i, nm in enumerate(self.BR_CHIPS):
-            b = self._btn(self.SHORT.get(nm, nm), None, f"{nm}: 断面（または 3D のクリック）でその枝の口に合わせて押す → 印。? の印は 1 回押すとそこへ移動、合っていればもう一度押すと確認（✓）。Ctrl+Z で戻す")
+            b = self._btn(self.SHORT.get(nm, nm), None, f"{nm}: 押して選ぶ（黄色の枠）→ 3D かストレッチ像で枝の口をクリック。? の印は選ぶとそこへ移動するので、合っていれば Enter。Esc でやめる。Ctrl+Z で戻す")
             b.setStyleSheet("padding:3px 4px; font-size:11px"); bg.addWidget(b, i // 4, i % 4); self.brChips[nm] = b
             b.connect("clicked()", lambda nm=nm: self.onBranchChip(nm))
         r = qt.QHBoxLayout(); c.addLayout(r)
