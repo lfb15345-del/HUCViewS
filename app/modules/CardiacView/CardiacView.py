@@ -1017,6 +1017,19 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def onBuild(self):
         self.onQuick()
 
+    def _toSurfaces(self):
+        """面の表示（色分け面・心筋の断面など）へ切り替える前に、VR と 4D を止める。
+        VR が上に残ると、面の色分けも切り口も VR に隠れて「一部しか切れていない」ように見えるため"""
+        L = self.logic
+        try:
+            if getattr(L, "on4D", False): self._end4D()
+            if getattr(L, "vrOn", False): L.showVR(False)
+            for b in (self.vrTissueButton, self.vrBloodButton): b.blockSignals(True); b.setChecked(False); b.blockSignals(False)
+            for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode"):
+                if d.GetVisibility(): d.SetVisibility(False)
+            L._vrLabel()
+        except Exception as e: print("toSurfaces:", e)
+
     def _showOnly(self, names):
         for name, cb in self.layerChecks.items():
             on = name in names
@@ -1025,6 +1038,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def onVSD(self):
         # 心筋の切り口を塗り、内腔は空けておく（血液は出さない）
+        self._toSurfaces()
         for k, b in getattr(self, "sceneButtons", {}).items(): b.setChecked(k == "heart")
         self.logic.capBlood = False; self.logic.capWall = True
         self._showOnly(("心臓壁", "心筋"))
@@ -1084,12 +1098,14 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             self._status("心腔モデルがないため四腔断面を計算できません")
 
     def onLumen(self):
+        self._toSurfaces()
         self.logic.capBlood = False
         self._showOnly(("心臓壁",))
         self.logic.setView("A", self.fovSlider.value)
         self._applyCut()
 
     def onHeartOnly(self):
+        self._toSurfaces()
         self.logic.capBlood = False
         self._showOnly(("血液・血管",))
         self.logic.setView("A", self.fovSlider.value)
@@ -1702,6 +1718,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e: print("4D adopt:", e)
         self.cutPlane = slicer.mrmlScene.GetFirstNodeByName("切断面")
         self.cutAxis = None
+        self.vrOn = False; self.vrDisplay = None; self.vrNode = None          # 保存した時の VR は隠す（残ると面にかぶり、切っても VR だけ別の位置で切れる）
+        for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode"):
+            if d is getattr(self, "vr4D", None): continue
+            try: d.SetVisibility(False); d.SetClipping(False)
+            except Exception: pass
         self._updateBounds()
         try: self.studioLighting(0, ssao=True)
         except Exception: pass
@@ -2282,6 +2303,16 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 except Exception: pass
             else:
                 d.SetAttribute("CV.clipWant", "0"); d.SetClipping(False)
+        lay = set(n for n in self.layerModels.values() if n is not None)
+        for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):             # ほかの画面の面（大動脈サイジング・研究・読み込んだ面）も、見えていれば一緒に切る
+            if n in lay: continue
+            d = n.GetDisplayNode(); nm = n.GetName()
+            if d is None or nm == "CV 心筋断面" or nm.endswith("Volume Slice"): continue
+            if enable:
+                if d.GetVisibility():
+                    d.SetAndObserveClipNodeID(clip.GetID()); d.SetClipping(True); d.SetAttribute("CV.clipOther", "1")
+            elif d.GetAttribute("CV.clipOther") == "1":
+                d.SetClipping(False); d.SetAttribute("CV.clipOther", "0")
         self._installVRClip()
         try: self._clipSync()
         except Exception as e: print("clip sync:", e)
@@ -2843,7 +2874,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self._vrSaved = {k: self.visible.get(k, False) for k in self.layerModels}
             for k, n in self.layerModels.items():
                 if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(False)
-            cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋の断面")
+            cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
             if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
         else:
             for k, vis in getattr(self, "_vrSaved", {}).items():
