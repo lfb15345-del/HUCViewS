@@ -43,6 +43,8 @@ class CoreMixin:
             if best is not None: seg, vol = best[1], best[2]
         if vol is None or seg is None:
             raise RuntimeError("CT と臓器ラベル（TotalSegmentator）が見つかりません。先に入口で「3D を作る」を行ってください。")
+        if vol is not getattr(self, "vol", None):                          # 別の症例に変わった: 前の症例の CT（伸ばした画像の元）・断面の計算を捨てる
+            self.arr = None; self.arrF = None; self.cache = {}; self._built = {}
         self.vol, self.seg = vol, seg
         try:
             cv = slicer.modules.cardiacview.widgetRepresentation().self().logic; self.thr = float(cv._cal().get("blood_lo", 180.0))
