@@ -801,6 +801,12 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         try:
             if slicer.util.selectedModule() != "CardiacView": return
             self._tbSync(); self.logic._hudUpdate()
+            L = self.logic; pn = L.layerModels.get("パッチ")                       # パッチの範囲を出している時は「推定したイメージ」と添える
+            have = pn is not None and slicer.mrmlScene.IsNodePresent(pn) and pn.GetPolyData() is not None and pn.GetPolyData().GetNumberOfPoints() > 0
+            on = bool(have and ((pn.GetDisplayNode() is not None and pn.GetDisplayNode().GetVisibility()) or getattr(L, "vrOn", False)))
+            if getattr(self, "_patchNoteOn", None) != on:
+                L._setUL("2_patch", "<span style='color:#f2f2ec'>白 = パッチの範囲</span>　<span style='color:#9aa7b4'>CT から推定した手術のイメージ（教育用・診断には使いません）</span>" if on else "")
+                self._patchNoteOn = on
             sb = getattr(self, "_seqBar", None)
             if sb is None:
                 sb = self._seqBar = next((t for t in slicer.util.mainWindow().findChildren(qt.QToolBar) if t.objectName == "SequenceBrowserToolBar"), False)
