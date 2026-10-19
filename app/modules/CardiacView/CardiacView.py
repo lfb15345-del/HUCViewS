@@ -3,7 +3,7 @@ r"""
 CardiacView — 3D Slicer scripted module（かんたんモード版）
 HU 帯域ごとの等値面レイヤー ＋ スライダーで動かす切断面 ＋ 視点ボタン。
 """
-import os, math, time, re
+import os, math, time, re, json
 import numpy as np
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
@@ -36,7 +36,9 @@ LEGEND_WALL = [("外膜", (0.84, 0.72, 0.64)), ("左心系の内膜", (0.94, 0.7
                ("補った壁（CT値の裏付けなし）", (0.60, 0.61, 0.64)), ("心筋（AIラベル）", (0.64, 0.17, 0.15))]
 IMPLANT_COLOR = (0.80, 0.83, 0.90)  # 人工物（金属: 人工弁のリング・ステント・クリップなど）: 銀
 CALC_COLOR = (1.00, 0.92, 0.55)     # 石灰化: 明るい黄白
-LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
+WIRE_COLOR = (0.96, 0.56, 0.20)     # 胸骨ワイヤー（金属）: 銅色（骨の白と見分ける）
+PATCH_COLOR = (0.95, 0.95, 0.92)    # パッチの範囲（自動）: 白（布・心膜のパッチらしく。石灰化の黄白・金属の銀とは別）
+LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
 CV_LAYOUT_CUT = 5711          # 3D（左・大）＋ 切っている面の断面（右）
 CV_LAYOUT_CUT_XML = """
@@ -431,12 +433,14 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.vrBloodButton = B("VR 造影", "vr", "造影された血液を立体に（ボリュームレンダリング）", checkable=True)
         r.addWidget(self.vrTissueButton, 1); r.addWidget(self.vrBloodButton, 1)
 
-        card, c, hdL = self._card(P, "レイヤー")
+        card, c, hdL = self._card(P, "レイヤー"); self._layerLay = c
         g = qt.QGridLayout(); g.setHorizontalSpacing(10); g.setVerticalSpacing(4); c.addLayout(g)
         self.layerChecks = {}
-        for k, name in enumerate(("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化")):
+        for k, name in enumerate(("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化", "パッチ")):
             cb = qt.QCheckBox("心筋（AI）" if name == "心筋" else name); cb.checked = True; g.addWidget(cb, k // 2, k % 2); self.layerChecks[name] = cb
             if name == "心筋": cb.setToolTip("心筋は AI（TotalSegmentator）のラベルから作っています。欠損を塗りつぶすことがあるので、外すと CT 値だけの壁が見えます")
+            if name == "人工物・石灰化": cb.setToolTip("金属（人工弁のリング・ステント・クリップ）= 銀、胸骨ワイヤー = 銅色、石灰化 = 黄白")
+            if name == "パッチ": cb.setToolTip("術後の CT から自動で出したパッチの範囲（緑）。左室と右室の血液を 2 mm 以下の薄い仕切りだけで隔てている所（術前の CT があれば、術前の穴・術前から同じ所も区別）")
         _it = lambda n, cc: f'<span style="white-space:nowrap"><span style="color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)})">■</span>{n}</span>'
         leg = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND)
         leg2 = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND_WALL)
@@ -495,6 +499,31 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.insetCheck.setToolTip("左下の小さな図はいつも正面から。オレンジ枠 = 切断面、黄色い線 = 切り口、水色の矢印 = 今見ている向き")
         c.addWidget(self.insetCheck)
         hn = Lb("ホイール: 切る位置 1 mm（Shift 5 mm）", "muted"); hn.setWordWrap(True); c.addWidget(hn)
+
+        card, c, _ = self._card(P, "パッチ（塗って色分け）")
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.paintButton = B("パッチを塗る", "vr", "3D の面の上を左ドラッグで緑に塗る（Ctrl＋ドラッグで消す）。何もない所のドラッグはいつもどおり回転。\n"
+                             "もう一度押すか Esc で終わり。先に切って中を見せてから塗ると楽です", checkable=True)
+        r.addWidget(self.paintButton, 1)
+        self.brushBtns = {}; bg = qt.QButtonGroup(card); bg.setExclusive(True); self._brushGroup = bg
+        try: bmm = float(qt.QSettings().value("CardiacView/brushMM", 4.0))
+        except Exception: bmm = 4.0
+        for lab, mm in (("細", 2.5), ("中", 4.0), ("太", 7.0)):
+            b = B(lab, "seg", f"筆の太さ（半径 {mm:g} mm）", checkable=True); bg.addButton(b); r.addWidget(b); self.brushBtns[mm] = b
+            b.checked = abs(mm - bmm) < 0.01
+            b.connect("clicked()", lambda mm=mm: self._setBrush(mm))
+        if not any(b.checked for b in self.brushBtns.values()): self.brushBtns[4.0].checked = True
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
+        self.patchFaceButton = B("正面から見る", None, "塗ったパッチを正面に向けて、その手前を切る（パッチの面で切る）"); r.addWidget(self.patchFaceButton, 1)
+        self.patchUndoButton = B("1つ戻す", None, "最後のひと塗りを取り消す"); r.addWidget(self.patchUndoButton)
+        self.patchClearButton = B("全部消す", None, "塗ったパッチを全部消す"); r.addWidget(self.patchClearButton)
+        self.redoMetalButton = B("胸骨ワイヤーを色分け（前に作った症例）", "ghost", "前に 3D を作った症例で、骨・胸骨ワイヤー・人工物・石灰化を作り直す（10〜30 秒）"); self._layerLay.addWidget(self.redoMetalButton)
+        card.hide()                                                           # 手で塗る方式はやめる（恣意的になる）。CT の値で「似た所」をまとめて選ぶ方式に置き換える予定
+        self.paintButton.connect("toggled(bool)", self._onPaint)
+        self.patchFaceButton.connect("clicked()", self._onPatchFace)
+        self.patchUndoButton.connect("clicked()", lambda: self._status(self.logic.patchUndo()))
+        self.patchClearButton.connect("clicked()", lambda: self._status(self.logic.patchClear()))
+        self.redoMetalButton.connect("clicked()", self._onRedoMetal)
 
         # ===== 断面（画面の分け方・MPR）
         P = pages["断面"]
@@ -1030,6 +1059,51 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             L._vrLabel()
         except Exception as e: print("toSurfaces:", e)
 
+    # ---- パッチ（塗って色分け）・胸骨ワイヤー
+    def _brushMM(self):
+        for mm, b in self.brushBtns.items():
+            if b.checked: return mm
+        return 4.0
+
+    def _setBrush(self, mm):
+        qt.QSettings().setValue("CardiacView/brushMM", float(mm)); self.logic.paintR = float(mm)
+
+    def _onPaint(self, on):
+        L = self.logic
+        if on:
+            if getattr(L, "vrOn", False) or getattr(L, "on4D", False): self._toSurfaces()
+            if not L._paintTargets():
+                self.paintButton.blockSignals(True); self.paintButton.checked = False; self.paintButton.blockSignals(False)
+                self._status("塗れる面がありません（先に 3D の面を出してください）"); return
+            self._status("パッチ: 準備中…")
+            L.paintStart(self._brushMM())
+            cb = self.layerChecks.get("パッチ")
+            if cb is not None: cb.blockSignals(True); cb.checked = True; cb.blockSignals(False)
+            self._status("パッチ: 面の上を左ドラッグで塗る（Ctrl＋ドラッグで消す）。何もない所のドラッグは回転。終わりは Esc かボタン")
+        else:
+            self._status(L.paintEnd())
+
+    def _onPatchFace(self):
+        if self.paintButton.checked: self.paintButton.checked = False
+        L = self.logic
+        if not L.patchFace(): self._status("先に「パッチを塗る」で塗ってください"); return
+        self.lockCheck.blockSignals(True); self.lockCheck.checked = True; self.lockCheck.blockSignals(False)
+        self.cutCombo.blockSignals(True); self.cutCombo.currentIndex = 1; self.cutCombo.blockSignals(False)
+        self.cutSlider.blockSignals(True); self.cutSlider.value = L.cutFrac * 100; self.cutSlider.blockSignals(False)
+        self._status("パッチを正面に向けて、手前を切りました。ホイールで切る位置。「この断面で固定」を外すと元の切り方へ")
+
+    def _onRedoMetal(self):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            msg = self.logic.redoMetal(self._status)
+            cb = self.layerChecks.get("人工物・石灰化")
+            if cb is not None: cb.blockSignals(True); cb.checked = True; cb.blockSignals(False)
+            self._status(msg)
+        except Exception as e:
+            import traceback; traceback.print_exc(); self._status(f"作り直せませんでした: {e}")
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+
     def _showOnly(self, names):
         for name, cb in self.layerChecks.items():
             on = name in names
@@ -1041,14 +1115,14 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self._toSurfaces()
         for k, b in getattr(self, "sceneButtons", {}).items(): b.setChecked(k == "heart")
         self.logic.capBlood = False; self.logic.capWall = True
-        self._showOnly(("心臓壁", "心筋"))
+        self._showOnly(("心臓壁", "心筋", "人工物・石灰化", "パッチ"))
         self.logic.setCapOpacity(self.capSlider.value / 100.0)
         self.logic.setView("A", self.fovSlider.value)
         self._applyCut()
 
-    SCENES = {"aorta": ("血管:大動脈系", "人工物", "石灰化"),
-              "vessels": ("血管:", "人工物", "石灰化"),
-              "body": ("血管:", "骨", "人工物", "石灰化")}
+    SCENES = {"aorta": ("血管:大動脈系", "人工物", "石灰化", "胸骨ワイヤー", "パッチ"),
+              "vessels": ("血管:", "人工物", "石灰化", "胸骨ワイヤー", "パッチ"),
+              "body": ("血管:", "骨", "人工物", "石灰化", "胸骨ワイヤー", "パッチ")}
 
     def onScene(self, key, remember=True):
         """見たいものをワンクリックで: 心臓（四腔断面）/ 大動脈 / 血管すべて / 骨と血管"""
@@ -1080,7 +1154,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             if on: shown.append(k)
         if key == "aorta" and "血管:大動脈系" not in L.layerModels:
             self._status("大動脈のモデルがありません（AI ラベルに大動脈がない撮影範囲です）")
-        groups = {"血液・血管": any(k.startswith("血管") for k in shown), "骨": "骨" in shown, "人工物・石灰化": ("人工物" in shown or "石灰化" in shown)}
+        groups = {"血液・血管": any(k.startswith("血管") for k in shown), "骨": "骨" in shown, "人工物・石灰化": any(k in shown for k in ("人工物", "石灰化", "胸骨ワイヤー")), "パッチ": "パッチ" in shown}
         for name, cb in self.layerChecks.items():
             cb.blockSignals(True); cb.checked = bool(groups.get(name, False)); cb.blockSignals(False)
         L.setView("A", self.fovSlider.value)
@@ -1107,7 +1181,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def onHeartOnly(self):
         self._toSurfaces()
         self.logic.capBlood = False
-        self._showOnly(("血液・血管",))
+        self._showOnly(("血液・血管", "人工物・石灰化", "パッチ"))
         self.logic.setView("A", self.fovSlider.value)
         self._applyCut()
 
@@ -1381,6 +1455,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         for n in list(self.layerModels.values()):
             if n: slicer.mrmlScene.RemoveNode(n)
         self.layerModels.clear()
+        self._strokes = []; self._pMask = {}; self._pMaskKey = {}
 
         arr = slicer.util.arrayFromVolume(work)
         status("体の範囲を抽出中…")
@@ -1443,18 +1518,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 # 他の組織を覆い隠さないよう半透明・控えめな色に
                 d = model.GetDisplayNode(); d.SetOpacity(0.18); d.SetColor(0.80, 0.72, 0.66); d.SetSpecular(0.05)
         if boneMask is not None:
-            status("レイヤー「骨」を生成中…")
-            # AI の骨ラベルは 3mm 格子でカクカク → 形は CT 値（≥200HU）で取り、ラベルは「どこが骨か」の目印にだけ使う
-            from scipy import ndimage
-            near = ndimage.distance_transform_edt(~boneMask, sampling=spacing) <= 3.0
-            bm = (arr >= 200) & near
-            if body is not None: bm &= body
-            if segNode is not None:
-                vv = self._segmentMaskArray(segNode, work, ("aorta", "vena cava", "pulmonary", "heart", "atrial appendage", "brachiocephalic", "subclavian", "carotid", "iliac", "kidney"))
-                if vv is not None: bm &= ~ndimage.binary_dilation(vv, iterations=1)
-            bm = ndimage.binary_closing(bm, iterations=1)
-            bm = self._cleanBinary(bm.astype(np.uint8), spacing, minVox=150)
-            self.layerModels["骨"] = self._surfaceFromBinary(bm, work, "骨", BONE_COLOR, 2); self.visible["骨"] = True
+            status("レイヤー「骨」・胸骨ワイヤーを生成中…")
+            self._buildBone(arr, work, spacing, segNode, boneMask, body)
         if segNode is not None:
             try:
                 status("人工物（人工弁・ステントなど）と石灰化を探しています…")
@@ -1479,6 +1544,136 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     # ================================================================ 人工物・石灰化
     METAL_HU = 2000.0
 
+    @staticmethod
+    def _bbox(m, mg=0):
+        r = [np.nonzero(m.any(axis=ax))[0] for ax in ((1, 2), (0, 2), (0, 1))]
+        return tuple(slice(max(0, int(q.min()) - mg), min(m.shape[i], int(q.max()) + 1 + mg)) for i, q in enumerate(r))
+
+    @staticmethod
+    def _boxVol(src, oi, oj, ok):
+        """元の CT の一部（箱）の位置を持った「面を作るための入れ物」"""
+        S = vtk.vtkMatrix4x4(); src.GetIJKToRASMatrix(S); I = vtk.vtkMatrix4x4(); I.DeepCopy(S)
+        for r in range(3): I.SetElement(r, 3, S.GetElement(r, 3) + S.GetElement(r, 0) * oi + S.GetElement(r, 1) * oj + S.GetElement(r, 2) * ok)
+        class _Box:
+            def GetIJKToRASMatrix(self, m): m.DeepCopy(I)
+            def GetRASToIJKMatrix(self, m): m.DeepCopy(I); m.Invert()
+        return _Box()
+
+    def _srcSub(self, work, nearW):
+        """作業画像のマスク nearW のまわりを、元の CT（細かい画素）から切り出す。細い金属は作業画像だと消えるため。
+        返り値: (元 CT, 切り出した CT, その中の nearW, 箱の位置 (i0, j0, k0), 拡大率, ずれ) / None"""
+        if nearW is None or not nearW.any(): return None
+        src = getattr(self, "sourceVolume", None) or work
+        sarr = slicer.util.arrayFromVolume(src)
+        W = vtk.vtkMatrix4x4(); work.GetRASToIJKMatrix(W); S = vtk.vtkMatrix4x4(); src.GetIJKToRASMatrix(S)
+        Mw = np.array([[W.GetElement(r, c) for c in range(4)] for r in range(4)]); Ms = np.array([[S.GetElement(r, c) for c in range(4)] for r in range(4)])
+        M = Mw @ Ms
+        if np.abs(M[:3, :3] - np.diag(np.diag(M[:3, :3]))).max() > 1e-3:
+            src, sarr, M = work, slicer.util.arrayFromVolume(work), np.eye(4)
+        sh = nearW.shape
+        zz, yy, xx = np.nonzero(nearW.any(axis=(1, 2)))[0], np.nonzero(nearW.any(axis=(0, 2)))[0], np.nonzero(nearW.any(axis=(0, 1)))[0]
+        lo_w = np.array([xx.min(), yy.min(), zz.min()]) - 1; hi_w = np.array([xx.max(), yy.max(), zz.max()]) + 1
+        sc = np.diag(M[:3, :3]); off = M[:3, 3]
+        b1 = (lo_w - off) / sc; b2 = (hi_w - off) / sc
+        lo_s = np.maximum(np.floor(np.minimum(b1, b2)).astype(int), 0); hi_s = np.minimum(np.ceil(np.maximum(b1, b2)).astype(int) + 1, np.array(sarr.shape[::-1]))
+        i0, j0, k0 = (int(v) for v in lo_s); i1, j1, k1 = (int(v) for v in hi_s)
+        if i1 <= i0 or j1 <= j0 or k1 <= k0: return None
+        sub = sarr[k0:k1, j0:j1, i0:i1]
+        ix = np.clip(np.rint(sc[0] * np.arange(i0, i1) + off[0]).astype(int), 0, sh[2] - 1)
+        jy = np.clip(np.rint(sc[1] * np.arange(j0, j1) + off[1]).astype(int), 0, sh[1] - 1)
+        kz = np.clip(np.rint(sc[2] * np.arange(k0, k1) + off[2]).astype(int), 0, sh[0] - 1)
+        nearS = nearW[kz[:, None, None], jy[None, :, None], ix[None, None, :]]
+        return src, sub, nearS, (i0, j0, k0), sc, off
+
+    def findWires(self, work, segNode):
+        """胸骨のまわり（AI の胸骨ラベル + 8 mm）で 2000 HU 以上 = 胸骨ワイヤー。細いので元の CT（細かい画素）で探す。
+        返り値 dict(mask=元 CT の箱の中のワイヤー, at=箱の位置, src=元 CT, workMask=作業画像で 2.5 mm 太らせたワイヤー（骨から抜く）, n=かたまりの数, mm3=体積) / None"""
+        from scipy import ndimage
+        if segNode is None: return None
+        st = self._segmentMaskArray(segNode, work, ("sternum",))
+        if st is None or not st.any(): return None
+        sp = np.array(work.GetSpacing(), float)[::-1]                        # (z, y, x)
+        box = self._bbox(st, int(np.ceil(10.0 / sp.min())))
+        nearW = np.zeros(st.shape, bool)
+        nearW[box] = ndimage.distance_transform_edt(~st[box], sampling=sp) <= 8.0
+        cut = self._srcSub(work, nearW)
+        if cut is None: return None
+        src, sub, nearS, (i0, j0, k0), sc, off = cut
+        wire = (sub >= self.METAL_HU) & nearS
+        if not wire.any(): return None
+        vox = float(np.prod(src.GetSpacing()))
+        lab, n = ndimage.label(wire, structure=np.ones((3, 3, 3)))
+        sizes = np.bincount(lab.ravel(), minlength=n + 1) * vox
+        keep = sizes >= 2.0; keep[0] = False
+        wire = keep[lab]
+        if not wire.any(): return None
+        kk, jj, ii = np.nonzero(wire); sh = nearW.shape
+        ix = np.clip(np.rint(sc[0] * (ii + i0) + off[0]).astype(int), 0, sh[2] - 1)
+        jy = np.clip(np.rint(sc[1] * (jj + j0) + off[1]).astype(int), 0, sh[1] - 1)
+        kz = np.clip(np.rint(sc[2] * (kk + k0) + off[2]).astype(int), 0, sh[0] - 1)
+        wW = np.zeros(sh, bool); wW[kz, jy, ix] = True
+        b2 = self._bbox(wW, int(np.ceil(3.5 / sp.min())) + 1)
+        wW[b2] = ndimage.binary_dilation(wW[b2], iterations=max(1, int(round(2.5 / sp.min()))))   # ワイヤーのにじみ（金属のまわりの明るい所）も骨にしない
+        return dict(mask=wire, at=(i0, j0, k0), src=src, workMask=wW, n=int(keep.sum()), mm3=round(float(wire.sum() * vox)))
+
+    def _buildBone(self, arr, work, spacing, segNode, boneMask, body):
+        """骨の面。胸骨ワイヤー（金属）は骨から抜いて、別の色（銅色）の面にする（骨の中に埋もれて見えなくなるため）"""
+        from scipy import ndimage
+        # AI の骨ラベルは 3mm 格子でカクカク → 形は CT 値（≥200HU）で取り、ラベルは「どこが骨か」の目印にだけ使う
+        near = ndimage.distance_transform_edt(~boneMask, sampling=spacing) <= 3.0
+        bm = (arr >= 200) & near
+        if body is not None: bm &= body
+        if segNode is not None:
+            vv = self._segmentMaskArray(segNode, work, ("aorta", "vena cava", "pulmonary", "heart", "atrial appendage", "brachiocephalic", "subclavian", "carotid", "iliac", "kidney"))
+            if vv is not None: bm &= ~ndimage.binary_dilation(vv, iterations=1)
+        wires = None
+        try: wires = self.findWires(work, segNode)
+        except Exception as e:
+            import traceback; traceback.print_exc(); print("wires:", e)
+        if wires is not None: bm &= ~wires["workMask"]
+        bm = ndimage.binary_closing(bm, iterations=1)
+        bm = self._cleanBinary(bm.astype(np.uint8), spacing, minVox=150)
+        self.layerModels["骨"] = self._surfaceFromBinary(bm, work, "骨", BONE_COLOR, 2); self.visible["骨"] = True
+        old = slicer.mrmlScene.GetFirstNodeByName("CV 胸骨ワイヤー")
+        if old: slicer.mrmlScene.RemoveNode(old)
+        self.layerModels.pop("胸骨ワイヤー", None); self.wireStats = dict(n=0, mm3=0)
+        if wires is not None:
+            m = wires["mask"]; sl = self._bbox(m, 4); i0, j0, k0 = wires["at"]
+            if max(wires["src"].GetSpacing()) > 1.25:                             # 厚いスライス（2〜5mm）では細い線が面にならず消える → 1 画素ふくらませる
+                m = m.copy(); m[sl] = ndimage.binary_dilation(m[sl], iterations=1)
+            model = self._surfaceFromBinary(np.ascontiguousarray(m[sl]).astype(np.uint8), self._boxVol(wires["src"], i0 + sl[2].start, j0 + sl[1].start, k0 + sl[0].start),
+                                            "胸骨ワイヤー", WIRE_COLOR, 1, keepSmall=True)
+            d = model.GetDisplayNode(); d.SetSpecular(0.9); d.SetPower(70); d.SetAmbient(0.25)
+            self.layerModels["胸骨ワイヤー"] = model; self.visible["胸骨ワイヤー"] = True
+            self.wireStats = dict(n=wires["n"], mm3=wires["mm3"])
+        print("胸骨ワイヤー:", self.wireStats)
+
+    def redoMetal(self, status=lambda m: None):
+        """前に作った症例で、骨・胸骨ワイヤー・人工物・石灰化だけ作り直す（保存してある AI ラベルを使う）"""
+        work = getattr(self, "workVolume", None); segNode = self._findSegmentation()
+        if work is None or work.GetImageData() is None or segNode is None:
+            raise RuntimeError("AI のラベルか作業用の画像がありません。「3D を自動で作る」からやり直してください")
+        arr = slicer.util.arrayFromVolume(work); spacing = float(min(work.GetSpacing()))
+        boneVis = bool(self.visible.get("骨", False))
+        status("骨のラベルを取得中…"); boneMask = self._boneMaskArray(segNode, work)
+        if boneMask is not None:
+            status("骨・胸骨ワイヤーを作り直しています…"); slicer.app.processEvents()
+            self._buildBone(arr, work, spacing, segNode, boneMask, self._bodyMask(arr))
+        status("人工物・石灰化を探しています…"); slicer.app.processEvents()
+        self.buildImplantsCalc(arr, work, spacing, segNode, boneMask)
+        for k in ("骨", "胸骨ワイヤー", "人工物", "石灰化"):
+            n = self.layerModels.get(k)
+            if n is None or n.GetDisplayNode() is None: continue
+            on = boneVis if k == "骨" else True
+            self.visible[k] = on; n.GetDisplayNode().SetVisibility(on)
+        self._updateBounds()
+        if self.cutAxis is not None: self._applyClipToModels(True)
+        try: self.updateInset()
+        except Exception: pass
+        w = getattr(self, "wireStats", None) or {}; s = getattr(self, "implantStats", None) or {}
+        return (f"作り直しました: 胸骨ワイヤー {w.get('n', 0)} 個（銅色）・人工物 {s.get('metal_n', 0)} 個（銀）・石灰化 {s.get('calc_n', 0)} 個（黄白）"
+                + ("" if w.get("n") else "。胸骨ワイヤーは見つかりませんでした"))
+
     def buildImplantsCalc(self, arr, work, spacing, segNode, boneMask=None):
         """心臓・大血管のまわりで、金属（人工弁のリング・ステント・クリップ・ワイヤー）と石灰化を CT 値から見つけて、別の色の面にする。
         - 金属: 2000 HU 以上
@@ -1494,6 +1689,14 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         near = ndimage.distance_transform_edt(~vv, sampling=spacing) <= 6.0
         if boneMask is not None and boneMask.any():
             near &= ~(ndimage.distance_transform_edt(~boneMask, sampling=spacing) <= 2.0)
+        try:                                                                 # 心腔・大血管の内側（縁から 2 mm より内）は造影剤のむら（右心系への流入など）なので石灰化にしない
+            hc = self._findChambers()
+            inner = self._segmentMaskArray(hc, work, ("ventricle", "atrium", "pulmonary artery")) if hc is not None else None
+            v2 = self._segmentMaskArray(segNode, work, ("vena cava", "atrium"))
+            inner = v2 if inner is None else (inner if v2 is None else inner | v2)
+            if inner is not None and inner.any():
+                near &= ~ndimage.binary_erosion(inner, iterations=max(1, int(round(2.0 / float(np.min(spacing) if np.ndim(spacing) else spacing)))))
+        except Exception as e: print("calc inner:", e)
         veins = self._segmentMaskArray(segNode, work, ("superior vena cava", "brachiocephalic vein", "subclavian vein", "jugular vein"))
         if veins is not None and veins.any(): near &= ~ndimage.binary_dilation(veins, iterations=1)
         # 作業用画像（0.8mm・ぼかし済み）では小さな石灰化や細いワイヤーが消えるので、元の CT（0.3〜0.5mm）で探す
@@ -1520,6 +1723,12 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         metal = (sub >= self.METAL_HU) & nearS
         calc = (sub >= calcT) & (sub < self.METAL_HU) & nearS
         del nearS
+        if metal.any() and calc.any():                           # 金属（ステントの線など）につながっている「石灰化」は、厚いスライスでぼけた金属 → 人工物にまとめる
+            lc, nc = ndimage.label(calc, structure=np.ones((3, 3, 3)))
+            touch = np.unique(lc[ndimage.binary_dilation(metal, iterations=2) & calc]); touch = touch[touch > 0]
+            if len(touch):
+                mv = np.isin(lc, touch); metal |= mv; calc &= ~mv
+            del lc
         if metal.any():                                          # 金属のにじみ（ハレーション）は石灰化にしない（金属のまわりの箱だけで計算＝速い）
             for sl in ndimage.find_objects(ndimage.label(metal)[0]):
                 sl = tuple(slice(max(0, q.start - 4), q.stop + 4) for q in sl)
@@ -1723,6 +1932,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if d is getattr(self, "vr4D", None): continue
             try: d.SetVisibility(False); d.SetClipping(False)
             except Exception: pass
+        self._pMask = {}; self._pMaskKey = {}; self.paintOn = False; self._painting = False; self._strokes = []
+        pn = self.layerModels.get("パッチ")
+        if pn is not None:
+            try: self._strokes = json.loads(pn.GetAttribute("CV.patchStrokes") or "[]")
+            except Exception: self._strokes = []
+        try:
+            w = slicer.modules.cardiacview.widgetRepresentation().self()
+            w.paintButton.blockSignals(True); w.paintButton.checked = False; w.paintButton.blockSignals(False)
+        except Exception: pass
         self._updateBounds()
         try: self.studioLighting(0, ssao=True)
         except Exception: pass
@@ -1949,7 +2167,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         A = np.array(B); self.bounds = (A[:, 0::2].min(0), A[:, 1::2].max(0))
 
     def _namesFor(self, name):
-        if name == "人工物・石灰化": return ["人工物", "石灰化"]
+        if name == "人工物・石灰化": return ["人工物", "石灰化", "胸骨ワイヤー"]
         if name == "血液・血管":
             return [k for k in self.layerModels if k == name or k.startswith("血管")]
         return [name]
@@ -1958,7 +2176,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         """心筋の切り口だけを正しく塗る（内腔の穴は空けたまま）。vtkCutter + vtkContourTriangulator"""
         my = self.layerModels.get("心筋")
         capNode = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
-        if getattr(self, "on4D", False):                                    # 4D 表示中は切り口の塗りを出さない（VR が動くので）
+        if getattr(self, "on4D", False) or getattr(self, "vrOn", False):   # 4D・VR の表示中は切り口の塗りを出さない（VR の上にかぶる）
             if capNode is not None and capNode.GetDisplayNode() is not None: capNode.GetDisplayNode().SetVisibility(False)
             return
         show = (my is not None and self.visible.get("心筋", False) and self.cutAxis is not None and self.cutPlane is not None)
@@ -2242,7 +2460,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         m.Modified()
         return hcNode is not None
 
-    STATIC_4D = ("骨", "軟部組織", "人工物")                                 # 4D でも一緒に出せる面（心臓と一緒に動かないもの）
+    STATIC_4D = ("骨", "軟部組織", "人工物", "胸骨ワイヤー")                                 # 4D でも一緒に出せる面（心臓と一緒に動かないもの）
 
     def setLayerVisible(self, name, vis):
         if getattr(self, "on4D", False):                                    # 4D 表示中: 動かない骨・軟部組織・人工物だけ面を出す（心臓・血管の面は動く VR と重なるので戻った時に）
@@ -2270,6 +2488,230 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         for n in list(self.layerModels.values()):
             d = n.GetDisplayNode() if n else None
             if d: d.SetSpecular(0.1 + 0.6 * g); d.SetPower(8 + 60 * g)
+
+    # ---------------------------------------------------------------- パッチ（3D の面の上で塗って色分け）
+    PATCH_KEY = "パッチ"
+    PATCH_OFFSET = 0.35                                                       # 面から浮かせる距離 mm（重なってちらつかないように）
+
+    def _paintTargets(self):
+        """塗れる面: 見えているレイヤー（パッチ自身は除く）"""
+        out = {}
+        for k, n in self.layerModels.items():
+            if k == self.PATCH_KEY or n is None: continue
+            d = n.GetDisplayNode(); pd = n.GetPolyData()
+            if d is None or not d.GetVisibility() or pd is None or pd.GetNumberOfPoints() == 0 or pd.GetNumberOfPolys() == 0: continue
+            out[k] = n
+        return out
+
+    def _pcache(self, k, n):
+        """面ごとの探し物用データ（点の KD 木・三角形の探索・頂点番号・法線）。面が作り直されたら作り直す"""
+        from scipy.spatial import cKDTree
+        from vtk.util.numpy_support import vtk_to_numpy
+        c = self.__dict__.setdefault("_pc", {})
+        pd = n.GetPolyData(); key = (n.GetID(), pd.GetNumberOfPoints(), pd.GetNumberOfPolys(), pd.GetPoints().GetMTime())
+        e = c.get(k)
+        if e is not None and e["key"] == key: return e
+        P = vtk_to_numpy(pd.GetPoints().GetData()).astype(np.float64)
+        polys = pd.GetPolys()
+        try:
+            off = vtk_to_numpy(polys.GetOffsetsArray()); con = vtk_to_numpy(polys.GetConnectivityArray())
+            ok = len(off) > 1 and bool(np.all(np.diff(off) == 3))
+        except Exception: ok = False
+        if not ok:
+            tf = vtk.vtkTriangleFilter(); tf.SetInputData(pd); tf.PassVertsOff(); tf.PassLinesOff(); tf.Update(); polys = tf.GetOutput().GetPolys()
+            con = vtk_to_numpy(polys.GetConnectivityArray())
+        T = con.reshape(-1, 3).astype(np.int64)
+        ds = vtk.vtkPolyData(); ds.SetPoints(pd.GetPoints()); ds.SetPolys(polys)
+        loc = vtk.vtkStaticCellLocator(); loc.SetDataSet(ds); loc.BuildLocator()
+        nr = pd.GetPointData().GetNormals()
+        if nr is None or nr.GetNumberOfTuples() != len(P):
+            nm = vtk.vtkPolyDataNormals(); nm.SetInputData(ds); nm.SplittingOff(); nm.ComputePointNormalsOn(); nm.Update(); nr = nm.GetOutput().GetPointData().GetNormals()
+        N = vtk_to_numpy(nr).astype(np.float64) if nr is not None and nr.GetNumberOfTuples() == len(P) else None
+        e = dict(key=key, P=P, tree=cKDTree(P), loc=loc, ds=ds, T=T, N=N); c[k] = e
+        return e
+
+    def _paintPick(self, x, y):
+        """画面の (x, y) の下にある、塗れる面の一番手前の点 → (面の名前, 点) / None。切って取り除いた側は通り抜ける"""
+        ren = self._view().renderWindow().GetRenderers().GetFirstRenderer()
+        def w(z):
+            ren.SetDisplayPoint(float(x), float(y), z); ren.DisplayToWorld(); q = ren.GetWorldPoint()
+            return np.array(q[:3], float) / (q[3] if abs(q[3]) > 1e-12 else 1.0)
+        p0, p1 = w(0.0), w(1.0)
+        planes = [(np.array(c, float), np.array(nn, float)) for c, nn in self._activePlanes()[0]]
+        best = None; pts = vtk.vtkPoints(); ids = vtk.vtkIdList()
+        for k, n in self._paintTargets().items():
+            e = self._pcache(k, n); pts.Reset(); ids.Reset()
+            e["loc"].IntersectWithLine(p0.tolist(), p1.tolist(), 1e-4, pts, ids)
+            for i in range(pts.GetNumberOfPoints()):
+                q = np.array(pts.GetPoint(i)); dist = float(np.linalg.norm(q - p0))
+                if best is not None and dist >= best[0]: continue
+                if planes and not any(float((q - c) @ nn) >= -0.05 for c, nn in planes): continue   # 切って消えている所
+                best = (dist, k, q)
+        return None if best is None else (best[1], best[2])
+
+    def paintStart(self, r):
+        self.paintOn = True; self.paintR = float(r); self._painting = False
+        self.__dict__.setdefault("_strokes", [])
+        for k, n in self._paintTargets().items(): self._pcache(k, n)          # 最初のひと塗りで待たないように先に準備
+        self._patchSync()
+
+    def paintEnd(self):
+        was = getattr(self, "paintOn", False); self.paintOn = False; self._painting = False
+        if was: self._patchBuild(); self._patchSave()
+        a = float(getattr(self, "_patchAreaV", 0.0) or 0.0)
+        return f"パッチを塗り終わりました（塗った広さ 約 {a / 100:.1f} cm²）" if a > 0 else "パッチ: 塗った所はありません"
+
+    def _patchSync(self):
+        """塗った記録（体の座標の筆の跡）と、面ごとの「塗った点」がずれていたら作り直す（面を作り直した時・開き直した時）"""
+        pm = self.__dict__.setdefault("_pMask", {}); pk = self.__dict__.setdefault("_pMaskKey", {})
+        for s in getattr(self, "_strokes", None) or []:
+            n = self.layerModels.get(s[1])
+            if n is None or n.GetPolyData() is None or n.GetPolyData().GetNumberOfPoints() == 0: continue
+            e = self._pcache(s[1], n)
+            if pm.get(s[1]) is None or pk.get(s[1]) != e["key"]: self._patchReplay(); return
+
+    def _patchReplay(self):
+        self._pMask = {}; self._pMaskKey = {}
+        for sid, k, x, y, z, r, er in getattr(self, "_strokes", None) or []:
+            n = self.layerModels.get(k)
+            if n is None or n.GetPolyData() is None or n.GetPolyData().GetNumberOfPoints() == 0: continue
+            self._dabMask(k, n, (x, y, z), r, er)
+
+    def _dabMask(self, k, n, p, r, erase):
+        e = self._pcache(k, n)
+        pm = self.__dict__.setdefault("_pMask", {}); pk = self.__dict__.setdefault("_pMaskKey", {})
+        m = pm.get(k)
+        if m is None or len(m) != len(e["P"]) or pk.get(k) != e["key"]:
+            m = pm[k] = np.zeros(len(e["P"]), bool); pk[k] = e["key"]
+        idx = e["tree"].query_ball_point(np.asarray(p, float), float(r))
+        if len(idx): m[np.asarray(idx, np.int64)] = not erase
+
+    def _paintPress(self, it):
+        inter = slicer.app.applicationLogic().GetInteractionNode()
+        if inter.GetCurrentInteractionMode() == inter.Place: return False      # 計測を置いている時は塗らない
+        x, y = it.GetEventPosition(); hit = self._paintPick(x, y)
+        if hit is None: return False
+        st = self.__dict__.setdefault("_strokes", [])
+        self._sid = max([s[0] for s in st], default=0) + 1
+        self._painting = True; self._paintErase = bool(it.GetControlKey()); self._lastDab = None
+        self._patchSync(); self._paintAt(hit)
+        return True
+
+    def _paintMove(self, it):
+        x, y = it.GetEventPosition(); hit = self._paintPick(x, y)
+        if hit is not None: self._paintAt(hit)
+
+    def _paintRelease(self):
+        self._painting = False; self._lastDab = None
+        t = getattr(self, "_ptTimer", None)
+        if t is not None: t.stop()
+        self._patchBuild(); self._patchSave()
+
+    def _paintAt(self, hit):
+        k, p = hit; n = self.layerModels.get(k); p = np.asarray(p, float)
+        r = float(getattr(self, "paintR", 4.0)); er = 1 if getattr(self, "_paintErase", False) else 0
+        last = getattr(self, "_lastDab", None); seq = [p]
+        if last is not None and last[0] == k:                                  # 速く動かしても途切れないように間を埋める
+            d = float(np.linalg.norm(p - last[1]))
+            if 0.5 * r < d < 60.0:
+                m = int(np.ceil(d / (0.5 * r))); seq = [last[1] + (p - last[1]) * (i / m) for i in range(1, m + 1)]
+        for q in seq:
+            self._dabMask(k, n, q, r, er)
+            self._strokes.append([self._sid, k, round(float(q[0]), 2), round(float(q[1]), 2), round(float(q[2]), 2), r, er])
+        self._lastDab = (k, p)
+        t = getattr(self, "_ptTimer", None)
+        if t is None:
+            t = self._ptTimer = qt.QTimer(); t.setSingleShot(True); t.setInterval(60); t.connect("timeout()", self._patchBuild)
+        if not t.isActive(): t.start()
+
+    def _patchBuild(self):
+        """塗った点から「CV パッチ」の面を作る（塗った三角形を、面の表と裏へ少し浮かせて 2 枚）"""
+        from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+        app = vtk.vtkAppendPolyData(); cnt = 0; area = 0.0
+        for k, m in list((getattr(self, "_pMask", None) or {}).items()):
+            n = self.layerModels.get(k)
+            if n is None or m is None or not m.any() or n.GetPolyData() is None: continue
+            e = self._pcache(k, n)
+            if len(m) != len(e["P"]): continue
+            T = e["T"]; sel = m[T].all(axis=1)
+            if not sel.any(): continue
+            Ts = T[sel]; used = np.unique(Ts); remap = np.full(len(e["P"]), -1, np.int64); remap[used] = np.arange(len(used))
+            Pu = e["P"][used]; Nu = e["N"][used] if e["N"] is not None else None; Tr = remap[Ts]
+            area += 0.5 * float(np.linalg.norm(np.cross(Pu[Tr[:, 1]] - Pu[Tr[:, 0]], Pu[Tr[:, 2]] - Pu[Tr[:, 0]]), axis=1).sum())
+            cells = np.ascontiguousarray(np.hstack([np.full((len(Tr), 1), 3, np.int64), Tr]).ravel())
+            for sg in ((1.0, -1.0) if Nu is not None else (0.0,)):
+                Q = np.ascontiguousarray(Pu + sg * self.PATCH_OFFSET * Nu) if Nu is not None else np.ascontiguousarray(Pu)
+                pts = vtk.vtkPoints(); pts.SetData(numpy_to_vtk(Q, deep=True))
+                ca = vtk.vtkCellArray(); ca.SetCells(len(Tr), numpy_to_vtkIdTypeArray(cells, deep=True))
+                pd = vtk.vtkPolyData(); pd.SetPoints(pts); pd.SetPolys(ca); app.AddInputData(pd); cnt += 1
+        self._patchAreaV = area
+        node = self.layerModels.get(self.PATCH_KEY)
+        if node is not None and not slicer.mrmlScene.IsNodePresent(node): node = None
+        if node is None: node = slicer.mrmlScene.GetFirstNodeByName("CV パッチ")
+        if cnt == 0:
+            if node is not None: node.SetAndObservePolyData(vtk.vtkPolyData())
+            self._view().scheduleRender(); return
+        app.Update()
+        nm = vtk.vtkPolyDataNormals(); nm.SetInputConnection(app.GetOutputPort()); nm.SplittingOff(); nm.ConsistencyOff(); nm.AutoOrientNormalsOff(); nm.Update()
+        out = vtk.vtkPolyData(); out.DeepCopy(nm.GetOutput())
+        if node is None:
+            node = slicer.modules.models.logic().AddModel(out); node.SetName("CV パッチ")
+            d = node.GetDisplayNode(); self._styleDisplay(d, PATCH_COLOR); d.SetSpecular(0.35); d.SetPower(25); d.SetAmbient(0.22)
+            self._put(node)
+        else:
+            node.SetAndObservePolyData(out)
+        self.layerModels[self.PATCH_KEY] = node; self.visible[self.PATCH_KEY] = True
+        d = node.GetDisplayNode()
+        if d is not None:
+            if not d.GetVisibility(): d.SetVisibility(True)
+            if self.cutAxis is not None and d.GetAttribute("CV.clipWant") != "1": self._applyClipToModels(True)
+        self._view().scheduleRender()
+
+    def _patchSave(self):
+        """塗った記録を「CV パッチ」に持たせる（症例を保存すると一緒に残り、開き直しても続きを塗れる・戻せる）"""
+        node = self.layerModels.get(self.PATCH_KEY)
+        if node is not None and slicer.mrmlScene.IsNodePresent(node):
+            node.SetAttribute("CV.patchStrokes", json.dumps(getattr(self, "_strokes", None) or [], ensure_ascii=False))
+
+    def patchUndo(self):
+        st = getattr(self, "_strokes", None) or []
+        if not st: return "戻すものがありません"
+        last = max(s[0] for s in st); self._strokes = [s for s in st if s[0] != last]
+        self._patchReplay(); self._patchBuild(); self._patchSave()
+        return "ひと塗り戻しました"
+
+    def patchClear(self):
+        if not (getattr(self, "_strokes", None) or []): return "塗ったパッチはありません"
+        self._strokes = []; self._pMask = {}; self._pMaskKey = {}; self._patchBuild(); self._patchSave()
+        return "塗ったパッチを全部消しました（「1つ戻す」では戻りません）"
+
+    def patchFace(self, gap=4.0):
+        """塗ったパッチを正面に向けて、パッチの少し手前（gap mm）から手前を切る（体に固定）"""
+        from vtk.util.numpy_support import vtk_to_numpy
+        node = self.layerModels.get(self.PATCH_KEY)
+        pd = node.GetPolyData() if node is not None else None
+        if pd is None or pd.GetNumberOfPoints() < 3: return False
+        P = vtk_to_numpy(pd.GetPoints().GetData()).astype(float)
+        c = P.mean(0); _, _, Vt = np.linalg.svd(P - c, full_matrices=False); n = Vt[2] / np.linalg.norm(Vt[2])
+        cn = self._camera(); cam = cn.GetCamera()
+        pos = np.array(cam.GetPosition()); fp = np.array(cam.GetFocalPoint())
+        if float((pos - c) @ n) < 0: n = -n                                   # 今見ている側から
+        dist = float(np.linalg.norm(pos - fp)) or 300.0
+        up = np.array(cam.GetViewUp(), float); up = up - n * float(up @ n)
+        if np.linalg.norm(up) < 1e-3: up = np.array([0.0, 0.0, 1.0]) - n * n[2]
+        up /= np.linalg.norm(up); rt = np.cross(up, n)
+        half = float(max(np.abs((P - c) @ up).max(), np.abs((P - c) @ rt).max(), 8.0))
+        self.flying = False
+        cn.SetFocalPoint(*c); cn.SetPosition(*(c + n * dist)); cn.SetViewUp(*up)
+        if cam.GetParallelProjection(): cam.SetParallelScale(max(30.0, 2.2 * half))
+        lo, hi = self._visibleBounds()
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        proj = corners @ n; dmin, dmax = float(proj.min()), float(proj.max())
+        s_ = float(c @ n + max(0.0, float(((P - c) @ n).max())) + gap)
+        self._lockN = n.tolist(); self._lockPrev = "VIEW"
+        self.setCut("LOCK", float(np.clip((dmax - s_) / max(dmax - dmin, 1e-6), 0, 1)))
+        cn.ResetClippingRange(); self._view().forceRender()
+        return True
 
     # ---------------------------------------------------------------- cut (clip node: 再計算なし・即時)
     def _clipNode(self):
@@ -2365,7 +2807,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         elif getattr(self, "insetOn", True) and getattr(self, "bounds", None) is not None: self.updateInset()
         self._view().scheduleRender()
 
-    INSET_SKIP = ("CV 軟部組織", "CV 骨")
+    INSET_SKIP = ("CV 軟部組織", "CV 骨", "CV 胸骨ワイヤー")
 
     def updateInset(self):
         """左下の全体図を作り直す（モデルを作った後に呼ぶ）"""
@@ -2516,6 +2958,34 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         node.SetIJKToRASMatrix(G)
         return node, shp
 
+    def _applyVRTints(self, rgb, src, lo, step):
+        """VR の色に「範囲の色」を重ねる。self.vrTints = [dict(mask=配列 (z,y,x), ijkToRAS=4x4, color=(r,g,b)), ...]
+        範囲の各点を VR の粗い格子へ写して塗る（範囲だけ計算するので速い）"""
+        tints = list(getattr(self, "vrTints", None) or [])
+        for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):
+            tc = n.GetAttribute("CV.vrTint"); pd = n.GetPolyData()
+            if not tc or pd is None or pd.GetNumberOfPoints() == 0: continue
+            from vtk.util.numpy_support import vtk_to_numpy
+            tints.append(dict(points=vtk_to_numpy(pd.GetPoints().GetData()).astype(float), color=tuple(float(x) for x in tc.split(","))))
+        if not tints: return
+        from scipy import ndimage
+        S = vtk.vtkMatrix4x4(); src.GetIJKToRASMatrix(S); Ms = slicer.util.arrayFromVTKMatrix(S)
+        G = Ms @ np.array([[step, 0, 0, lo[2]], [0, step, 0, lo[1]], [0, 0, step, lo[0]], [0, 0, 0, 1.0]])   # 粗い格子 (i, j, k) → RAS
+        Gi = np.linalg.inv(G); sh = rgb.shape[:3]
+        for t in tints:
+            if t.get("points") is not None:
+                ras = np.c_[t["points"], np.ones(len(t["points"]))].T
+            else:
+                m = t.get("mask")
+                if m is None or not m.any(): continue
+                idx = np.argwhere(m)                                               # (z, y, x)
+                ras = t["ijkToRAS"] @ np.c_[idx[:, ::-1], np.ones(len(idx))].T
+            g = np.rint((Gi @ ras)[:3]).astype(int)                                  # (i, j, k)
+            ok = (g[0] >= 0) & (g[0] < sh[2]) & (g[1] >= 0) & (g[1] < sh[1]) & (g[2] >= 0) & (g[2] < sh[0])
+            hit = np.zeros(sh, bool); hit[g[2][ok], g[1][ok], g[0][ok]] = True
+            hit = ndimage.binary_dilation(hit, iterations=1)
+            rgb[hit] = np.array(t.get("color", (0.15, 0.85, 0.35)), np.float32)
+
     def setupVR(self, status=lambda m: None):
         """心臓まわりだけ切り出した元の CT を、部屋ごとに色分け・造影の目盛りをそろえた RGBA の VR にする"""
         from scipy import ndimage
@@ -2594,6 +3064,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         else:
             near = lab
         rgb = cols[near]                                              # (z, y, x, 3)
+        try: self._applyVRTints(rgb, src, lo, step)                       # 部屋の色の上に、決めた範囲（パッチなど）を別の色で塗る
+        except Exception as e: print("VR tint:", e)
         for k in range(3): rgb[..., k] = ndimage.gaussian_filter(rgb[..., k], 1.5 / gsp)   # 境目をぼかす
         bloc = np.where(isR[near], bR, bL).astype(np.float32)
         bloc = ndimage.gaussian_filter(bloc, 4.0 / gsp)               # 左右の目盛りを 4mm かけてつなぐ
@@ -3938,6 +4410,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _mPress(self, it, b):
         if not self._mine(): return
         if not hasattr(self, "_btn"): self._btn = {"L": False, "R": False}; self._wl = None
+        if b == "L" and getattr(self, "paintOn", False) and not it.GetShiftKey():   # パッチを塗る（面の上を押した時だけ。何もない所はいつもの回転）
+            try:
+                if self._paintPress(it): self._mAbort(it); return
+            except Exception:
+                import traceback; traceback.print_exc(); self._painting = False
         self._vrFast(True)
         self._btn[b] = True
         mode = getattr(self, "rmode", "zoom")
@@ -3959,6 +4436,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if not self._mine(): return
         if not hasattr(self, "_btn"): self._btn = {"L": False, "R": False}; self._wl = None
         self._btn[b] = False
+        if b == "L" and getattr(self, "_painting", False):
+            self._paintRelease(); self._mAbort(it); return
         if b == "R" and getattr(self, "_rdrag", None) is not None:
             self._rdrag = None; self._mAbort(it); self._vrSettle(); return
         if not (self._btn["L"] or self._btn["R"]): self._vrSettle()
@@ -3967,6 +4446,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if b == "R": self._mAbort(it)
 
     def _mMove(self, it):
+        if getattr(self, "_painting", False) and self._mine():
+            try: self._paintMove(it)
+            except Exception:
+                import traceback; traceback.print_exc(); self._painting = False
+            self._mAbort(it); return
         rd = getattr(self, "_rdrag", None)
         if rd is not None and self._mine():
             mode, (x0, y0), cam0, win0, frac0 = rd; x, y = it.GetEventPosition()
@@ -4039,6 +4523,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _delKey(self, it, nm):
         """Delete / BackSpace = 計測を 1 つ丸ごと消す（心臓・大動脈どちらの画面でも）。
         マウスを乗せている計測 → それ。描いている途中 → それ。どれでもなければ最後に触った計測"""
+        if (it.GetKeySym() or "") == "Escape" and getattr(self, "paintOn", False):   # Esc = パッチを塗り終わる
+            try: slicer.modules.cardiacview.widgetRepresentation().self().paintButton.checked = False
+            except Exception: self.paintEnd()
+            return
         if (it.GetKeySym() or "") not in ("Delete", "BackSpace"): return
         cands = [n for n in slicer.util.getNodesByClass("vtkMRMLMarkupsNode")
                  if n.GetAttribute("CV.measure") or n.GetAttribute("SA.measure")]
@@ -4142,7 +4630,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     def _visibleBounds(self):
         B = [n.GetPolyData().GetBounds() for name, n in self.layerModels.items()
-             if n and n.GetPolyData() and n.GetPolyData().GetNumberOfPoints() and self.visible.get(name, True)]
+             if n and n.GetPolyData() and n.GetPolyData().GetNumberOfPoints() and self.visible.get(name, True) and name != "胸骨ワイヤー"]
         if not B: return self.bounds
         A = np.array(B); return (A[:, 0::2].min(0), A[:, 1::2].max(0))
 
