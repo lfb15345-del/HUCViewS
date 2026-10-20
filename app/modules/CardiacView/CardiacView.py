@@ -41,16 +41,23 @@ PATCH_COLOR = (0.95, 0.95, 0.92)    # パッチの範囲（自動）: 白（布�
 LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
 # ---- 色合い（設定 → 見た目 → 色合い）。分け方（どの部屋・血管を何色の系統にするか）は同じで、色の濃さ・光沢だけ変える
-#   リアル: 動脈血 = 深い赤、静脈血 = 濃い青、心外膜の脂肪 = 黄、骨 = アイボリー。光沢を強めにして立体感を出す（解剖図・シネマティック表示に近い色）
+#   リアル: 動脈系 = 深紅（少し青みのある赤）、静脈系・右心系 = 薄紫、心筋・脂肪 = 金色。シネマティック表示に近い色（光沢やや強め）
+#   赤と青: 動脈系 = 深い赤、静脈系 = 濃い青（教科書の色）
 #   落ち着いた: これまでの色（彩度を落とした色）
 PALETTES = {
-    "リアル": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), pa=(0.29, 0.33, 0.63),
+    "リアル": dict(aorta=(0.74, 0.18, 0.28), sysvein=(0.60, 0.52, 0.78), pv=(0.82, 0.32, 0.40), heart=(0.72, 0.17, 0.27), heartR=(0.50, 0.40, 0.70), la=(0.86, 0.42, 0.48), ra=(0.70, 0.62, 0.84), pa=(0.48, 0.38, 0.68),
+                 myo=(0.80, 0.62, 0.34), myocut=(0.80, 0.60, 0.34), epi=(0.86, 0.70, 0.42), endo=(0.88, 0.58, 0.52), endoR=(0.70, 0.62, 0.84),
+                 bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.72),
+                 vr=[(0.78, 0.22, 0.32), (0.88, 0.44, 0.50), (0.80, 0.20, 0.30), (0.86, 0.38, 0.46), (0.88, 0.44, 0.50),
+                     (0.54, 0.44, 0.74), (0.72, 0.64, 0.86), (0.50, 0.40, 0.72), (0.64, 0.56, 0.82)], vrN=(0.88, 0.70, 0.44),
+                 spec=0.45, power=35.0, amb=0.15, dif=0.90),
+    "赤と青": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), la=(0.80, 0.40, 0.28), ra=(0.40, 0.54, 0.76), pa=(0.29, 0.33, 0.63),
                  myo=(0.52, 0.13, 0.12), myocut=(0.59, 0.17, 0.15), epi=(0.82, 0.72, 0.54), endo=(0.77, 0.35, 0.31), endoR=(0.41, 0.45, 0.72),
                  bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.70),
                  vr=[(0.76, 0.24, 0.23), (0.82, 0.34, 0.30), (0.80, 0.20, 0.20), (0.84, 0.32, 0.28), (0.82, 0.34, 0.30),
                      (0.32, 0.36, 0.69), (0.38, 0.43, 0.74), (0.31, 0.34, 0.67), (0.34, 0.38, 0.71)], vrN=(0.82, 0.53, 0.46),
                  spec=0.35, power=30.0, amb=0.18, dif=0.85),
-    "落ち着いた": dict(aorta=(0.74, 0.14, 0.16), sysvein=(0.24, 0.34, 0.60), pv=(0.84, 0.40, 0.36), heart=(0.66, 0.28, 0.32), heartR=(0.46, 0.54, 0.80), pa=(0.40, 0.52, 0.78),
+    "落ち着いた": dict(aorta=(0.74, 0.14, 0.16), sysvein=(0.24, 0.34, 0.60), pv=(0.84, 0.40, 0.36), heart=(0.66, 0.28, 0.32), heartR=(0.46, 0.54, 0.80), la=(0.86, 0.52, 0.42), ra=(0.60, 0.70, 0.90), pa=(0.40, 0.52, 0.78),
                   myo=(0.55, 0.15, 0.14), myocut=(0.64, 0.17, 0.15), epi=(0.84, 0.72, 0.64), endo=(0.94, 0.76, 0.72), endoR=(0.74, 0.80, 0.94),
                   bone=(0.88, 0.86, 0.80), calc=(1.00, 0.92, 0.55),
                   vr=[(0.88, 0.44, 0.40), (0.95, 0.62, 0.50), (0.93, 0.30, 0.28), (0.95, 0.55, 0.45), (0.95, 0.62, 0.50),
@@ -72,7 +79,7 @@ def _setPalette(name):
     VESSEL_GROUPS = [(nm, keys, p[k]) for (nm, keys), k in zip(_VG_BASE, ("aorta", "sysvein", "pv", "heart"))]
     VESSEL_OTHER = ("血管:肺動脈ほか", p["pa"])
     LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", p["aorta"]), ("肺静脈", p["pv"]),
-              ("左心系の血液", p["heart"]), ("右心系の血液", p["heartR"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
+              ("左房", p["la"]), ("左室", p["heart"]), ("右房", p["ra"]), ("右室", p["heartR"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
     LEGEND_WALL = [("外膜", p["epi"]), ("左心系の内膜", p["endo"]), ("右心系の内膜", p["endoR"]), ("補った壁（CT値の裏付けなし）", SYNTH_COLOR), ("心筋（AIラベル）", p["myocut"])]
     return p
 
@@ -638,9 +645,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         card, c, _ = self._card(P, "見た目"); self._lookLay = c
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
         self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow(Lb("背景", "muted"), self.bgCombo)
-        self.paletteCombo = qt.QComboBox(); self.paletteCombo.addItems(["リアル（くっきり）", "落ち着いた（前の色）"])
+        self.paletteCombo = qt.QComboBox(); self.paletteCombo.addItems(["リアル（深紅・金・薄紫）", "赤と青", "落ち着いた（前の色）"])
         self.paletteCombo.setToolTip("面と VR の色合い。分け方は同じで、色の濃さと光沢だけ変わる")
-        self.paletteCombo.currentIndex = 0 if CUR_PALETTE == "リアル" else 1; f.addRow(Lb("色合い", "muted"), self.paletteCombo)
+        self.paletteCombo.currentIndex = {"リアル": 0, "赤と青": 1}.get(CUR_PALETTE, 2); f.addRow(Lb("色合い", "muted"), self.paletteCombo)
         self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow(Lb("光沢", "muted"), self.glossSlider)
         self.opacitySlider = ctk.ctkSliderWidget(); self.opacitySlider.minimum = 0; self.opacitySlider.maximum = 100; self.opacitySlider.value = 100; f.addRow(Lb("血液の不透明度", "muted"), self.opacitySlider)
         self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow(Lb("視野角", "muted"), self.fovSlider)
@@ -835,7 +842,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             except Exception: print(msg)
 
     def onPalette(self, i):
-        name = "リアル" if i == 0 else "落ち着いた"
+        name = ("リアル", "赤と青", "落ち着いた")[max(0, min(2, int(i)))]
         try: qt.QSettings().setValue(PALETTE_KEY, name)
         except Exception: pass
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
@@ -2604,15 +2611,17 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: self._view().scheduleRender()
         except Exception: pass
 
+    ROOMS = (("left atrium",), ("left ventricle",), ("right atrium",), ("right ventricle",))   # 0 左房 / 1 左室 / 2 右房 / 3 右室
+
     def _colorChambersLR(self, p=None):
-        """「血管:心臓」（心腔の血液の面）を左心系と右心系で塗り分ける。頂点ごとに一番近い心腔ラベル（左房・左室 / 右房・右室）で決める。
-        決めた結果は面に持たせる（保存される）ので計算は 1 回だけ。色は色合いに合わせて変えるだけ"""
+        """「血管:心臓」（心腔の血液の面）を 左房・左室・右房・右室 で塗り分ける。頂点ごとに一番近い心腔ラベルで決める。
+        決めた結果（CV_room）は面に持たせる（保存される）ので計算は 1 回だけ。色合いを変えた時は色だけ塗り直す"""
         from scipy import ndimage
         from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
         p = p or PALETTES.get(CUR_PALETTE, PALETTES["リアル"])
         node = self.layerModels.get("血管:心臓"); pd = node.GetPolyData() if node is not None else None
         if pd is None or pd.GetNumberOfPoints() == 0 or node.GetDisplayNode() is None: return False
-        arr = pd.GetPointData().GetArray("CV_side")
+        arr = pd.GetPointData().GetArray("CV_room")
         if arr is None or arr.GetNumberOfTuples() != pd.GetNumberOfPoints():
             hc = self._findChambers()
             if hc is None: return False
@@ -2622,23 +2631,26 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             for a in range(3): G.SetElement(a, a, h); G.SetElement(a, 3, float(lo[a]))
             ref = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "cv_tmpRef")
             img = vtk.vtkImageData(); img.SetDimensions(int(n[0]), int(n[1]), int(n[2])); img.AllocateScalars(vtk.VTK_SHORT, 1); ref.SetAndObserveImageData(img); ref.SetIJKToRASMatrix(G)
+            lab = None
             try:
-                Lm = self._segmentMaskArray(hc, ref, ("left atrium", "left ventricle")); Rm = self._segmentMaskArray(hc, ref, ("right atrium", "right ventricle"))
+                for i, keys in enumerate(self.ROOMS):
+                    m = self._segmentMaskArray(hc, ref, keys)
+                    if m is None: continue
+                    if lab is None: lab = np.zeros(m.shape, np.uint8)
+                    lab[m & (lab == 0)] = i + 1
             finally:
                 slicer.mrmlScene.RemoveNode(ref)
-            if Lm is None or Rm is None or not (Lm.any() and Rm.any()): return False
-            lab = np.zeros(Lm.shape, np.uint8); lab[Lm] = 1; lab[Rm & ~Lm] = 2
+            if lab is None or len(np.unique(lab)) < 3: return False
             _, ind = ndimage.distance_transform_edt(lab == 0, return_indices=True); near = lab[tuple(ind)]; del ind
             ijk = np.clip(np.rint((P - lo) / h).astype(int), 0, n - 1)
-            side = (near[ijk[:, 2], ijk[:, 1], ijk[:, 0]] == 2).astype(np.float32)
-            arr = numpy_to_vtk(side, deep=True); arr.SetName("CV_side"); pd.GetPointData().AddArray(arr); pd.Modified()
-        ct = slicer.mrmlScene.GetFirstNodeByName("CV 心腔の左右")
-        if ct is None:
-            ct = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", "CV 心腔の左右"); ct.SetTypeToUser(); ct.SetNumberOfColors(2); ct.SetHideFromEditors(True)
-        ct.SetColor(0, "left", *p["heart"], 1.0); ct.SetColor(1, "right", *p.get("heartR", p["pa"]), 1.0)
+            room = (near[ijk[:, 2], ijk[:, 1], ijk[:, 0]].astype(np.int16) - 1).clip(0, 3).astype(np.uint8)
+            arr = numpy_to_vtk(room, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR); arr.SetName("CV_room"); pd.GetPointData().AddArray(arr)
+        room = vtk_to_numpy(arr).astype(int)
+        cols = np.array([p.get("la", p["heart"]), p["heart"], p.get("ra", p.get("heartR", p["pa"])), p.get("heartR", p["pa"])], float)
+        rgb = numpy_to_vtk(np.ascontiguousarray((cols[room] * 255).round().astype(np.uint8)), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR); rgb.SetName("CV_roomRGB")
+        pd.GetPointData().RemoveArray("CV_roomRGB"); pd.GetPointData().AddArray(rgb); pd.Modified()
         d = node.GetDisplayNode()
-        d.SetActiveScalarName("CV_side"); d.SetAndObserveColorNodeID(ct.GetID())
-        d.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange); d.SetScalarRange(0.0, 1.0); d.SetScalarVisibility(True)
+        d.SetActiveScalarName("CV_roomRGB"); d.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseDirectMapping); d.SetScalarVisibility(True)   # 色をそのまま（部屋の境目はなめらかに混ざる）
         return True
 
     def setGloss(self, g):
