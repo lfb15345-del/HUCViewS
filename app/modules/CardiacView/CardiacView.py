@@ -2017,6 +2017,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if pn is not None:
             try: self._strokes = json.loads(pn.GetAttribute("CV.patchStrokes") or "[]")
             except Exception: self._strokes = []
+            if not self._strokes and pn.GetAttribute("CV.patchSheet") != "1":
+                try: self.patchToSheet()
+                except Exception as e: print("patch sheet:", e)
         try:
             w = slicer.modules.cardiacview.widgetRepresentation().self()
             w.paintButton.blockSignals(True); w.paintButton.checked = False; w.paintButton.blockSignals(False)
@@ -2786,6 +2789,75 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if node is not None and slicer.mrmlScene.IsNodePresent(node):
             node.SetAttribute("CV.patchStrokes", json.dumps(getattr(self, "_strokes", None) or [], ensure_ascii=False))
 
+    def patchToSheet(self, step=2):
+        """自動で出した「パッチの範囲」（閉じた塊＝袋のように見える）を、左室と右室の血液のちょうど真ん中の 1 枚の面にする。
+        本物のパッチは中隔に縫い付けた 1 枚なので。開いた時に 1 回だけ（約 2 秒）。元の塊は隠したモデルに残す"""
+        from scipy import ndimage
+        from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
+        node = self.layerModels.get(self.PATCH_KEY); src = getattr(self, "sourceVolume", None); hc = self._findChambers()
+        pd = node.GetPolyData() if node is not None else None
+        if pd is None or pd.GetNumberOfPolys() == 0 or src is None or hc is None: return False
+        fe0 = vtk.vtkFeatureEdges(); fe0.SetInputData(pd); fe0.BoundaryEdgesOn(); fe0.FeatureEdgesOff(); fe0.NonManifoldEdgesOff(); fe0.ManifoldEdgesOff(); fe0.Update()
+        if fe0.GetOutput().GetNumberOfCells() > 0.02 * pd.GetNumberOfPolys():
+            node.SetAttribute("CV.patchSheet", "1"); return False                 # もともと 1 枚（縁がある）
+        M = vtk.vtkMatrix4x4(); src.GetIJKToRASMatrix(M); A = slicer.util.arrayFromVTKMatrix(M)
+        P = vtk_to_numpy(pd.GetPoints().GetData()).astype(float)
+        ijk = (np.linalg.inv(A) @ np.c_[P, np.ones(len(P))].T)[:3].T
+        dims = np.array(src.GetImageData().GetDimensions()); sp = np.array(src.GetSpacing())
+        mg = np.ceil(10.0 / sp).astype(int)
+        lo = np.maximum(np.floor(ijk.min(0)).astype(int) - mg, 0); hi = np.minimum(np.ceil(ijk.max(0)).astype(int) + mg, dims - 1)
+        hu = slicer.util.arrayFromVolume(src)[lo[2]:hi[2] + 1:step, lo[1]:hi[1] + 1:step, lo[0]:hi[0] + 1:step].astype(np.float32)
+        nz, ny, nx = hu.shape
+        G = A @ np.array([[step, 0, 0, lo[0]], [0, step, 0, lo[1]], [0, 0, step, lo[2]], [0, 0, 0, 1.0]])
+        spc = np.array([np.linalg.norm(G[:3, 2]), np.linalg.norm(G[:3, 1]), np.linalg.norm(G[:3, 0])])   # (z, y, x) mm
+        def vm(X):
+            m = vtk.vtkMatrix4x4()
+            for r in range(4):
+                for c_ in range(4): m.SetElement(r, c_, X[r, c_])
+            return m
+        ref = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "cv_tmpRef")
+        img = vtk.vtkImageData(); img.SetDimensions(nx, ny, nz); img.AllocateScalars(vtk.VTK_SHORT, 1); ref.SetAndObserveImageData(img); ref.SetIJKToRASMatrix(vm(G))
+        try:
+            LV = self._segmentMaskArray(hc, ref, ("left ventricle",)); RV = self._segmentMaskArray(hc, ref, ("right ventricle",))
+        finally:
+            slicer.mrmlScene.RemoveNode(ref)
+        if LV is None or RV is None or not LV.any() or not RV.any(): return False
+        tf = vtk.vtkTransform(); tf.SetMatrix(vm(np.linalg.inv(G)))
+        tp = vtk.vtkTransformPolyDataFilter(); tp.SetInputData(pd); tp.SetTransform(tf); tp.Update()
+        stn = vtk.vtkPolyDataToImageStencil(); stn.SetInputConnection(tp.GetOutputPort()); stn.SetOutputOrigin(0, 0, 0); stn.SetOutputSpacing(1, 1, 1)
+        stn.SetOutputWholeExtent(0, nx - 1, 0, ny - 1, 0, nz - 1); stn.Update()
+        one = vtk.vtkImageData(); one.SetDimensions(nx, ny, nz); one.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1); one.GetPointData().GetScalars().Fill(1)
+        sti = vtk.vtkImageStencil(); sti.SetInputData(one); sti.SetStencilConnection(stn.GetOutputPort()); sti.ReverseStencilOff(); sti.SetBackgroundValue(0); sti.Update()
+        blob = vtk_to_numpy(sti.GetOutput().GetPointData().GetScalars()).reshape(nz, ny, nx) > 0
+        if not blob.any(): return False
+        c = self._cal(); thr = 0.5 * (float(c.get("myo", 80)) + float(c.get("blood", 350)))
+        blood = ndimage.median_filter(hu, 3) > thr                                  # 造影された血液を、近い方の部屋（左室・右室）に分ける
+        dLl = ndimage.distance_transform_edt(~LV, sampling=spc); dRl = ndimage.distance_transform_edt(~RV, sampling=spc)
+        bL = blood & (dLl < dRl) & (dLl < 6); bR = blood & (dRl <= dLl) & (dRl < 6)
+        if not bL.any() or not bR.any(): return False
+        f = (ndimage.distance_transform_edt(~bL, sampling=spc) - ndimage.distance_transform_edt(~bR, sampling=spc)).astype(np.float32)
+        def im_(a, name):
+            im = vtk.vtkImageData(); im.SetDimensions(nx, ny, nz); v = numpy_to_vtk(np.ascontiguousarray(a.ravel()), deep=True); v.SetName(name); im.GetPointData().SetScalars(v); return im
+        fe = vtk.vtkFlyingEdges3D(); fe.SetInputData(im_(f, "f")); fe.SetValue(0, 0.0); fe.ComputeNormalsOff(); fe.ComputeScalarsOff(); fe.Update()   # 左右の血液のちょうど真ん中
+        pr = vtk.vtkProbeFilter(); pr.SetInputConnection(fe.GetOutputPort()); pr.SetSourceData(im_(ndimage.gaussian_filter(blob.astype(np.float32), 1.0), "blob")); pr.Update()
+        o = pr.GetOutput(); o.GetPointData().SetActiveScalars("blob")
+        cl = vtk.vtkClipPolyData(); cl.SetInputData(o); cl.SetValue(0.5); cl.Update()                                 # 塊の中だけ
+        if cl.GetOutput().GetNumberOfPolys() == 0: return False
+        sm = vtk.vtkWindowedSincPolyDataFilter(); sm.SetInputConnection(cl.GetOutputPort()); sm.SetNumberOfIterations(20); sm.SetPassBand(0.05)
+        sm.BoundarySmoothingOn(); sm.FeatureEdgeSmoothingOff(); sm.NonManifoldSmoothingOn(); sm.NormalizeCoordinatesOn(); sm.Update()
+        tr = vtk.vtkTransform(); tr.SetMatrix(vm(G)); tp2 = vtk.vtkTransformPolyDataFilter(); tp2.SetInputConnection(sm.GetOutputPort()); tp2.SetTransform(tr); tp2.Update()
+        nm = vtk.vtkPolyDataNormals(); nm.SetInputConnection(tp2.GetOutputPort()); nm.SplittingOff(); nm.ConsistencyOn(); nm.AutoOrientNormalsOff(); nm.ComputePointNormalsOn(); nm.Update()
+        sheet = vtk.vtkPolyData(); sheet.DeepCopy(nm.GetOutput()); sheet.GetPointData().SetScalars(None)
+        keep = slicer.mrmlScene.GetFirstNodeByName("CV パッチの範囲（元の塊）")
+        if keep is None:
+            keep = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "CV パッチの範囲（元の塊）"); keep.SetHideFromEditors(True)
+            cp = vtk.vtkPolyData(); cp.DeepCopy(pd); keep.SetAndObservePolyData(cp)
+        node.SetAndObservePolyData(sheet); node.SetAttribute("CV.patchSheet", "1")
+        d = node.GetDisplayNode()
+        if d is not None: d.SetBackfaceCulling(False); d.SetFrontfaceCulling(False)
+        self._view().scheduleRender()
+        return True
+
     def patchUndo(self):
         st = getattr(self, "_strokes", None) or []
         if not st: return "戻すものがありません"
@@ -2806,6 +2878,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if pd is None or pd.GetNumberOfPoints() < 3: return False
         P = vtk_to_numpy(pd.GetPoints().GetData()).astype(float)
         c = P.mean(0); _, _, Vt = np.linalg.svd(P - c, full_matrices=False); n = Vt[2] / np.linalg.norm(Vt[2])
+        nr = pd.GetPointData().GetNormals()
+        if nr is not None and nr.GetNumberOfTuples() == len(P):                 # 曲がった 1 枚のパッチ: 法線の向きの平均（表裏は問わない）が正面
+            N = vtk_to_numpy(nr).astype(float); w_, V_ = np.linalg.eigh(N.T @ N); n = V_[:, -1] / np.linalg.norm(V_[:, -1])
         cn = self._camera(); cam = cn.GetCamera()
         pos = np.array(cam.GetPosition()); fp = np.array(cam.GetFocalPoint())
         if float((pos - c) @ n) < 0: n = -n                                   # 今見ている側から
