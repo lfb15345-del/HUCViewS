@@ -3538,11 +3538,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: dm = self._view().displayableManagerByClassName("vtkMRMLModelDisplayableManager")
         except Exception: dm = None
         coll = self._planeColl("_mdPlanes", planes) if gpu else None
-        pn = self.layerModels.get(self.PATCH_KEY) if getattr(self, "vrOn", False) else None
         for n in list(self.layerModels.values()):
             d = n.GetDisplayNode() if n else None
             if d is None: continue
-            want = d.GetAttribute("CV.clipWant") == "1" and bool(planes) and n is not pn   # VR の時、パッチは切らずに切り口の上に出す
+            want = d.GetAttribute("CV.clipWant") == "1" and bool(planes)                  # パッチも他の面と同じに切る（切らないと浮いて見える）
             useGpu = want and gpu and d.GetAttribute("CV.cap") != "1"
             slicerClip = want and not useGpu
             if bool(d.GetClipping()) != slicerClip: d.SetClipping(slicerClip)
