@@ -216,7 +216,7 @@ class GraftMixin:
         return out
 
     # ================================================================ 頸部分枝
-    def _gBranchTrack(self, m):
+    def _gBranchTrack(self, m, excl=None):
         """枝のラベルを体軸の断面ごとにたどる: 中心の点・内腔の太さ（直交断面に補正）・起始部からの距離"""
         a = self._gArr(); sp = np.array(self.vol.GetSpacing()); px = sp[0] * sp[1]; I2R = self._ijk2ras()
         zs = np.where(m.any((1, 2)))[0]; pts = []; prev = None
@@ -228,7 +228,8 @@ class GraftMixin:
             cy, cx = cms[j]
             if prev is not None and np.hypot(cy - prev[0], cx - prev[1]) * sp[0] > 15: continue
             prev = (cy, cx); comp = lb == j + 1
-            reg = ndimage.binary_dilation(comp, iterations=3) & (a[z] > 200) & (a[z] < 1000)
+            reg = ndimage.binary_dilation(comp, iterations=2) & (a[z] > 200) & (a[z] < 1000)
+            if excl is not None: reg &= ~excl[z]                         # 静脈（無名静脈・上大静脈）やとなりの枝は太さに入れない
             l2, n2 = ndimage.label(reg); jj = l2[int(cy), int(cx)]
             if jj == 0 and n2 and comp.any(): jj = np.bincount(l2[comp]).argmax()
             pts.append((z, cx, cy, ((l2 == jj).sum() if jj else comp.sum()) * px))
@@ -243,7 +244,7 @@ class GraftMixin:
     @staticmethod
     def _gStep(s, D, smax=70.0, minL=9.0, minR=12.0, minStep=1.0):
         """起始部から smax mm までで、太さが段差で変わる所（2 段の一定値で一番よく合う所）。見つからなければ None"""
-        k = s <= smax; s_, D_ = s[k], D[k]; best = None
+        k = (s >= 5.0) & (s <= smax); s_, D_ = s[k], D[k]; best = None          # 起始部の 5 mm は部分容積で細く見えるので使わない
         for i in range(1, len(s_)):
             if s_[i] < minL or s_[-1] - s_[i] < minR: continue
             l, r = D_[:i], D_[i:]; sse = ((l - l.mean()) ** 2).sum() + ((r - r.mean()) ** 2).sum()
@@ -254,10 +255,16 @@ class GraftMixin:
     def _gBranches(self, status=print):
         status("頸部分枝をたどっています…")
         tr = {}; sA = {}
+        vein = self._mask(("brachiocephalic vein", "superior vena cava", "subclavian vein", "jugular vein"))   # 濃く染まった無名静脈が枝に重なる
+        vein = None if vein is None else ndimage.binary_dilation(vein, iterations=1)
+        ms = {key: self._mask((key,)) for key in BR_KEYS}
         for key in BR_KEYS:
-            m = self._mask((key,))
+            m = ms[key]
             if m is not None and m.any():
-                t = self._gBranchTrack(m)
+                ex = vein.copy() if vein is not None else np.zeros(m.shape, bool)
+                for k2, m2 in ms.items():
+                    if k2 != key and m2 is not None: ex |= m2 & ~m
+                t = self._gBranchTrack(m & ~(vein if vein is not None else False), ex)
                 if t is not None: tr[key] = t
         for key in BR_KEYS[:3]:
             if key in tr:
@@ -461,6 +468,8 @@ class GraftMixin:
         if not tr: return
         m = self._mask(("brachiocephalic trunk", "common carotid artery", "subclavian artery"))
         if m is None or not m.any(): return
+        vein = self._mask(("brachiocephalic vein", "superior vena cava", "subclavian vein", "jugular vein"))
+        if vein is not None: m = m & ~vein                                  # 枝の面に静脈を混ぜない
         img = vtk.vtkImageData(); img.SetDimensions(m.shape[2], m.shape[1], m.shape[0])
         img.GetPointData().SetScalars(numpy_to_vtk(np.ascontiguousarray(m.astype(np.float32).ravel()), deep=True))
         sp = self.vol.GetSpacing(); sd = [max(0.6, 1.3 / x) for x in sp]          # 1.3 mm でならす（厚いスライスの段々を消す）
