@@ -40,6 +40,46 @@ WIRE_COLOR = (0.96, 0.56, 0.20)     # 胸骨ワイヤー（金属）: 銅色（�
 PATCH_COLOR = (0.95, 0.95, 0.92)    # パッチの範囲（自動）: 白（布・心膜のパッチらしく。石灰化の黄白・金属の銀とは別）
 LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
+# ---- 色合い（設定 → 見た目 → 色合い）。分け方（どの部屋・血管を何色の系統にするか）は同じで、色の濃さ・光沢だけ変える
+#   リアル: 動脈血 = 深い赤、静脈血 = 濃い青、心外膜の脂肪 = 黄、骨 = アイボリー。光沢を強めにして立体感を出す（解剖図・シネマティック表示に近い色）
+#   落ち着いた: これまでの色（彩度を落とした色）
+PALETTES = {
+    "リアル": dict(aorta=(0.78, 0.07, 0.08), sysvein=(0.20, 0.22, 0.56), pv=(0.84, 0.16, 0.14), heart=(0.72, 0.09, 0.11), pa=(0.26, 0.31, 0.70),
+                 myo=(0.58, 0.07, 0.06), myocut=(0.66, 0.10, 0.08), epi=(0.92, 0.76, 0.40), endo=(0.86, 0.30, 0.26), endoR=(0.40, 0.45, 0.80),
+                 bone=(0.96, 0.92, 0.84), calc=(1.00, 0.95, 0.66),
+                 vr=[(0.82, 0.16, 0.14), (0.88, 0.28, 0.22), (0.86, 0.10, 0.10), (0.90, 0.24, 0.20), (0.88, 0.28, 0.22),
+                     (0.28, 0.32, 0.74), (0.34, 0.40, 0.80), (0.26, 0.30, 0.72), (0.30, 0.35, 0.76)], vrN=(0.86, 0.50, 0.42),
+                 spec=0.55, power=40.0, amb=0.18, dif=0.85),
+    "落ち着いた": dict(aorta=(0.74, 0.14, 0.16), sysvein=(0.24, 0.34, 0.60), pv=(0.84, 0.40, 0.36), heart=(0.66, 0.28, 0.32), pa=(0.40, 0.52, 0.78),
+                  myo=(0.55, 0.15, 0.14), myocut=(0.64, 0.17, 0.15), epi=(0.84, 0.72, 0.64), endo=(0.94, 0.76, 0.72), endoR=(0.74, 0.80, 0.94),
+                  bone=(0.88, 0.86, 0.80), calc=(1.00, 0.92, 0.55),
+                  vr=[(0.88, 0.44, 0.40), (0.95, 0.62, 0.50), (0.93, 0.30, 0.28), (0.95, 0.55, 0.45), (0.95, 0.62, 0.50),
+                      (0.45, 0.58, 0.90), (0.58, 0.68, 0.93), (0.42, 0.50, 0.88), (0.50, 0.62, 0.92)], vrN=(0.88, 0.72, 0.62),
+                  spec=0.40, power=35.0, amb=0.12, dif=0.82),
+}
+PALETTE_KEY = "HUCViewS/palette"
+CUR_PALETTE = "リアル"
+_VG_BASE = [(g[0], g[1]) for g in VESSEL_GROUPS]
+
+
+def _setPalette(name):
+    """モジュールの色（新しく作る面・凡例・壁の色表）を、選んだ色合いに置き換える"""
+    global BONE_COLOR, EPI_COLOR, ENDO_COLOR, ENDO_R_COLOR, MYO_CUT_COLOR, MYO_COLOR, CALC_COLOR, VESSEL_GROUPS, VESSEL_OTHER, LEGEND, LEGEND_WALL, CUR_PALETTE
+    if name not in PALETTES: name = "リアル"
+    p = PALETTES[name]; CUR_PALETTE = name
+    BONE_COLOR, EPI_COLOR, ENDO_COLOR, ENDO_R_COLOR = p["bone"], p["epi"], p["endo"], p["endoR"]
+    MYO_CUT_COLOR, MYO_COLOR, CALC_COLOR = p["myocut"], p["myo"], p["calc"]
+    VESSEL_GROUPS = [(nm, keys, p[k]) for (nm, keys), k in zip(_VG_BASE, ("aorta", "sysvein", "pv", "heart"))]
+    VESSEL_OTHER = ("血管:肺動脈ほか", p["pa"])
+    LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", p["aorta"]), ("肺静脈", p["pv"]),
+              ("心腔", p["heart"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
+    LEGEND_WALL = [("外膜", p["epi"]), ("左心系の内膜", p["endo"]), ("右心系の内膜", p["endoR"]), ("補った壁（CT値の裏付けなし）", SYNTH_COLOR), ("心筋（AIラベル）", p["myocut"])]
+    return p
+
+
+try: _setPalette(str(qt.QSettings().value(PALETTE_KEY) or "リアル"))
+except Exception: pass
+
 CV_LAYOUT_CUT = 5711          # 3D（左・大）＋ 切っている面の断面（右）
 CV_LAYOUT_CUT_XML = """
 <layout type="horizontal" split="true">
@@ -445,10 +485,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         leg = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND)
         leg2 = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND_WALL)
         self.legend = Lb("血液: " + leg + "<br>断面: " + leg2, "muted"); self.legend.setWordWrap(True); c.addWidget(self.legend); self.legend.hide()
-        _sq = lambda cc: f"<span style='color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)}); font-size:15px'>■</span>"
-        _rows = lambda L: "".join(f"<tr><td>{_sq(cc)}</td><td style='padding-left:6px'>{n}</td></tr>" for n, cc in L)
-        self._legendHtml = ("<div style='font-size:12px'><b style='color:#4cc8f0'>血液・血管の色</b><table>" + _rows(LEGEND) + "</table><br>"
-                            "<b style='color:#4cc8f0'>断面（壁）の色</b><table>" + _rows(LEGEND_WALL) + "</table></div>")
+        self._makeLegend()
         lgb = B("色の見方", "ghost", "色分けの意味"); hdL.addWidget(lgb); lgb.connect("clicked()", lambda: self._popup(lgb, self._legendHtml))
 
         card, c, _ = self._card(P, "心筋・壁")
@@ -601,6 +638,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         card, c, _ = self._card(P, "見た目"); self._lookLay = c
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
         self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow(Lb("背景", "muted"), self.bgCombo)
+        self.paletteCombo = qt.QComboBox(); self.paletteCombo.addItems(["リアル（くっきり）", "落ち着いた（前の色）"])
+        self.paletteCombo.setToolTip("面と VR の色合い。分け方は同じで、色の濃さと光沢だけ変わる")
+        self.paletteCombo.currentIndex = 0 if CUR_PALETTE == "リアル" else 1; f.addRow(Lb("色合い", "muted"), self.paletteCombo)
         self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow(Lb("光沢", "muted"), self.glossSlider)
         self.opacitySlider = ctk.ctkSliderWidget(); self.opacitySlider.minimum = 0; self.opacitySlider.maximum = 100; self.opacitySlider.value = 100; f.addRow(Lb("血液の不透明度", "muted"), self.opacitySlider)
         self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow(Lb("視野角", "muted"), self.fovSlider)
@@ -671,6 +711,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.rulerClearButton.connect("clicked()", self.logic.clearRulers)
         self.vrBloodButton.connect("clicked()", lambda: self._onVR("blood"))
         self.bgCombo.connect("currentIndexChanged(int)", lambda i: self.logic.setBackground(i))
+        self.paletteCombo.connect("currentIndexChanged(int)", self.onPalette)
         self.glossSlider.connect("valueChanged(double)", lambda v: self.logic.setGloss(v / 100.0))
         self.opacitySlider.connect("valueChanged(double)", lambda v: self.logic.setLayerOpacity("血液・血管", v / 100.0))
         self.ssaoCheck.connect("toggled(bool)", lambda v: self.logic.studioLighting(self.bgCombo.currentIndex, ssao=v))
@@ -769,6 +810,22 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def _showHelp(self, anchor):
         self._popup(anchor, HELP_HTML)
+
+    def _makeLegend(self):
+        _sq = lambda cc: f"<span style='color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)}); font-size:15px'>■</span>"
+        _rows = lambda L: "".join(f"<tr><td>{_sq(cc)}</td><td style='padding-left:6px'>{n}</td></tr>" for n, cc in L)
+        self._legendHtml = ("<div style='font-size:12px'><b style='color:#4cc8f0'>血液・血管の色</b><table>" + _rows(LEGEND) + "</table><br>"
+                            "<b style='color:#4cc8f0'>断面（壁）の色</b><table>" + _rows(LEGEND_WALL) + "</table></div>")
+
+    def onPalette(self, i):
+        name = "リアル" if i == 0 else "落ち着いた"
+        try: qt.QSettings().setValue(PALETTE_KEY, name)
+        except Exception: pass
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try: self.logic.applyPalette(name)
+        except Exception as e: import traceback; traceback.print_exc()
+        finally: qt.QApplication.restoreOverrideCursor()
+        self._makeLegend()
 
     def _popup(self, anchor, html):
         p = qt.QLabel(html); p.setWindowFlags(qt.Qt.Popup); p.setTextFormat(qt.Qt.RichText)
@@ -1950,6 +2007,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._updateBounds()
         try: self.studioLighting(0, ssao=True)
         except Exception: pass
+        try: self.applyPalette(CUR_PALETTE, rebuildVR=False)               # 保存した症例も、今の色合いで
+        except Exception as e: print("palette:", e)
         return len(self.layerModels)
 
     def _resample(self, vol, spacing):
@@ -2489,6 +2548,37 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         for k in self._namesFor(name):
             n = self.layerModels.get(k)
             if n and n.GetDisplayNode(): n.GetDisplayNode().SetOpacity(op)
+
+    def applyPalette(self, name, rebuildVR=True):
+        """色合いを変える: 今ある面の色・光沢、壁の色表、心筋の切り口、VR の色（VR を出していれば作り直す）"""
+        p = _setPalette(name)
+        cmap = {"血管:大動脈系": p["aorta"], "血管:体静脈": p["sysvein"], "血管:肺静脈": p["pv"], "血管:心臓": p["heart"], "血管:肺動脈ほか": p["pa"],
+                "骨": p["bone"], "石灰化": p["calc"], "心筋": p["myo"]}
+        for k, col in cmap.items():
+            n = self.layerModels.get(k); d = n.GetDisplayNode() if n else None
+            if d is None: continue
+            d.SetColor(*col)
+            if k.startswith("血管") or k == "心筋": d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
+        w_ = self.layerModels.get("心臓壁")
+        if w_ is not None and w_.GetDisplayNode(): d = w_.GetDisplayNode(); d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
+        ct = slicer.mrmlScene.GetFirstNodeByName("CV EpiEndo")
+        if ct is not None:
+            for tt in range(256):
+                x = tt / 255.0
+                c = EPI_COLOR if x < 1/6 else (ENDO_COLOR if x < 0.5 else (ENDO_R_COLOR if x < 5/6 else (SYNTH_COLOR if getattr(self, "showSynth", True) else EPI_COLOR)))
+                ct.SetColor(tt, f"c{tt}", c[0], c[1], c[2], 1.0)
+        cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
+        if cap is not None and cap.GetDisplayNode(): cap.GetDisplayNode().SetColor(*MYO_CUT_COLOR)
+        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]
+        if rebuildVR and getattr(self, "vrOn", False) and getattr(self, "vrDisplay", None) is not None:
+            try:
+                self.vrDisplay.SetVisibility(False); self.vrDisplay = None; self.showVR(True, getattr(self, "vrMode", None))
+            except Exception as e: print("palette VR:", e)
+        else:
+            if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False):
+                self.vrDisplay = None                                         # 次に VR を出す時に新しい色で作る
+        try: self._view().scheduleRender()
+        except Exception: pass
 
     def setGloss(self, g):
         for n in list(self.layerModels.values()):
