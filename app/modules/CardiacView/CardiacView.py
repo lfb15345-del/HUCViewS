@@ -50,7 +50,7 @@ PALETTES = {
                  bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.72),
                  vr=[(0.70, 0.12, 0.20), (0.80, 0.26, 0.33), (0.72, 0.12, 0.20), (0.78, 0.22, 0.30), (0.80, 0.26, 0.33),
                      (0.40, 0.30, 0.62), (0.52, 0.42, 0.72), (0.38, 0.28, 0.60), (0.46, 0.38, 0.68)], vrN=(0.84, 0.60, 0.60),
-                 vrPale=0.5,                                                   # VR: 心筋の濃さの所は、その部屋の色を淡くした色（左室の壁 = 淡い深紅、右室の壁 = 淡い紫）。造影された血液は部屋の色
+                 vrPale=0.5, vrSeptum=(0.55, 0.16, 0.45),                       # 中隔の心筋は赤紫（左室の壁・右室の壁と区別）                                                   # VR: 心筋の濃さの所は、その部屋の色を淡くした色（左室の壁 = 淡い深紅、右室の壁 = 淡い紫）。造影された血液は部屋の色
                  spec=0.45, power=35.0, amb=0.15, dif=0.90),
     "赤と青": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), la=(0.80, 0.40, 0.28), ra=(0.40, 0.54, 0.76), pa=(0.29, 0.33, 0.63),
                  myo=(0.52, 0.13, 0.12), myocut=(0.59, 0.17, 0.15), epi=(0.82, 0.72, 0.54), endo=(0.77, 0.35, 0.31), endoR=(0.41, 0.45, 0.72),
@@ -501,6 +501,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.vsdButton = B("心筋の断面", None, "心筋を断面で見る（VSD・中隔）"); r.addWidget(self.vsdButton, 1)
         self.fourChButton = B("四腔断面", None, "左室・右室・中隔・両心房が一度に見える面で切る"); r.addWidget(self.fourChButton, 1)
         self.lumenButton = B("内腔を見る", None, "壁だけ・中は空洞"); r.addWidget(self.lumenButton); self.lumenButton.hide()
+        r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r); r.addWidget(Lb("パッチ", "muted"))
+        self.patchLButton = B("左室側から", None, "パッチを左室側から正面に見て、手前（左室の自由壁側）を切る。VR 心内なら左室の中で切るので、中隔の肉柱・乳頭筋とパッチの縁が立体で見える"); r.addWidget(self.patchLButton, 1)
+        self.patchRButton = B("右室側から", None, "パッチを右室側から正面に見て、手前（右室の自由壁側）を切る。VR 心内なら右室の中で切るので、右室側の肉柱・調節帯とパッチの縁が立体で見える"); r.addWidget(self.patchRButton, 1)
         r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r); r.addWidget(Lb("濃さ", "muted"))
         self.capSlider = ctk.ctkSliderWidget(); self.capSlider.minimum = 0; self.capSlider.maximum = 100; self.capSlider.suffix = " %"
         self.capSlider.setToolTip("心筋の断面の濃さ")
@@ -702,6 +705,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.heartOnlyButton.connect("clicked()", self.onHeartOnly)
         self.lumenButton.connect("clicked()", self.onLumen)
         self.vsdButton.connect("clicked()", self.onVSD)
+        self.patchLButton.connect("clicked()", lambda: self._onPatchSide("L")); self.patchRButton.connect("clicked()", lambda: self._onPatchSide("R"))
         self.fourChButton.connect("clicked()", self.onFourChamber)
         for key, b in self.sceneButtons.items(): b.connect("clicked()", lambda key=key: self.onScene(key))
         self.capSlider.connect("valueChanged(double)", self._onCapChanged)
@@ -1170,6 +1174,16 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             self._status("パッチ: 面の上を左ドラッグで塗る（Ctrl＋ドラッグで消す）。何もない所のドラッグは回転。終わりは Esc かボタン")
         else:
             self._status(L.paintEnd())
+
+    def _onPatchSide(self, side):
+        L = self.logic
+        if L.layerModels.get(L.PATCH_KEY) is None: self._status("この症例にはパッチがありません"); return
+        if not L.patchFace(side=side): self._status("パッチがありません"); return
+        self.lockCheck.blockSignals(True); self.lockCheck.checked = True; self.lockCheck.blockSignals(False)
+        self.cutCombo.blockSignals(True); self.cutCombo.currentIndex = 1; self.cutCombo.blockSignals(False)
+        self.cutSlider.blockSignals(True); self.cutSlider.value = L.cutFrac * 100; self.cutSlider.blockSignals(False)
+        nm = "左室" if side == "L" else "右室"
+        self._status(f"パッチを{nm}側から見ています（{nm}の手前を切りました）。ホイールで切る位置。「この断面で固定」を外すと画面の正面から")
 
     def _onPatchFace(self):
         if self.paintButton.checked: self.paintButton.checked = False
@@ -2605,7 +2619,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 ct.SetColor(tt, f"c{tt}", c[0], c[1], c[2], 1.0)
         cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
         if cap is not None and cap.GetDisplayNode(): cap.GetDisplayNode().SetColor(*MYO_CUT_COLOR)
-        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]; self.VR_PALE = p.get("vrPale")
+        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]; self.VR_PALE = p.get("vrPale"); self.VR_SEPTUM = p.get("vrSeptum")
         if rebuildVR and getattr(self, "vrOn", False) and getattr(self, "vrDisplay", None) is not None:
             try:
                 self.vrDisplay.SetVisibility(False); self.vrDisplay = None; self.showVR(True, getattr(self, "vrMode", None))
@@ -2928,8 +2942,18 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._strokes = []; self._pMask = {}; self._pMaskKey = {}; self._patchBuild(); self._patchSave()
         return "塗ったパッチを全部消しました（「1つ戻す」では戻りません）"
 
-    def patchFace(self, gap=4.0):
-        """塗ったパッチを正面に向けて、パッチの少し手前（gap mm）から手前を切る（体に固定）"""
+    def _roomCenters(self):
+        """血液の面（左房・左室・右房・右室で塗り分け済み）から 左室・右室の中心 → (cLV, cRV) / None"""
+        from vtk.util.numpy_support import vtk_to_numpy
+        n = self.layerModels.get("血管:心臓"); pd = n.GetPolyData() if n is not None else None
+        a = pd.GetPointData().GetArray("CV_room") if pd is not None else None
+        if a is None: return None
+        P = vtk_to_numpy(pd.GetPoints().GetData()).astype(float); r = vtk_to_numpy(a).astype(int)
+        if (r == 1).sum() < 20 or (r == 3).sum() < 20: return None
+        return P[r == 1].mean(0), P[r == 3].mean(0)
+
+    def patchFace(self, gap=4.0, side=None):
+        """パッチを正面に向けて、パッチの手前を切る（体に固定）。side = "L"（左室側から）/ "R"（右室側から）/ None（今見ている側から）"""
         from vtk.util.numpy_support import vtk_to_numpy
         node = self.layerModels.get(self.PATCH_KEY)
         pd = node.GetPolyData() if node is not None else None
@@ -2941,20 +2965,29 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             N = vtk_to_numpy(nr).astype(float); w_, V_ = np.linalg.eigh(N.T @ N); n = V_[:, -1] / np.linalg.norm(V_[:, -1])
         cn = self._camera(); cam = cn.GetCamera()
         pos = np.array(cam.GetPosition()); fp = np.array(cam.GetFocalPoint())
-        if float((pos - c) @ n) < 0: n = -n                                   # 今見ている側から
+        cc = self._roomCenters() if side in ("L", "R") else None
+        if cc is not None:
+            d = cc[0 if side == "L" else 1] - c
+            if float(d @ n) < 0: n = -n                                       # 左室側（右室側）にカメラ
+        elif float((pos - c) @ n) < 0: n = -n                                 # 今見ている側から
         dist = float(np.linalg.norm(pos - fp)) or 300.0
         up = np.array(cam.GetViewUp(), float); up = up - n * float(up @ n)
         if np.linalg.norm(up) < 1e-3: up = np.array([0.0, 0.0, 1.0]) - n * n[2]
         up /= np.linalg.norm(up); rt = np.cross(up, n)
         half = float(max(np.abs((P - c) @ up).max(), np.abs((P - c) @ rt).max(), 8.0))
-        self.flying = False
+        self.flying = False; self._camGen = getattr(self, "_camGen", 0) + 1
         cn.SetFocalPoint(*c); cn.SetPosition(*(c + n * dist)); cn.SetViewUp(*up)
         if cam.GetParallelProjection(): cam.SetParallelScale(max(30.0, 2.2 * half))
         lo, hi = self._visibleBounds()
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
         proj = corners @ n; dmin, dmax = float(proj.min()), float(proj.max())
         s_ = float(c @ n + max(0.0, float(((P - c) @ n).max())) + gap)
-        if getattr(self, "vrOn", False): s_ = float(c @ n)                 # VR は血液が詰まって見えるので、パッチの真ん中で切る（パッチは切らずに出す）
+        if getattr(self, "vrOn", False):
+            if getattr(self, "vrMode", "tissue") == "blood": s_ = float(c @ n)    # VR 造影は血液が詰まって見えるので、パッチの真ん中で切る（パッチは切らずに出す）
+            else:                                                         # VR 心内は血液が透けるので、部屋の中で切る（中隔の肉柱・乳頭筋・パッチの縁が立体で見える）
+                ext = max(0.0, float(((P - c) @ n).max()))
+                half_ = 0.5 * float((cc[0 if side == "L" else 1] - c) @ n) if cc is not None else ext + 6.0   # パッチと部屋の真ん中の間
+                s_ = float(c @ n + max(ext + 3.0, half_))
         self._lockN = n.tolist(); self._lockPrev = "VIEW"
         self.setCut("LOCK", float(np.clip((dmax - s_) / max(dmax - dmin, 1e-6), 0, 1)))
         cn.ResetClippingRange(); self._view().forceRender(); self._syncCutUI()
@@ -3190,6 +3223,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                  ("tot", ("vena cava",), (0.50, 0.62, 0.92), "R")]
     VR_NEUTRAL = (0.88, 0.72, 0.62)
     VR_PALE = None
+    VR_SEPTUM = None
 
     def _gridNode(self, src, lo, hi, step):
         """src の一部（lo..hi, ijk = z,y,x）を step 倍の粗さで覆う空の参照ボリューム（ラベルの書き出し先）"""
@@ -3281,6 +3315,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 if node is None: continue
                 mk = self._segmentMaskArray(node, grid, gkeys)
                 if mk is not None: lab[(lab == 0) & mk] = gi
+            self._vrSeptIdx = None
+            if getattr(self, "VR_SEPTUM", None) is not None and hc is not None:   # 中隔（右室に接する側から 10 mm までの心筋）を別の色に
+                myoM = self._segmentMaskArray(hc, grid, ("myocardium",)); rvM = self._segmentMaskArray(hc, grid, ("right ventricle",))
+                if myoM is not None and rvM is not None and rvM.any():
+                    dRV = ndimage.distance_transform_edt(~rvM, sampling=gsp); sept = myoM & (dRV < 10.0); del dRV
+                    if sept.sum() > 50: self._vrSeptIdx = len(self.VR_GROUPS) + 1; lab[sept] = self._vrSeptIdx
+                del myoM, rvM
         finally:
             slicer.mrmlScene.RemoveNode(grid)
         c = dict(self._cal())
@@ -3304,8 +3345,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             except Exception as e: print("VR calib:", e)
         myo = float(c.get("myo", 80.0)); bL = float(c.get("blood", 350.0)); bR = float(c.get("rv", bL))
         bR = max(bR, myo + 25.0)
-        cols = np.array([self.VR_NEUTRAL] + [g[2] for g in self.VR_GROUPS], np.float32)
-        isR = np.array([False] + [g[3] == "R" for g in self.VR_GROUPS])
+        cols = np.array([self.VR_NEUTRAL] + [g[2] for g in self.VR_GROUPS] + ([self.VR_SEPTUM] if getattr(self, "_vrSeptIdx", None) else []), np.float32)
+        isR = np.array([False] + [g[3] == "R" for g in self.VR_GROUPS] + ([False] if getattr(self, "_vrSeptIdx", None) else []))
         if (lab > 0).any():
             dist, ind = ndimage.distance_transform_edt(lab == 0, sampling=gsp, return_indices=True)
             near = lab[tuple(ind)]; near[dist > 15.0] = 0; del dist, ind
@@ -3571,7 +3612,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             vp.SetScalarOpacity(otf)
             vp.ShadeOn(); vp.SetInterpolationTypeToLinear()
             sh = self._shade(); vp.SetAmbient(sh["vamb"]); vp.SetDiffuse(sh["vdif"]); vp.SetSpecular(sh["vspec"]); vp.SetSpecularPower(30)   # 陰影の設定どおり
-            vp.SetScalarOpacityUnitDistance(0.5)                              # 半透明のもやを減らして面をくっきり（重さは同じ）
+            vp.SetScalarOpacityUnitDistance(0.5 if mode == "blood" else 1.0)   # 造影: もやを減らして面をくっきり。心内: 半透明のまま（中の心筋・弁・乳頭筋が透けて見えるように）
             self._vrOtfProp, self._vrOtfMode = vp, mode
         self._vrLabel()
 
@@ -3592,7 +3633,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if first:                                                             # 初めての VR で Slicer がカメラを戻してしまうので、今の向き・大きさを保つ
             c = self._camera(); st = (c.GetPosition(), c.GetFocalPoint(), c.GetViewUp(), c.GetParallelScale())
             self.setupVR()
-            def _back(c=c, st=st):
+            gen0 = getattr(self, "_camGen", 0)
+            def _back(c=c, st=st, gen0=gen0):
+                if getattr(self, "_camGen", 0) != gen0: return                # その間に向きを変えた（パッチの正面など）ならそのまま
                 try: c.SetPosition(*st[0]); c.SetFocalPoint(*st[1]); c.SetViewUp(*st[2]); c.SetParallelScale(st[3]); c.ResetClippingRange()
                 except Exception: pass
             _back(); qt.QTimer.singleShot(0, _back); qt.QTimer.singleShot(150, _back)
