@@ -2587,11 +2587,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             n = self.layerModels.get(k); d = n.GetDisplayNode() if n else None
             if d is None: continue
             d.SetColor(*col)
-            if k.startswith("血管") or k == "心筋": d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
+            if k.startswith("血管") or k == "心筋": d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(self._shade().get("samb", p["amb"])); d.SetDiffuse(p["dif"])
         try: self._colorChambersLR(p)
         except Exception as e: print("chambers LR:", e)
         w_ = self.layerModels.get("心臓壁")
-        if w_ is not None and w_.GetDisplayNode(): d = w_.GetDisplayNode(); d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
+        if w_ is not None and w_.GetDisplayNode(): d = w_.GetDisplayNode(); d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(self._shade().get("samb", p["amb"])); d.SetDiffuse(p["dif"])
         ct = slicer.mrmlScene.GetFirstNodeByName("CV EpiEndo")
         if ct is not None:
             for tt in range(256):
@@ -4844,10 +4844,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     # ---------------------------------------------------------------- look
     # VR の「光の回り込み」（全体照明）は、この PC で止まるほど重かったので使わない。VR は光の当て方（環境光・拡散・つや）だけで陰影を変える
-    SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, vamb=0.30, vdif=0.75, vspec=0.25),
-             "ふつう": dict(ssao=True, rad=10.0, ker=32, k2f=3.0, k2h=4.0, vamb=0.18, vdif=0.88, vspec=0.35),
-             "強め": dict(ssao=True, rad=14.0, ker=32, k2f=4.5, k2h=5.0, k2b=3.0, vamb=0.08, vdif=1.00, vspec=0.45)}
-    # 重さの約束: どの段階も 1 コマの計算量は前と同じ（SSAO の点の数は 32 まで）。違うのは光の当て方・つやだけ。動かしている間に増える計算はない
+    SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, k2b=4.0, samb=0.18, vamb=0.30, vdif=0.75, vspec=0.25),
+             "ふつう": dict(ssao=True, rad=16.0, ker=32, k2f=5.0, k2h=10.0, k2b=3.0, samb=0.08, vamb=0.18, vdif=0.88, vspec=0.35),
+             "強め": dict(ssao=True, rad=22.0, ker=32, k2f=8.0, k2h=16.0, k2b=2.5, samb=0.04, vamb=0.08, vdif=1.00, vspec=0.45)}
+    # 重さの約束: どの段階も 1 コマの計算量は同じ（SSAO の点の数は 32 まで）。違うのは光の向きの強さ（正面からの光を弱く・斜めの光を強く）と環境光だけ。動かしている間に増える計算はない
     SHADE_KEY = "HUCViewS/shading"
 
     def _shade(self):
@@ -4894,12 +4894,19 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             lk.SetKeyToFillRatio(s["k2f"]); lk.SetKeyToHeadRatio(s["k2h"]); lk.SetKeyToBackRatio(s.get("k2b", 4.0))      # 陰影の段階で、明るい面と暗い面の差を変える
             lk.SetKeyLightAzimuth(25); lk.SetKeyLightElevation(45)
             lk.AddLightsToRenderer(ren)
+            self._applySurfAmbient(s)                                           # 環境光を下げると、光の当たらない側が暗くなって陰影がつく
             ssao = bool(ssao) and s["ssao"]
             ren.SetUseSSAO(ssao)
             if ssao: ren.SetSSAORadius(s["rad"]); ren.SetSSAOBias(0.5); ren.SetSSAOKernelSize(s["ker"]); ren.SetSSAOBlur(True)
         except Exception as e:
             print("lighting:", e)
         v.forceRender()
+
+    def _applySurfAmbient(self, s=None):
+        a = float((s or self._shade()).get("samb", 0.15))
+        for k, n in self.layerModels.items():
+            d = n.GetDisplayNode() if n else None
+            if d is not None and k != "軟部組織": d.SetAmbient(a)
 
     def setBackground(self, i):
         vn = self._viewNode()
