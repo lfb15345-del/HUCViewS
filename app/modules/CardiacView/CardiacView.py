@@ -2824,7 +2824,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if getattr(self, "vrOn", False): s_ = float(c @ n)                 # VR は血液が詰まって見えるので、パッチの真ん中で切る（パッチは切らずに出す）
         self._lockN = n.tolist(); self._lockPrev = "VIEW"
         self.setCut("LOCK", float(np.clip((dmax - s_) / max(dmax - dmin, 1e-6), 0, 1)))
-        cn.ResetClippingRange(); self._view().forceRender()
+        cn.ResetClippingRange(); self._view().forceRender(); self._syncCutUI()
         return True
 
     # ---------------------------------------------------------------- cut (clip node: 再計算なし・即時)
@@ -2959,11 +2959,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
             proj = corners @ n; dmin, dmax = proj.min(), proj.max()
             self._lockN = n.tolist(); self._lockPrev = self.cutAxis
-            self.setCut("LOCK", float(np.clip((dmax - c @ n) / max(dmax - dmin, 1e-6), 0, 1)))
+            self.setCut("LOCK", float(np.clip((dmax - c @ n) / max(dmax - dmin, 1e-6), 0, 1))); self._syncCutUI()
             return True
         if self.cutAxis == "LOCK":
             prev = getattr(self, "_lockPrev", "VIEW"); self._lockN = None
-            self.setCut(prev if prev != "LOCK" else "VIEW", getattr(self, "cutFrac", 0.5))
+            self.setCut(prev if prev != "LOCK" else "VIEW", getattr(self, "cutFrac", 0.5)); self._syncCutUI()
         return False
 
     def _ensureViewObserver(self):
@@ -4597,6 +4597,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if self.cutAxis == "LOCK": idx = 1
             if idx is not None: w.cutCombo.blockSignals(True); w.cutCombo.setCurrentIndex(idx); w.cutCombo.blockSignals(False)
             w.cutSlider.blockSignals(True); w.cutSlider.value = getattr(self, "cutFrac", 0.5) * 100; w.cutSlider.blockSignals(False)
+            w.lockCheck.blockSignals(True); w.lockCheck.checked = (self.cutAxis == "LOCK"); w.lockCheck.blockSignals(False)   # 固定中は必ずチェックを見せる（外せば画面の正面に戻る）
         except Exception: pass
 
     # ---- 断面（2D）の右ドラッグ: DICOM ビューアと同じ感覚
