@@ -3603,7 +3603,12 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         otf = vp.GetScalarOpacity()
         if getattr(self, "_vrOtfProp", None) is vp and getattr(self, "_vrOtfMode", None) == mode and otf is not None and otf.GetSize() == len(pts):
             # ドラッグ中は今ある関数の点だけ動かす（作り直すと描画のしくみごと作り直しになり 3 倍重い）
-            for i, (x, y) in enumerate(pts): otf.SetNodeValue(i, [x, y, 0.5, 0.0])
+            for _ in range(3):                                          # 点は並べ替えられるので、狙いどおりになるまで（大きく動かした時も）2〜3 回で揃う
+                for i, (x, y) in enumerate(pts): otf.SetNodeValue(i, [x, y, 0.5, 0.0])
+                cur = []
+                for i in range(otf.GetSize()):
+                    v_ = [0.0] * 4; otf.GetNodeValue(i, v_); cur.append((v_[0], v_[1]))
+                if all(abs(a_[0] - b_[0]) < 1e-3 and abs(a_[1] - b_[1]) < 1e-3 for a_, b_ in zip(cur, pts)): break
         else:
             vp.IndependentComponentsOff()
             otf = vtk.vtkPiecewiseFunction()
