@@ -604,6 +604,16 @@ class GraftMixin:
             if best is None or d[i] < best[0]: best = (d[i], key, float(t["s"][i]))
         if best[0] > 15: raise RuntimeError("枝から離れています（15 mm 以内をクリックしてください）。")
         g.setdefault("brManual", {})[best[1]] = best[2]
+        try:                                                                # 先生が決めた吻合部を記録（自動の判定を合わせる正解に使う。位置だけで個人の情報は入れない）
+            import os, csv, datetime
+            f_ = os.path.join(os.path.expanduser("~"), "Documents", "HeartView症例", "手術のイメージ_吻合部.csv"); os.makedirs(os.path.dirname(f_), exist_ok=True)
+            new_ = not os.path.exists(f_)
+            with open(f_, "a", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                if new_: w.writerow(["日時", "シリーズ", "枝", "起始部からの距離mm", "自動mm", "R", "A", "S"])
+                w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), self.vol.GetName() if self.vol else "", best[1], round(best[2], 1),
+                            round(float(g["sAuto"].get(best[1], -1)), 1)] + [round(float(x), 1) for x in ras])
+        except Exception as e: print("[graft] log", e)
         self.graftRender(status); return best[1], best[2]
 
     def graftShow(self, on):
