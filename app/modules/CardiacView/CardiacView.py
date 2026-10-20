@@ -44,13 +44,13 @@ LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸
 #   リアル: 動脈血 = 深い赤、静脈血 = 濃い青、心外膜の脂肪 = 黄、骨 = アイボリー。光沢を強めにして立体感を出す（解剖図・シネマティック表示に近い色）
 #   落ち着いた: これまでの色（彩度を落とした色）
 PALETTES = {
-    "リアル": dict(aorta=(0.78, 0.07, 0.08), sysvein=(0.20, 0.22, 0.56), pv=(0.84, 0.16, 0.14), heart=(0.72, 0.09, 0.11), pa=(0.26, 0.31, 0.70),
-                 myo=(0.58, 0.07, 0.06), myocut=(0.66, 0.10, 0.08), epi=(0.92, 0.76, 0.40), endo=(0.86, 0.30, 0.26), endoR=(0.40, 0.45, 0.80),
-                 bone=(0.96, 0.92, 0.84), calc=(1.00, 0.95, 0.66),
-                 vr=[(0.82, 0.16, 0.14), (0.88, 0.28, 0.22), (0.86, 0.10, 0.10), (0.90, 0.24, 0.20), (0.88, 0.28, 0.22),
-                     (0.28, 0.32, 0.74), (0.34, 0.40, 0.80), (0.26, 0.30, 0.72), (0.30, 0.35, 0.76)], vrN=(0.86, 0.50, 0.42),
-                 spec=0.55, power=40.0, amb=0.18, dif=0.85),
-    "落ち着いた": dict(aorta=(0.74, 0.14, 0.16), sysvein=(0.24, 0.34, 0.60), pv=(0.84, 0.40, 0.36), heart=(0.66, 0.28, 0.32), pa=(0.40, 0.52, 0.78),
+    "リアル": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), pa=(0.29, 0.33, 0.63),
+                 myo=(0.52, 0.13, 0.12), myocut=(0.59, 0.17, 0.15), epi=(0.82, 0.72, 0.54), endo=(0.77, 0.35, 0.31), endoR=(0.41, 0.45, 0.72),
+                 bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.70),
+                 vr=[(0.76, 0.24, 0.23), (0.82, 0.34, 0.30), (0.80, 0.20, 0.20), (0.84, 0.32, 0.28), (0.82, 0.34, 0.30),
+                     (0.32, 0.36, 0.69), (0.38, 0.43, 0.74), (0.31, 0.34, 0.67), (0.34, 0.38, 0.71)], vrN=(0.82, 0.53, 0.46),
+                 spec=0.35, power=30.0, amb=0.18, dif=0.85),
+    "落ち着いた": dict(aorta=(0.74, 0.14, 0.16), sysvein=(0.24, 0.34, 0.60), pv=(0.84, 0.40, 0.36), heart=(0.66, 0.28, 0.32), heartR=(0.46, 0.54, 0.80), pa=(0.40, 0.52, 0.78),
                   myo=(0.55, 0.15, 0.14), myocut=(0.64, 0.17, 0.15), epi=(0.84, 0.72, 0.64), endo=(0.94, 0.76, 0.72), endoR=(0.74, 0.80, 0.94),
                   bone=(0.88, 0.86, 0.80), calc=(1.00, 0.92, 0.55),
                   vr=[(0.88, 0.44, 0.40), (0.95, 0.62, 0.50), (0.93, 0.30, 0.28), (0.95, 0.55, 0.45), (0.95, 0.62, 0.50),
@@ -72,7 +72,7 @@ def _setPalette(name):
     VESSEL_GROUPS = [(nm, keys, p[k]) for (nm, keys), k in zip(_VG_BASE, ("aorta", "sysvein", "pv", "heart"))]
     VESSEL_OTHER = ("血管:肺動脈ほか", p["pa"])
     LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", p["aorta"]), ("肺静脈", p["pv"]),
-              ("心腔", p["heart"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
+              ("左心系の血液", p["heart"]), ("右心系の血液", p["heartR"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
     LEGEND_WALL = [("外膜", p["epi"]), ("左心系の内膜", p["endo"]), ("右心系の内膜", p["endoR"]), ("補った壁（CT値の裏付けなし）", SYNTH_COLOR), ("心筋（AIラベル）", p["myocut"])]
     return p
 
@@ -1587,6 +1587,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                     model.GetDisplayNode().SetVisibility(sp["visible"]); self.layerModels[gname] = model; self.visible[gname] = sp["visible"]
                     remaining[part] = 0
                     status(f"  {gname} 完了")
+                try: self._colorChambersLR()
+                except Exception as e: print("chambers LR:", e)
                 if remaining.sum() > 50:
                     gname, col = VESSEL_OTHER
                     model = self._surfaceFromBinary(remaining, work, gname, col, sp["smooth"])
@@ -2579,6 +2581,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if d is None: continue
             d.SetColor(*col)
             if k.startswith("血管") or k == "心筋": d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
+        try: self._colorChambersLR(p)
+        except Exception as e: print("chambers LR:", e)
         w_ = self.layerModels.get("心臓壁")
         if w_ is not None and w_.GetDisplayNode(): d = w_.GetDisplayNode(); d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(p["amb"]); d.SetDiffuse(p["dif"])
         ct = slicer.mrmlScene.GetFirstNodeByName("CV EpiEndo")
@@ -2599,6 +2603,43 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 self.vrDisplay = None                                         # 次に VR を出す時に新しい色で作る
         try: self._view().scheduleRender()
         except Exception: pass
+
+    def _colorChambersLR(self, p=None):
+        """「血管:心臓」（心腔の血液の面）を左心系と右心系で塗り分ける。頂点ごとに一番近い心腔ラベル（左房・左室 / 右房・右室）で決める。
+        決めた結果は面に持たせる（保存される）ので計算は 1 回だけ。色は色合いに合わせて変えるだけ"""
+        from scipy import ndimage
+        from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
+        p = p or PALETTES.get(CUR_PALETTE, PALETTES["リアル"])
+        node = self.layerModels.get("血管:心臓"); pd = node.GetPolyData() if node is not None else None
+        if pd is None or pd.GetNumberOfPoints() == 0 or node.GetDisplayNode() is None: return False
+        arr = pd.GetPointData().GetArray("CV_side")
+        if arr is None or arr.GetNumberOfTuples() != pd.GetNumberOfPoints():
+            hc = self._findChambers()
+            if hc is None: return False
+            P = vtk_to_numpy(pd.GetPoints().GetData()).astype(float)
+            h = 1.5; lo = P.min(0) - 5.0; n = (np.ceil((P.max(0) + 5.0 - lo) / h).astype(int) + 1)
+            G = vtk.vtkMatrix4x4()
+            for a in range(3): G.SetElement(a, a, h); G.SetElement(a, 3, float(lo[a]))
+            ref = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "cv_tmpRef")
+            img = vtk.vtkImageData(); img.SetDimensions(int(n[0]), int(n[1]), int(n[2])); img.AllocateScalars(vtk.VTK_SHORT, 1); ref.SetAndObserveImageData(img); ref.SetIJKToRASMatrix(G)
+            try:
+                Lm = self._segmentMaskArray(hc, ref, ("left atrium", "left ventricle")); Rm = self._segmentMaskArray(hc, ref, ("right atrium", "right ventricle"))
+            finally:
+                slicer.mrmlScene.RemoveNode(ref)
+            if Lm is None or Rm is None or not (Lm.any() and Rm.any()): return False
+            lab = np.zeros(Lm.shape, np.uint8); lab[Lm] = 1; lab[Rm & ~Lm] = 2
+            _, ind = ndimage.distance_transform_edt(lab == 0, return_indices=True); near = lab[tuple(ind)]; del ind
+            ijk = np.clip(np.rint((P - lo) / h).astype(int), 0, n - 1)
+            side = (near[ijk[:, 2], ijk[:, 1], ijk[:, 0]] == 2).astype(np.float32)
+            arr = numpy_to_vtk(side, deep=True); arr.SetName("CV_side"); pd.GetPointData().AddArray(arr); pd.Modified()
+        ct = slicer.mrmlScene.GetFirstNodeByName("CV 心腔の左右")
+        if ct is None:
+            ct = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", "CV 心腔の左右"); ct.SetTypeToUser(); ct.SetNumberOfColors(2); ct.SetHideFromEditors(True)
+        ct.SetColor(0, "left", *p["heart"], 1.0); ct.SetColor(1, "right", *p.get("heartR", p["pa"]), 1.0)
+        d = node.GetDisplayNode()
+        d.SetActiveScalarName("CV_side"); d.SetAndObserveColorNodeID(ct.GetID())
+        d.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange); d.SetScalarRange(0.0, 1.0); d.SetScalarVisibility(True)
+        return True
 
     def setGloss(self, g):
         for n in list(self.layerModels.values()):
