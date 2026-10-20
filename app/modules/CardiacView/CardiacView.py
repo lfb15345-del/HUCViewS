@@ -37,7 +37,7 @@ LEGEND_WALL = [("外膜", (0.84, 0.72, 0.64)), ("左心系の内膜", (0.94, 0.7
 IMPLANT_COLOR = (0.80, 0.83, 0.90)  # 人工物（金属: 人工弁のリング・ステント・クリップなど）: 銀
 CALC_COLOR = (1.00, 0.92, 0.55)     # 石灰化: 明るい黄白
 WIRE_COLOR = (0.96, 0.56, 0.20)     # 胸骨ワイヤー（金属）: 銅色（骨の白と見分ける）
-PATCH_COLOR = (0.95, 0.95, 0.92)    # パッチの範囲（自動）: 白（布・心膜のパッチらしく。石灰化の黄白・金属の銀とは別）
+PATCH_COLOR = (0.78, 0.77, 0.74)    # パッチ: 少しくすんだ生成り色（布・心膜のパッチらしく。真っ白だとまぶしい。石灰化の黄白・金属の銀とは別）
 LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
 # ---- 色合い（設定 → 見た目 → 色合い）。分け方（どの部屋・血管を何色の系統にするか）は同じで、色の濃さ・光沢だけ変える
@@ -46,11 +46,11 @@ LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸
 #   落ち着いた: これまでの色（彩度を落とした色）
 PALETTES = {
     "リアル": dict(aorta=(0.74, 0.18, 0.28), sysvein=(0.60, 0.52, 0.78), pv=(0.82, 0.32, 0.40), heart=(0.72, 0.17, 0.27), heartR=(0.50, 0.40, 0.70), la=(0.86, 0.42, 0.48), ra=(0.70, 0.62, 0.84), pa=(0.48, 0.38, 0.68),
-                 myo=(0.80, 0.62, 0.34), myocut=(0.80, 0.60, 0.34), epi=(0.86, 0.70, 0.42), endo=(0.88, 0.58, 0.52), endoR=(0.70, 0.62, 0.84),
+                 myo=(0.84, 0.56, 0.58), myocut=(0.86, 0.60, 0.60), epi=(0.86, 0.70, 0.42), endo=(0.88, 0.58, 0.52), endoR=(0.70, 0.62, 0.84),
                  bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.72),
                  vr=[(0.70, 0.12, 0.20), (0.80, 0.26, 0.33), (0.72, 0.12, 0.20), (0.78, 0.22, 0.30), (0.80, 0.26, 0.33),
-                     (0.40, 0.30, 0.62), (0.52, 0.42, 0.72), (0.38, 0.28, 0.60), (0.46, 0.38, 0.68)], vrN=(0.80, 0.60, 0.30),
-                 vrMuscle=(0.82, 0.62, 0.32),                                  # VR: 心筋の濃さの所は金、造影された血液は部屋の色（シネマティック表示に近い）
+                     (0.40, 0.30, 0.62), (0.52, 0.42, 0.72), (0.38, 0.28, 0.60), (0.46, 0.38, 0.68)], vrN=(0.84, 0.60, 0.60),
+                 vrPale=0.5,                                                   # VR: 心筋の濃さの所は、その部屋の色を淡くした色（左室の壁 = 淡い深紅、右室の壁 = 淡い紫）。造影された血液は部屋の色
                  spec=0.45, power=35.0, amb=0.15, dif=0.90),
     "赤と青": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), la=(0.80, 0.40, 0.28), ra=(0.40, 0.54, 0.76), pa=(0.29, 0.33, 0.63),
                  myo=(0.52, 0.13, 0.12), myocut=(0.59, 0.17, 0.15), epi=(0.82, 0.72, 0.54), endo=(0.77, 0.35, 0.31), endoR=(0.41, 0.45, 0.72),
@@ -2589,6 +2589,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             if d is None: continue
             d.SetColor(*col)
             if k.startswith("血管") or k == "心筋": d.SetSpecular(p["spec"]); d.SetPower(p["power"]); d.SetAmbient(self._shade().get("samb", p["amb"])); d.SetDiffuse(p["dif"])
+        pt = self.layerModels.get(self.PATCH_KEY)
+        if pt is not None and pt.GetDisplayNode() is not None:
+            dp = pt.GetDisplayNode(); dp.SetColor(*PATCH_COLOR); dp.SetSpecular(0.12); dp.SetPower(10); dp.SetDiffuse(0.85)
+            if pt.GetAttribute("CV.vrTint"): pt.SetAttribute("CV.vrTint", ",".join(f"{x:.2f}" for x in PATCH_COLOR))
         try: self._colorChambersLR(p)
         except Exception as e: print("chambers LR:", e)
         w_ = self.layerModels.get("心臓壁")
@@ -2601,7 +2605,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 ct.SetColor(tt, f"c{tt}", c[0], c[1], c[2], 1.0)
         cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
         if cap is not None and cap.GetDisplayNode(): cap.GetDisplayNode().SetColor(*MYO_CUT_COLOR)
-        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]; self.VR_MUSCLE = p.get("vrMuscle")
+        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]; self.VR_PALE = p.get("vrPale")
         if rebuildVR and getattr(self, "vrOn", False) and getattr(self, "vrDisplay", None) is not None:
             try:
                 self.vrDisplay.SetVisibility(False); self.vrDisplay = None; self.showVR(True, getattr(self, "vrMode", None))
@@ -3185,7 +3189,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                  ("hc", ("pulmonary artery",), (0.42, 0.50, 0.88), "R"),
                  ("tot", ("vena cava",), (0.50, 0.62, 0.92), "R")]
     VR_NEUTRAL = (0.88, 0.72, 0.62)
-    VR_MUSCLE = None
+    VR_PALE = None
 
     def _gridNode(self, src, lo, hi, step):
         """src の一部（lo..hi, ijk = z,y,x）を step 倍の粗さで覆う空の参照ボリューム（ラベルの書き出し先）"""
@@ -3351,13 +3355,14 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             out = np.empty(hu.shape + (4,), np.uint8)
             out[..., :3] = np.clip(rgb * 255.0, 0, 255).astype(np.uint8); out[..., 3] = v.astype(np.uint8)
             del hu, t, v, rgb, bloc, wgt
-        mus = getattr(self, "VR_MUSCLE", None)
-        if mus is not None:                                               # 心筋の濃さ（目盛り 100〜105）は金、135 から上（血液の面）は部屋の色。間はなめらかに（作る時に 1 回だけ）
-            m255 = np.array(mus, np.float32) * 255.0
+        pale = getattr(self, "VR_PALE", None)
+        if pale:                                                          # 心筋の濃さ（目盛り 100〜105）は部屋の色を淡く、135 から上（血液の面）は部屋の色のまま。間はなめらかに（作る時に 1 回だけ）
             for z0 in range(0, out.shape[0], 24):
                 sl = out[z0:z0 + 24]; w = np.clip((sl[..., 3].astype(np.float32) - 105.0) / 30.0, 0.0, 1.0); w = w * w * (3.0 - 2.0 * w)
-                for k in range(3): sl[..., k] = (sl[..., k].astype(np.float32) * w + m255[k] * (1.0 - w)).astype(np.uint8)
-                del sl, w
+                f = float(pale) * (1.0 - w)
+                for k in range(3):
+                    c = sl[..., k].astype(np.float32); sl[..., k] = (c + (255.0 - c) * f).astype(np.uint8)
+                del sl, w, f
         spz = sp[0] * ds
         zf = int(round(sp[0] / (1.0 * ds))) if sp[0] > 1.5 else 1      # 厚いスライス（2〜5mm）は z を 1mm（粗い格子は 2mm）に曲線補間（板状の段差を消す）
         if zf > 1:
