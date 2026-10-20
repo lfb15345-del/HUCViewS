@@ -15,7 +15,7 @@ if _HERE not in sys.path: sys.path.insert(0, _HERE)
 for _k in [k for k in list(sys.modules) if k == "AortaSizingLib" or k.startswith("AortaSizingLib.")]:
     del sys.modules[_k]                               # 読み直し（Reload）の時も部品を新しく読む
 from AortaSizingLib.common import *
-from AortaSizingLib import ui_base, ui_build, ui_measure, ui_tevar, ui_postop, ui_output, logic_core, logic_section, logic_view, logic_input, logic_centerfix, logic_marker, logic_tevar, logic_dissection, logic_postop, logic_lengths, logic_report, logic_plaque, ui_research
+from AortaSizingLib import ui_base, ui_build, ui_measure, ui_tevar, ui_postop, ui_output, logic_core, logic_section, logic_view, logic_input, logic_centerfix, logic_marker, logic_tevar, logic_dissection, logic_postop, logic_lengths, logic_report, logic_plaque, ui_research, ui_graft, logic_graft
 
 # 部品の地図（どこに何があるか）
 #   AortaSizingLib/ui_base.py — 画面の部品・共通（カード・ボタン・ページ切り替え・お知らせ）
@@ -37,6 +37,8 @@ from AortaSizingLib import ui_base, ui_build, ui_measure, ui_tevar, ui_postop, u
 #   AortaSizingLib/logic_report.py — まとめ・画像・PDF・CSV・レポート
 #   AortaSizingLib/ui_research.py — 6 研究（隠しタブ・Ctrl+Shift+R）: プラーク・解析用の CSV
 #   AortaSizingLib/logic_plaque.py — 研究用: プラーク・壁在血栓（厚み・CT 値・番号・マスク）
+#   AortaSizingLib/ui_graft.py — 6 研究の「手術のイメージ（教育用）」の画面
+#   AortaSizingLib/logic_graft.py — 手術のイメージ: 人工血管（しわ・形）・ステント・フェルト・頸部分枝・フラップの色分け
 #   AortaSizingLib/common.py — 定数・テンプレート・小さな関数・_Overlay
 
 
@@ -53,14 +55,14 @@ class AortaSizing(ScriptedLoadableModule):
         parent.acknowledgementText = "中心線: VMTK (SlicerVMTK)。"
 
 
-class AortaSizingWidget(ui_base.WidgetBaseMixin, ui_build.WidgetBuildMixin, ui_measure.MeasureUIMixin, ui_tevar.TevarUIMixin, ui_postop.PostOpUIMixin, ui_output.OutputUIMixin, ui_research.ResearchUIMixin, ScriptedLoadableModuleWidget):
+class AortaSizingWidget(ui_base.WidgetBaseMixin, ui_build.WidgetBuildMixin, ui_measure.MeasureUIMixin, ui_tevar.TevarUIMixin, ui_postop.PostOpUIMixin, ui_output.OutputUIMixin, ui_research.ResearchUIMixin, ui_graft.GraftUIMixin, ScriptedLoadableModuleWidget):
     """画面。中身は AortaSizingLib/ui_*.py"""
 
 
 # ============================================================================ logic
-class AortaSizingLogic(logic_core.CoreMixin, logic_section.SectionMixin, logic_view.ViewMixin, logic_input.InputMixin, logic_centerfix.CenterlineFixMixin, logic_marker.MarkerMixin, logic_tevar.TevarPlanMixin, logic_dissection.DissectionMixin, logic_postop.PostOpMixin, logic_lengths.LengthMixin, logic_report.ReportMixin, logic_plaque.PlaqueMixin, ScriptedLoadableModuleLogic):
+class AortaSizingLogic(logic_core.CoreMixin, logic_section.SectionMixin, logic_view.ViewMixin, logic_input.InputMixin, logic_centerfix.CenterlineFixMixin, logic_marker.MarkerMixin, logic_tevar.TevarPlanMixin, logic_dissection.DissectionMixin, logic_postop.PostOpMixin, logic_lengths.LengthMixin, logic_report.ReportMixin, logic_plaque.PlaqueMixin, logic_graft.GraftMixin, ScriptedLoadableModuleLogic):
     """計算。中身は AortaSizingLib/logic_*.py"""
 
 
-for _m in (ui_base, ui_build, ui_measure, ui_tevar, ui_postop, ui_output, logic_core, logic_section, logic_view, logic_input, logic_centerfix, logic_marker, logic_tevar, logic_dissection, logic_postop, logic_lengths, logic_report, logic_plaque, ui_research):          # 部品の中から本体のクラスを名前で使えるように（setup で AortaSizingLogic() など）
+for _m in (ui_base, ui_build, ui_measure, ui_tevar, ui_postop, ui_output, logic_core, logic_section, logic_view, logic_input, logic_centerfix, logic_marker, logic_tevar, logic_dissection, logic_postop, logic_lengths, logic_report, logic_plaque, ui_research, ui_graft, logic_graft):          # 部品の中から本体のクラスを名前で使えるように（setup で AortaSizingLogic() など）
     _m.AortaSizingLogic = AortaSizingLogic; _m.AortaSizingWidget = AortaSizingWidget; _m.AortaSizing = AortaSizing

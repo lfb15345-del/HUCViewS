@@ -449,7 +449,7 @@ class ViewMixin:
         hidden = getattr(self, "_hiddenNodes", None) or []
         for n in list(slicer.util.getNodesByClass("vtkMRMLDisplayableNode")):
             try:
-                if not (n.GetName().startswith(("SA ", "TEVAR ", "研究 ")) or n.GetAttribute("SA.measure")): continue
+                if not (n.GetName().startswith(("SA ", "TEVAR ", "研究 ", "手術 ")) or n.GetAttribute("SA.measure")): continue
                 d = n.GetDisplayNode()
                 if d is not None and d.GetVisibility(): d.SetVisibility(False); hidden.append(n)
             except Exception: pass

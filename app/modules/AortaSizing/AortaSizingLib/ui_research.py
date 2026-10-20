@@ -33,6 +33,8 @@ class ResearchUIMixin:
         self.plqCsvBtn = self._btn("CSV に保存", None, "プラーク 1 個 1 行・断面ごとの表を 研究_プラーク\\<シリーズ>_<日時> に。要約 1 行を プラーク_一覧.csv に追記（版・設定・画素間隔も）"); r.addWidget(self.plqCsvBtn, 1)
         self.plqMaskBtn = self._btn("マスクを保存", None, "ラジオミクス用: 伸ばした画像（範囲）とプラークの番号のラベルを NRRD で（同じフォルダ）"); r.addWidget(self.plqMaskBtn, 1)
         self.plqNote = self._lab("", "muted"); self.plqNote.setWordWrap(True); c.addWidget(self.plqNote)
+        try: self._buildGraft(pl)                                        # 手術のイメージ（教育用）
+        except Exception as e: print("[AortaSizing] graft UI", e)
         card, c = self._card(pl, "解析用の CSV")
         for b in (getattr(self, "helixCsvBtn", None), getattr(self, "sineCsvBtn", None)):
             if b is not None: c.addWidget(b)
