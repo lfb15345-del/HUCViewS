@@ -412,9 +412,12 @@ class GraftMixin:
             status("大動脈の中の膜（フラップ）を探しています…")
             try: memb = self._gMembrane(skip=list(c["stent"]) + graft + wr)
             except Exception as e: print("[graft] membrane", e)
+        old_ = getattr(self, "gState", None) if getattr(self, "_gStateVol", None) is self.vol else None
         self.gState = dict(f=f, c=c, wr=wr, seeds=seeds, auto=graft, tracks=tr, sAuto=sA, memb=memb,
                            manual=getattr(self, "gState", {}).get("manual", []) if getattr(self, "gState", None) and getattr(self, "_gStateVol", None) is self.vol else [],
                            brManual=getattr(self, "gState", {}).get("brManual", {}) if getattr(self, "gState", None) and getattr(self, "_gStateVol", None) is self.vol else {})
+        if old_ is not None:
+            for k_ in ("userBr", "ops"): self.gState[k_] = old_.get(k_, [])
         self._gStateVol = self.vol
         return self.graftRender(status)
 
@@ -485,6 +488,7 @@ class GraftMixin:
         # 頸部分枝: AI のラベル（TotalSegmentator）は術後の頸部で別の所（造影されていない組織など）を枝としていることがあり、
         # 間違った血管を出すのはビューアとして致命的なので、確かめた方法でたどれるまで出さない（BRANCHES_FROM_AI = False）
         if getattr(self, "BRANCHES_FROM_AI", False): self._gBranchModels()
+        self._gUserBranchModels()
         txt = []
         if graft: txt.append("人工血管 " + "、".join(f"{s[a]:.0f}〜{s[b]:.0f} mm" for a, b in graft))
         if c["stent"]: txt.append("ステント " + "、".join(f"{s[a]:.0f}〜{s[b]:.0f} mm" for a, b in c["stent"]))
@@ -536,14 +540,14 @@ class GraftMixin:
         arr = numpy_to_vtk(np.ascontiguousarray(sc), deep=True); arr.SetName("g"); pd.GetPointData().SetScalars(arr)
         cp = vtk.vtkClipPolyData(); cp.SetInputData(pd); cp.SetValue(0.0); cp.GenerateClippedOutputOn(); cp.Update()
         gr = cp.GetOutput(); nat = cp.GetClippedOutput()
-        if gr.GetNumberOfPoints():
+        if gr.GetNumberOfPolys():
             nm = vtk.vtkPolyDataNormals(); nm.SetInputData(gr); nm.SplittingOff(); nm.ComputePointNormalsOn(); nm.Update(); gp = nm.GetOutput()
             Y = vtk_to_numpy(gp.GetPoints().GetData()).astype(float); Nn = vtk_to_numpy(gp.GetPointData().GetNormals()).astype(float)
             _, n2 = cKDTree(allP).query(Y); Y = Y + (0.35 * np.sin(2 * np.pi * sv[n2] / 2.5))[:, None] * Nn
             vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(np.ascontiguousarray(Y), deep=True)); gp.SetPoints(vp); gp.GetPointData().SetScalars(None)
             nm2 = vtk.vtkPolyDataNormals(); nm2.SetInputData(gp); nm2.SplittingOff(); nm2.Update(); o = vtk.vtkPolyData(); o.DeepCopy(nm2.GetOutput())
             self._gModel("頸部分枝（人工血管）", o, WHITE, 1.0)
-        if nat.GetNumberOfPoints():
+        if nat.GetNumberOfPolys():
             nat.GetPointData().SetScalars(None); nm = vtk.vtkPolyDataNormals(); nm.SetInputData(nat); nm.SplittingOff(); nm.Update()
             o = vtk.vtkPolyData(); o.DeepCopy(nm.GetOutput()); self._gModel("頸部分枝", o, RED, 1.0, 0.45, 22)
         # 枝の始まり（AI のラベルは大動脈から少し離れて始まる）と大動脈の人工血管の間を筒でつなぐ（途切れて見えないように）
@@ -588,25 +592,33 @@ class GraftMixin:
         """中心線の s0〜s1 mm を人工血管にする（on=True）／外す（on=False）"""
         if not getattr(self, "gState", None): raise RuntimeError("先に「自動で色分け」を押してください。")
         k0, k1 = int(round(min(s0, s1) / ST)), int(round(max(s0, s1) / ST))
-        self.gState["manual"].append((k0, k1, bool(on))); return self.graftRender(status)
+        self.gState["manual"].append((k0, k1, bool(on))); self.gState.setdefault("ops", []).append(("manual",)); return self.graftRender(status)
 
     def graftUndo(self, status=print):
         g = getattr(self, "gState", None)
         if not g: return ""
-        if g["manual"]: g["manual"].pop()
+        ops = g.get("ops") or []
+        if ops:
+            op = ops.pop()
+            if op[0] == "manual" and g["manual"]: g["manual"].pop()
+            elif op[0] == "br": g.get("brManual", {}).pop(op[1], None)
+            elif op[0] == "trace" and g.get("userBr"): b = g["userBr"].pop(); g.get("brManual", {}).pop(b["name"], None)
+        elif g["manual"]: g["manual"].pop()
         elif g.get("brManual"): g["brManual"].popitem()
         return self.graftRender(status)
 
     def graftBranchAt(self, ras, status=print):
         """3D でクリックした点に一番近い頸部分枝の、その位置を吻合部にする（起始部〜そこまでが人工血管）"""
         g = getattr(self, "gState", None)
-        if not g or not g["tracks"]: raise RuntimeError("頸部分枝が見つかっていません。")
+        cand = {b["name"]: b for b in (g or {}).get("userBr", [])}
+        if g and getattr(self, "BRANCHES_FROM_AI", False): cand.update(g["tracks"])
+        if not g or not cand: raise RuntimeError("先に「頸部分枝をたどる」で枝をたどってください。")
         best = None
-        for key, t in g["tracks"].items():
+        for key, t in cand.items():
             d = np.linalg.norm(t["R"] - np.asarray(ras)[None, :], axis=1); i = int(np.argmin(d))
             if best is None or d[i] < best[0]: best = (d[i], key, float(t["s"][i]))
         if best[0] > 15: raise RuntimeError("枝から離れています（15 mm 以内をクリックしてください）。")
-        g.setdefault("brManual", {})[best[1]] = best[2]
+        g.setdefault("brManual", {})[best[1]] = best[2]; g.setdefault("ops", []).append(("br", best[1]))
         try:                                                                # 先生が決めた吻合部を記録（自動の判定を合わせる正解に使う。位置だけで個人の情報は入れない）
             import os, csv, datetime
             f_ = os.path.join(os.path.expanduser("~"), "Documents", "HeartView症例", "手術のイメージ_吻合部.csv"); os.makedirs(os.path.dirname(f_), exist_ok=True)
@@ -632,3 +644,121 @@ class GraftMixin:
             self.gState = None
             vm = getattr(self, "vesselModel", None) or slicer.mrmlScene.GetFirstNodeByName("SA 血管")
             if vm is not None and vm.GetDisplayNode(): vm.GetDisplayNode().SetVisibility(True)
+
+    # ================================================================ 頸部分枝をクリックでたどる（オプション）
+    def graftTraceBranch(self, ras, status=print):
+        """MPR か 3D でクリックした頸部の動脈まで、大動脈から「造影された内腔の中」だけを通る一番通りやすい道をたどり、その血管だけを描く。
+        道の重み = 長さ ÷（内腔の中心からの深さ²）なので、内腔の真ん中を通り、静脈などとの細い接触は通らない"""
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import dijkstra
+        g = getattr(self, "gState", None)
+        if not g: raise RuntimeError("先に「自動で色分け」を押してください。")
+        status("大動脈からクリックした所まで、造影された血管をたどっています…")
+        a = self._gArr(); sp = np.array(self.vol.GetSpacing())[::-1]; I2R = self._ijk2ras(); R2I = np.linalg.inv(I2R)
+        q = (R2I @ np.r_[np.asarray(ras, float), 1])[:3]; tz, ty, tx = int(round(q[2])), int(round(q[1])), int(round(q[0]))
+        if not (0 <= tz < a.shape[0] and 0 <= ty < a.shape[1] and 0 <= tx < a.shape[2]): raise RuntimeError("CT の範囲の外です。")
+        ao = self._mask(("aorta",))
+        if ao is None: raise RuntimeError("大動脈のラベルがありません。")
+        zs = np.where(ao.any((1, 2)))[0]; up = I2R[2, 2] > 0; ztop = zs.max() if up else zs.min()
+        mz = lambda mm: int(round(mm / sp[0]))
+        k0 = max(0, min(ztop - mz(40) if up else ztop - mz(10), tz - mz(10))); k1 = min(a.shape[0], max(ztop + mz(10) if up else ztop + mz(40), tz + mz(10)) + 1)
+        sl_ = ao[min(ztop, k1 - 1) - mz(20) if up else ztop:(ztop + 1) if up else ztop + mz(20)].any(0)
+        yy, xx = np.where(sl_) if sl_.any() else (np.array([ty]), np.array([tx]))
+        my = int(30 / sp[1]); mx = int(30 / sp[2])
+        y0, y1 = max(0, min(yy.min(), ty) - my), min(a.shape[1], max(yy.max(), ty) + my + 1); x0, x1 = max(0, min(xx.min(), tx) - mx), min(a.shape[2], max(xx.max(), tx) + mx + 1)
+        S = (slice(k0, k1), slice(y0, y1), slice(x0, x1)); aa = a[S].astype(np.float32); aob = ao[S]
+        huA = float(np.median(a[ndimage.binary_erosion(ao, iterations=2)]))
+        lz, ly, lx = tz - k0, ty - y0, tx - x0
+        w = aa[max(0, lz - 1):lz + 2, max(0, ly - 4):ly + 5, max(0, lx - 4):lx + 5]; huT = float(np.percentile(w, 75))
+        if huT < 150: raise RuntimeError("クリックした所が造影された血管ではないようです（血管の中をクリックしてください）。")
+        M = (ndimage.median_filter(aa, size=(1, 3, 3)) >= 0.55 * min(huA, huT)) & (aa < 1100)
+        bone = self._mask(("vertebrae", "clavicula", "sternum", "rib", "scapula", "humerus", "skull"))
+        if bone is not None: M &= ~ndimage.binary_dilation(bone[S], iterations=1)
+        M |= ndimage.binary_erosion(aob, iterations=1)
+        d = ndimage.distance_transform_edt(M, sampling=sp)
+        if not M[lz, ly, lx]:                                                  # クリックが少しずれていたら、4 mm 以内の内腔の真ん中へ
+            zz_, yy_, xx_ = np.ogrid[:M.shape[0], :M.shape[1], :M.shape[2]]
+            near = (((zz_ - lz) * sp[0]) ** 2 + ((yy_ - ly) * sp[1]) ** 2 + ((xx_ - lx) * sp[2]) ** 2) <= 16
+            if not (near & M).any(): raise RuntimeError("クリックした所の近くに造影された血管がありません。")
+            j = np.argmax(np.where(near & M, d, -1)); lz, ly, lx = np.unravel_index(j, M.shape)
+        n = int(M.sum()); idx = -np.ones(M.shape, np.int64); idx[M] = np.arange(n)
+        c = 1.0 / (0.25 + np.minimum(d[M], 6.0) ** 2)
+        us, vs, ws = [], [], []
+        for dz in (0, 1):
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if (dz, dy, dx) <= (0, 0, 0): continue
+                    a_ = (slice(0, M.shape[0] - dz), slice(max(0, -dy), M.shape[1] - max(0, dy)), slice(max(0, -dx), M.shape[2] - max(0, dx)))
+                    b_ = (slice(dz, M.shape[0]), slice(max(0, dy), M.shape[1] + min(0, dy)), slice(max(0, dx), M.shape[2] + min(0, dx)))
+                    both = M[a_] & M[b_]; u = idx[a_][both]; v = idx[b_][both]
+                    L = float(np.sqrt((dz * sp[0]) ** 2 + (dy * sp[1]) ** 2 + (dx * sp[2]) ** 2))
+                    us.append(u); vs.append(v); ws.append(L * 0.5 * (c[u] + c[v]))
+        u = np.concatenate(us); v = np.concatenate(vs); wgt = np.concatenate(ws)
+        G = coo_matrix((wgt, (u, v)), shape=(n, n)).tocsr()
+        src = idx[ndimage.binary_erosion(aob, iterations=2) & M]; src = src[src >= 0]
+        if len(src) == 0: raise RuntimeError("大動脈の内腔が見つかりません。")
+        tgt = int(idx[lz, ly, lx])
+        dist, pred, srcs = dijkstra(G, directed=False, indices=src, return_predecessors=True, min_only=True)
+        if not np.isfinite(dist[tgt]): raise RuntimeError("大動脈からクリックした所まで、造影された内腔がつながっていません。")
+        path = []; nd = tgt
+        while nd >= 0 and len(path) < 100000: path.append(nd); nd = pred[nd]
+        path = path[::-1]; coords = np.argwhere(M)[path]                       # 箱の中の (z, y, x)
+        inA = ndimage.binary_dilation(aob, iterations=1)[coords[:, 0], coords[:, 1], coords[:, 2]]
+        st0 = int(np.argmax(~inA)) if (~inA).any() else 0; coords = coords[max(0, st0 - 2):]
+        ijk = np.c_[coords[:, 2] + x0, coords[:, 1] + y0, coords[:, 0] + k0, np.ones(len(coords))]
+        P = (I2R @ ijk.T).T[:, :3]; P = ndimage.gaussian_filter1d(P, 1.5, axis=0, mode="nearest")
+        s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(P, axis=0), axis=1))]
+        r = d[coords[:, 0], coords[:, 1], coords[:, 2]]; Dm = ndimage.median_filter(2 * r, 7, mode="nearest")
+        # 血管の形: 道からの距離が、その場所の内腔の半径の 1.4 倍 + 0.8 mm 以内の内腔だけ
+        Pm = np.zeros(M.shape, bool); Pm[coords[:, 0], coords[:, 1], coords[:, 2]] = True
+        dd, ii = ndimage.distance_transform_edt(~Pm, sampling=sp, return_indices=True)
+        rad = np.zeros(M.shape, np.float32); rad[coords[:, 0], coords[:, 1], coords[:, 2]] = 1.4 * r + 0.8
+        V = M & (dd <= rad[ii[0], ii[1], ii[2]]) & ~ndimage.binary_erosion(aob, iterations=2)
+        lb, nl = ndimage.label(V)
+        if nl > 1:
+            keep = np.unique(lb[coords[:, 0], coords[:, 1], coords[:, 2]]); V = np.isin(lb, keep[keep > 0])
+        pd = self._gMaskSurface(V, (k0, y0, x0))
+        nm = f"枝{len(g.get('userBr', [])) + 1}"
+        g.setdefault("userBr", []).append(dict(name=nm, R=P, s=s, D=Dm, pd=pd)); g.setdefault("ops", []).append(("trace", nm))
+        self.graftRender(status)
+        status(f"{nm}: 大動脈から {s[-1]:.0f} mm たどりました（太さ 約 {np.median(Dm):.1f} mm）。吻合部は「枝の吻合部をクリック」で。")
+        return nm, float(s[-1])
+
+    def _gMaskSurface(self, V, off):
+        from vtk.util.numpy_support import numpy_to_vtk
+        img = vtk.vtkImageData(); img.SetDimensions(V.shape[2], V.shape[1], V.shape[0])
+        img.GetPointData().SetScalars(numpy_to_vtk(np.ascontiguousarray(V.astype(np.float32).ravel()), deep=True))
+        sp = self.vol.GetSpacing(); sd = [max(0.6, 0.9 / x) for x in sp]
+        gs = vtk.vtkImageGaussianSmooth(); gs.SetInputData(img); gs.SetStandardDeviations(*sd); gs.SetRadiusFactors(3, 3, 3); gs.Update()
+        fe = vtk.vtkFlyingEdges3D(); fe.SetInputConnection(gs.GetOutputPort()); fe.SetValue(0, 0.45); fe.Update()
+        M = vtk.vtkMatrix4x4(); self.vol.GetIJKToRASMatrix(M); tr = vtk.vtkTransform(); tr.SetMatrix(M); tr.PreMultiply(); tr.Translate(off[2], off[1], off[0])
+        tp = vtk.vtkTransformPolyDataFilter(); tp.SetInputConnection(fe.GetOutputPort()); tp.SetTransform(tr); tp.Update()
+        sm = vtk.vtkWindowedSincPolyDataFilter(); sm.SetInputConnection(tp.GetOutputPort()); sm.SetNumberOfIterations(30); sm.SetPassBand(0.03); sm.NormalizeCoordinatesOn(); sm.Update()
+        pd = vtk.vtkPolyData(); pd.DeepCopy(sm.GetOutput()); pd.GetPointData().Initialize(); return pd
+
+    def _gUserBranchModels(self):
+        """クリックでたどった頸部分枝: 起始部〜吻合部（手で決めた所）を白（人工血管）、その先を赤"""
+        from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
+        from scipy.spatial import cKDTree
+        g = self.gState; bs = g.get("userBr") or []
+        if not bs: return
+        app_w = vtk.vtkAppendPolyData(); app_r = vtk.vtkAppendPolyData(); nw = nr = 0
+        for b in bs:
+            pd = vtk.vtkPolyData(); pd.DeepCopy(b["pd"])
+            if pd.GetNumberOfPoints() == 0: continue
+            X = vtk_to_numpy(pd.GetPoints().GetData()).astype(float); _, nn = cKDTree(b["R"]).query(X); sv = b["s"][nn]
+            sA = g.get("brManual", {}).get(b["name"], -1.0)
+            arr = numpy_to_vtk(np.ascontiguousarray(sA - sv), deep=True); arr.SetName("g"); pd.GetPointData().SetScalars(arr)
+            cp = vtk.vtkClipPolyData(); cp.SetInputData(pd); cp.SetValue(0.0); cp.GenerateClippedOutputOn(); cp.Update()
+            gr, na = cp.GetOutput(), cp.GetClippedOutput()
+            if gr.GetNumberOfPolys():
+                nm = vtk.vtkPolyDataNormals(); nm.SetInputData(gr); nm.SplittingOff(); nm.ComputePointNormalsOn(); nm.Update(); gp = nm.GetOutput()
+                Y = vtk_to_numpy(gp.GetPoints().GetData()).astype(float); Nn = vtk_to_numpy(gp.GetPointData().GetNormals()).astype(float)
+                _, n2 = cKDTree(b["R"]).query(Y); Y = Y + (0.3 * np.sin(2 * np.pi * b["s"][n2] / 2.5))[:, None] * Nn
+                vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(np.ascontiguousarray(Y), deep=True)); gp.SetPoints(vp); gp.GetPointData().SetScalars(None)
+                app_w.AddInputData(gp); nw += 1
+            if na.GetNumberOfPolys(): na.GetPointData().SetScalars(None); app_r.AddInputData(na); nr += 1
+        for app, n_, nm_, col, spc in ((app_w, nw, "頸部分枝（人工血管）", WHITE, 0.25), (app_r, nr, "頸部分枝", RED, 0.45)):
+            if not n_: continue
+            app.Update(); nm = vtk.vtkPolyDataNormals(); nm.SetInputConnection(app.GetOutputPort()); nm.SplittingOff(); nm.Update()
+            o = vtk.vtkPolyData(); o.DeepCopy(nm.GetOutput()); self._gModel(nm_, o, col, 1.0, spc, 22)

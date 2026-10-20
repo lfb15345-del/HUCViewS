@@ -22,8 +22,12 @@ class GraftUIMixin:
         self.gAddBtn = self._btn("人工血管にする", None, "「ここから〜ここまで」を人工血管（白）にする"); r.addWidget(self.gAddBtn, 1)
         self.gDelBtn = self._btn("人工血管から外す", None, "「ここから〜ここまで」を人工血管から外す"); r.addWidget(self.gDelBtn, 1)
         r = qt.QHBoxLayout(); c.addLayout(r)
-        self.gBrBtn = self._btn("枝の吻合部をクリック", None, "3D で頸部分枝の吻合部をクリック → 起始部からそこまでを人工血管にする（もう一度押すと終わり）", True)
+        self.gTrBtn = self._btn("頸部分枝をたどる（オプション）", None, "MPR か 3D で、たどりたい頸部の動脈の先のほうをクリック → 大動脈からそこまで、造影された内腔の中だけを通って"
+                                "その血管を描く（1 本ずつ。何本でも。もう一度押すと終わり）", True)
+        r.addWidget(self.gTrBtn, 1)
+        self.gBrBtn = self._btn("枝の吻合部をクリック", None, "MPR か 3D で、たどった枝の吻合部をクリック → 起始部からそこまでを人工血管（白）にする（もう一度押すと終わり）", True)
         r.addWidget(self.gBrBtn, 1)
+        r = qt.QHBoxLayout(); c.addLayout(r); r.addStretch(1)
         self.gUndoBtn = self._btn("1 つ戻す", None, "手で直したのを 1 つ戻す"); r.addWidget(self.gUndoBtn)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.gShowBtn = self._btn("3D に出す", None, "手術のイメージを出す／元の血管に戻す", True); self.gShowBtn.checked = True; r.addWidget(self.gShowBtn, 1)
@@ -36,7 +40,8 @@ class GraftUIMixin:
         self.gRefresh.connect("clicked()", self._gFill); self.gAutoBtn.connect("clicked()", self.onGraftAuto)
         self.gFromBtn.connect("clicked()", lambda: self._gSet(0)); self.gToBtn.connect("clicked()", lambda: self._gSet(1))
         self.gAddBtn.connect("clicked()", lambda: self.onGraftEdit(True)); self.gDelBtn.connect("clicked()", lambda: self.onGraftEdit(False))
-        self.gBrBtn.connect("toggled(bool)", self.onGraftBranchPick); self.gUndoBtn.connect("clicked()", self.onGraftUndo)
+        self.gBrBtn.connect("toggled(bool)", lambda on: self.onGraftBranchPick(on, "anast")); self.gUndoBtn.connect("clicked()", self.onGraftUndo)
+        self.gTrBtn.connect("toggled(bool)", lambda on: self.onGraftBranchPick(on, "trace"))
         self.gShowBtn.connect("toggled(bool)", lambda on: self.logic.graftShow(on)); self.gClearBtn.connect("clicked()", self.onGraftClear)
         self._gFill()
 
@@ -73,24 +78,38 @@ class GraftUIMixin:
         self._gDone(self._busy(lambda: self.logic.graftUndo(self._say)))
 
     def onGraftClear(self):
-        self.gBrBtn.checked = False; self.logic.graftClear(); self.gLab.setText("—"); self._say("手術のイメージを消しました。")
+        self.gBrBtn.checked = False; self.gTrBtn.checked = False; self.logic.graftClear(); self.gLab.setText("—"); self._say("手術のイメージを消しました。")
 
-    def onGraftBranchPick(self, on):
-        if not on: self._gPickEnd(); return
-        if not getattr(self.logic, "gState", None): self._say("先に「自動で色分け」を押してください。"); self.gBrBtn.checked = False; return
+    def onGraftBranchPick(self, on, mode="anast"):
+        btn = self.gTrBtn if mode == "trace" else self.gBrBtn; other = self.gBrBtn if mode == "trace" else self.gTrBtn
+        if not on:
+            if getattr(self, "_gPickMode", None) == mode: self._gPickEnd()
+            return
+        if not getattr(self.logic, "gState", None): self._say("先に「自動で色分け」を押してください。"); btn.checked = False; return
+        if other.checked: other.blockSignals(True); other.checked = False; other.blockSignals(False); self._gPickEnd()
+        self._gPickMode = mode
         n = slicer.mrmlScene.GetFirstNodeByName("手術 吻合部の点")
         if n is None: n = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "手術 吻合部の点")
         n.RemoveAllControlPoints(); n.CreateDefaultDisplayNodes()
         self._gPickNode = n; self._gPickObs = n.AddObserver(slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self._gPicked)
         sel = slicer.app.applicationLogic().GetSelectionNode(); sel.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode"); sel.SetActivePlaceNodeID(n.GetID())
         it = slicer.app.applicationLogic().GetInteractionNode(); it.SetPlaceModePersistence(1); it.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
-        self._say("3D で頸部分枝の吻合部をクリックしてください（何本でも。終わったらもう一度ボタン）。")
+        self._say("MPR か 3D で、たどりたい頸部の動脈の先のほうをクリックしてください（1 本ずつ。終わったらもう一度ボタン）。" if mode == "trace"
+                  else "MPR か 3D で、たどった枝の吻合部をクリックしてください（何本でも。終わったらもう一度ボタン）。")
 
     def _gPicked(self, caller, ev):
         n = caller
         if n.GetNumberOfControlPoints() == 0: return
         p = [0.0, 0.0, 0.0]; n.GetNthControlPointPositionWorld(n.GetNumberOfControlPoints() - 1, p)
         def run():
+            if getattr(self, "_gPickMode", "anast") == "trace":
+                try:
+                    out = self._busy(lambda: self.logic.graftTraceBranch(p, self._say))
+                    if out: self.gLab.setText(self.logic.gSummary)
+                except Exception as e: self._say(str(e))
+                try: n.RemoveAllControlPoints()
+                except Exception: pass
+                return
             try:
                 key, s = self.logic.graftBranchAt(p, self._say)
                 nm = {"brachiocephalic trunk": "腕頭", "common carotid artery left": "左総頸", "subclavian artery left": "左鎖骨下",
