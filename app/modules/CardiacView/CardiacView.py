@@ -644,7 +644,12 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.glossSlider = ctk.ctkSliderWidget(); self.glossSlider.minimum = 0; self.glossSlider.maximum = 100; self.glossSlider.value = 50; f.addRow(Lb("光沢", "muted"), self.glossSlider)
         self.opacitySlider = ctk.ctkSliderWidget(); self.opacitySlider.minimum = 0; self.opacitySlider.maximum = 100; self.opacitySlider.value = 100; f.addRow(Lb("血液の不透明度", "muted"), self.opacitySlider)
         self.fovSlider = ctk.ctkSliderWidget(); self.fovSlider.minimum = 15; self.fovSlider.maximum = 120; self.fovSlider.value = 30; f.addRow(Lb("視野角", "muted"), self.fovSlider)
-        self.ssaoCheck = qt.QCheckBox("陰影で奥行きを出す（環境光遮蔽）"); self.ssaoCheck.checked = True; c.addWidget(self.ssaoCheck)
+        self.ssaoCheck = qt.QCheckBox("陰影で奥行きを出す（環境光遮蔽）"); self.ssaoCheck.checked = True; c.addWidget(self.ssaoCheck); self.ssaoCheck.hide()
+        self.shadeCombo = qt.QComboBox(); self.shadeCombo.addItems(["なし", "ふつう", "強め"])
+        self.shadeCombo.setToolTip("面: 環境光遮蔽（くぼみが暗くなる）と光の当たり方の差。VR: 環境光を下げてメリハリ。重い PC では自動で 1 段下げる")
+        try: _lv = str(qt.QSettings().value("HUCViewS/shading") or "ふつう")
+        except Exception: _lv = "ふつう"
+        self.shadeCombo.currentIndex = {"なし": 0, "ふつう": 1, "強め": 2}.get(_lv, 1); f.addRow(Lb("陰影", "muted"), self.shadeCombo)
 
         card, c, _ = self._card(P, "その他"); self._otherLay = c
         self.freePlaneButton = B("自由な切断面を追加", None, "3D 上のハンドルで向き・位置を操作する切断面"); c.addWidget(self.freePlaneButton)
@@ -712,6 +717,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.vrBloodButton.connect("clicked()", lambda: self._onVR("blood"))
         self.bgCombo.connect("currentIndexChanged(int)", lambda i: self.logic.setBackground(i))
         self.paletteCombo.connect("currentIndexChanged(int)", self.onPalette)
+        self.shadeCombo.connect("currentIndexChanged(int)", self.onShade)
         self.glossSlider.connect("valueChanged(double)", lambda v: self.logic.setGloss(v / 100.0))
         self.opacitySlider.connect("valueChanged(double)", lambda v: self.logic.setLayerOpacity("血液・血管", v / 100.0))
         self.ssaoCheck.connect("toggled(bool)", lambda v: self.logic.studioLighting(self.bgCombo.currentIndex, ssao=v))
@@ -816,6 +822,17 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         _rows = lambda L: "".join(f"<tr><td>{_sq(cc)}</td><td style='padding-left:6px'>{n}</td></tr>" for n, cc in L)
         self._legendHtml = ("<div style='font-size:12px'><b style='color:#4cc8f0'>血液・血管の色</b><table>" + _rows(LEGEND) + "</table><br>"
                             "<b style='color:#4cc8f0'>断面（壁）の色</b><table>" + _rows(LEGEND_WALL) + "</table></div>")
+
+    def onShade(self, i):
+        lv = ("なし", "ふつう", "強め")[i]
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try: msg = self.logic.setShading(lv)
+        except Exception as e: import traceback; traceback.print_exc(); msg = ""
+        finally: qt.QApplication.restoreOverrideCursor()
+        if msg:
+            self.shadeCombo.blockSignals(True); self.shadeCombo.currentIndex = ("なし", "ふつう", "強め").index(self.logic.shadeLevel); self.shadeCombo.blockSignals(False)
+            try: self.statusLabel.setText(msg)
+            except Exception: print(msg)
 
     def onPalette(self, i):
         name = "リアル" if i == 0 else "落ち着いた"
@@ -2804,6 +2821,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
         proj = corners @ n; dmin, dmax = float(proj.min()), float(proj.max())
         s_ = float(c @ n + max(0.0, float(((P - c) @ n).max())) + gap)
+        if getattr(self, "vrOn", False): s_ = float(c @ n)                 # VR は血液が詰まって見えるので、パッチの真ん中で切る（パッチは切らずに出す）
         self._lockN = n.tolist(); self._lockPrev = "VIEW"
         self.setCut("LOCK", float(np.clip((dmax - s_) / max(dmax - dmin, 1e-6), 0, 1)))
         cn.ResetClippingRange(); self._view().forceRender()
@@ -3160,9 +3178,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         else:
             near = lab
         rgb = cols[near]                                              # (z, y, x, 3)
-        try: self._applyVRTints(rgb, src, lo, step)                       # 部屋の色の上に、決めた範囲（パッチなど）を別の色で塗る
-        except Exception as e: print("VR tint:", e)
         for k in range(3): rgb[..., k] = ndimage.gaussian_filter(rgb[..., k], 1.5 / gsp)   # 境目をぼかす
+        try: self._applyVRTints(rgb, src, lo, step)                       # 部屋の色の上に、決めた範囲（パッチなど）を別の色で塗る（ぼかした後: 白が薄まらないように）
+        except Exception as e: print("VR tint:", e)
         bloc = np.where(isR[near], bR, bL).astype(np.float32)
         bloc = ndimage.gaussian_filter(bloc, 4.0 / gsp)               # 左右の目盛りを 4mm かけてつなぐ
         del near, lab
@@ -3337,10 +3355,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: dm = self._view().displayableManagerByClassName("vtkMRMLModelDisplayableManager")
         except Exception: dm = None
         coll = self._planeColl("_mdPlanes", planes) if gpu else None
+        pn = self.layerModels.get(self.PATCH_KEY) if getattr(self, "vrOn", False) else None
         for n in list(self.layerModels.values()):
             d = n.GetDisplayNode() if n else None
             if d is None: continue
-            want = d.GetAttribute("CV.clipWant") == "1" and bool(planes)
+            want = d.GetAttribute("CV.clipWant") == "1" and bool(planes) and n is not pn   # VR の時、パッチは切らずに切り口の上に出す
             useGpu = want and gpu and d.GetAttribute("CV.cap") != "1"
             slicerClip = want and not useGpu
             if bool(d.GetClipping()) != slicerClip: d.SetClipping(slicerClip)
@@ -3409,7 +3428,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             for x, y in pts: otf.AddPoint(x, y)
             vp.SetScalarOpacity(otf)
             vp.ShadeOn(); vp.SetInterpolationTypeToLinear()
-            vp.SetAmbient(0.25); vp.SetDiffuse(0.75); vp.SetSpecular(0.35); vp.SetSpecularPower(25)
+            sh = self._shade(); vp.SetAmbient(sh["vamb"]); vp.SetDiffuse(sh["vdif"]); vp.SetSpecular(sh["vspec"]); vp.SetSpecularPower(25)   # 陰影の設定どおり
             self._vrOtfProp, self._vrOtfMode = vp, mode
         self._vrLabel()
 
@@ -3440,8 +3459,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(self.vrOn)
         if self.vrOn:
             self._vrSaved = {k: self.visible.get(k, False) for k in self.layerModels}
+            keep = ("パッチ",)                                                # パッチは VR の中でも面で出す（VR は CT 値で透けるので、薄い布が見えなくなる）
             for k, n in self.layerModels.items():
-                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(False)
+                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(k in keep and self._vrSaved.get(k)))
             cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
             if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
         else:
@@ -3453,6 +3473,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             ren = self._view().renderWindow().GetRenderers().GetFirstRenderer(); vs = ren.GetVolumes(); vs.InitTraversal()
             for _ in range(vs.GetNumberOfItems()): vs.GetNextVolume().GetMapper().SetUseJittering(True)   # OFF だと木目状の細かい線が出る
         except Exception: pass
+        try: self._applyVRShade()
+        except Exception as e: print("VR shade:", e)
         if on and (first or getattr(self, "vrStillQ", None) is None):
             try: self._tuneVR()
             except Exception as e: print("tuneVR:", e)
@@ -4692,6 +4714,45 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._mAbort(it)
 
     # ---------------------------------------------------------------- look
+    # VR の「光の回り込み」（全体照明）は、この PC で止まるほど重かったので使わない。VR は光の当て方（環境光・拡散・つや）だけで陰影を変える
+    SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, vamb=0.30, vdif=0.75, vspec=0.25),
+             "ふつう": dict(ssao=True, rad=10.0, ker=32, k2f=3.0, k2h=4.0, vamb=0.18, vdif=0.88, vspec=0.35),
+             "強め": dict(ssao=True, rad=14.0, ker=32, k2f=4.5, k2h=5.0, k2b=3.0, vamb=0.08, vdif=1.00, vspec=0.45)}
+    # 重さの約束: どの段階も 1 コマの計算量は前と同じ（SSAO の点の数は 32 まで）。違うのは光の当て方・つやだけ。動かしている間に増える計算はない
+    SHADE_KEY = "HUCViewS/shading"
+
+    def _shade(self):
+        lv = getattr(self, "shadeLevel", None)
+        if lv is None:
+            try: lv = str(qt.QSettings().value(self.SHADE_KEY) or "ふつう")
+            except Exception: lv = "ふつう"
+            self.shadeLevel = lv if lv in self.SHADE else "ふつう"
+        return self.SHADE[self.shadeLevel]
+
+    def _applyVRShade(self):
+        """VR の陰影: 環境光を下げて拡散・つやを上げる（重さは変わらない）"""
+        s = self._shade()
+        for dn in (getattr(self, "vrDisplay", None), getattr(self, "vr4D", None)):
+            if dn is None or not hasattr(dn, "GetVolumePropertyNode"): continue
+            pn = dn.GetVolumePropertyNode(); vp = pn.GetVolumeProperty() if pn is not None else None
+            if vp is None: continue
+            vp.ShadeOn(); vp.SetAmbient(s["vamb"]); vp.SetDiffuse(s["vdif"]); vp.SetSpecular(s["vspec"])
+
+    def setShading(self, level, measure=True):
+        """陰影: なし／ふつう／強め。面 = 環境光遮蔽の強さと光の向きのコントラスト、VR = 光の回り込み。重すぎる PC は 1 段下げる"""
+        self.shadeLevel = level if level in self.SHADE else "ふつう"
+        try: qt.QSettings().setValue(self.SHADE_KEY, self.shadeLevel)
+        except Exception: pass
+        self.studioLighting(getattr(self, "_bgIndex", 0), ssao=True); self._applyVRShade()
+        msg = ""
+        if measure and self.shadeLevel != "なし":
+            ms = self._frameMs(4)
+            if ms > 2.5 * self.PERF_TARGET_MS:                                 # 1 コマ 75 ms を超える（13 fps 未満）→ 1 段下げる
+                down = {"強め": "ふつう", "ふつう": "なし"}[self.shadeLevel]
+                self.shadeLevel = down; self.studioLighting(getattr(self, "_bgIndex", 0), ssao=True); self._applyVRShade()
+                msg = f"この PC では重かったので「{down}」にしました（1 コマ {ms:.0f} ms）"
+        self._view().forceRender(); return msg
+
     def studioLighting(self, bgIndex=0, ssao=False):
         v = self._view(); vn = self._viewNode()
         vn.SetBoxVisible(False); vn.SetAxisLabelsVisible(False)
@@ -4699,12 +4760,14 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try:
             ren = v.renderWindow().GetRenderers().GetFirstRenderer()
             ren.RemoveAllLights()
+            s = self._shade(); self._bgIndex = bgIndex
             lk = vtk.vtkLightKit(); lk.SetKeyLightIntensity(0.95); lk.SetKeyLightWarmth(0.6); lk.SetFillLightWarmth(0.4)
-            lk.SetKeyToFillRatio(2.2); lk.SetKeyToHeadRatio(3.5); lk.SetKeyToBackRatio(4.0)
+            lk.SetKeyToFillRatio(s["k2f"]); lk.SetKeyToHeadRatio(s["k2h"]); lk.SetKeyToBackRatio(s.get("k2b", 4.0))      # 陰影の段階で、明るい面と暗い面の差を変える
             lk.SetKeyLightAzimuth(25); lk.SetKeyLightElevation(45)
             lk.AddLightsToRenderer(ren)
-            ren.SetUseSSAO(bool(ssao))
-            if ssao: ren.SetSSAORadius(10.0); ren.SetSSAOBias(0.5); ren.SetSSAOKernelSize(32); ren.SetSSAOBlur(True)
+            ssao = bool(ssao) and s["ssao"]
+            ren.SetUseSSAO(ssao)
+            if ssao: ren.SetSSAORadius(s["rad"]); ren.SetSSAOBias(0.5); ren.SetSSAOKernelSize(s["ker"]); ren.SetSSAOBlur(True)
         except Exception as e:
             print("lighting:", e)
         v.forceRender()
