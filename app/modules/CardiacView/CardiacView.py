@@ -4844,9 +4844,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     # ---------------------------------------------------------------- look
     # VR の「光の回り込み」（全体照明）は、この PC で止まるほど重かったので使わない。VR は光の当て方（環境光・拡散・つや）だけで陰影を変える
-    SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, k2b=4.0, samb=0.18, vamb=0.30, vdif=0.75, vspec=0.25),
-             "ふつう": dict(ssao=True, rad=16.0, ker=32, k2f=5.0, k2h=10.0, k2b=3.0, samb=0.08, vamb=0.18, vdif=0.88, vspec=0.35),
-             "強め": dict(ssao=True, rad=22.0, ker=32, k2f=8.0, k2h=16.0, k2b=2.5, samb=0.04, vamb=0.08, vdif=1.00, vspec=0.45)}
+    SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, k2b=4.0, kI=0.95, samb=0.18, vamb=0.30, vdif=0.75, vspec=0.25),
+             "ふつう": dict(ssao=True, rad=16.0, ker=32, k2f=5.0, k2h=10.0, k2b=3.0, kI=1.50, samb=0.08, vamb=0.18, vdif=0.88, vspec=0.35),
+             "強め": dict(ssao=True, rad=22.0, ker=32, k2f=8.0, k2h=16.0, k2b=2.5, kI=1.75, samb=0.04, vamb=0.08, vdif=1.00, vspec=0.45)}
+    # 明るさ: 正面の光と環境光を下げた分、斜めの光（kI）を強くして、全体の平均の明るさは「なし」とほぼ同じ（暗くしない）
     # 重さの約束: どの段階も 1 コマの計算量は同じ（SSAO の点の数は 32 まで）。違うのは光の向きの強さ（正面からの光を弱く・斜めの光を強く）と環境光だけ。動かしている間に増える計算はない
     SHADE_KEY = "HUCViewS/shading"
 
@@ -4890,7 +4891,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             ren = v.renderWindow().GetRenderers().GetFirstRenderer()
             ren.RemoveAllLights()
             s = self._shade(); self._bgIndex = bgIndex
-            lk = vtk.vtkLightKit(); lk.SetKeyLightIntensity(0.95); lk.SetKeyLightWarmth(0.6); lk.SetFillLightWarmth(0.4)
+            lk = vtk.vtkLightKit(); lk.SetKeyLightIntensity(float(s.get("kI", 0.95)));   # 陰影をつけても全体の明るさは「なし」と同じ（実測で合わせた）
+            lk.SetKeyLightWarmth(0.6); lk.SetFillLightWarmth(0.4)
             lk.SetKeyToFillRatio(s["k2f"]); lk.SetKeyToHeadRatio(s["k2h"]); lk.SetKeyToBackRatio(s.get("k2b", 4.0))      # 陰影の段階で、明るい面と暗い面の差を変える
             lk.SetKeyLightAzimuth(25); lk.SetKeyLightElevation(45)
             lk.AddLightsToRenderer(ren)
