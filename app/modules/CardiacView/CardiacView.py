@@ -48,8 +48,9 @@ PALETTES = {
     "リアル": dict(aorta=(0.74, 0.18, 0.28), sysvein=(0.60, 0.52, 0.78), pv=(0.82, 0.32, 0.40), heart=(0.72, 0.17, 0.27), heartR=(0.50, 0.40, 0.70), la=(0.86, 0.42, 0.48), ra=(0.70, 0.62, 0.84), pa=(0.48, 0.38, 0.68),
                  myo=(0.80, 0.62, 0.34), myocut=(0.80, 0.60, 0.34), epi=(0.86, 0.70, 0.42), endo=(0.88, 0.58, 0.52), endoR=(0.70, 0.62, 0.84),
                  bone=(0.94, 0.91, 0.84), calc=(1.00, 0.95, 0.72),
-                 vr=[(0.78, 0.22, 0.32), (0.88, 0.44, 0.50), (0.80, 0.20, 0.30), (0.86, 0.38, 0.46), (0.88, 0.44, 0.50),
-                     (0.54, 0.44, 0.74), (0.72, 0.64, 0.86), (0.50, 0.40, 0.72), (0.64, 0.56, 0.82)], vrN=(0.88, 0.70, 0.44),
+                 vr=[(0.70, 0.12, 0.20), (0.80, 0.26, 0.33), (0.72, 0.12, 0.20), (0.78, 0.22, 0.30), (0.80, 0.26, 0.33),
+                     (0.40, 0.30, 0.62), (0.52, 0.42, 0.72), (0.38, 0.28, 0.60), (0.46, 0.38, 0.68)], vrN=(0.80, 0.60, 0.30),
+                 vrMuscle=(0.82, 0.62, 0.32),                                  # VR: 心筋の濃さの所は金、造影された血液は部屋の色（シネマティック表示に近い）
                  spec=0.45, power=35.0, amb=0.15, dif=0.90),
     "赤と青": dict(aorta=(0.70, 0.16, 0.17), sysvein=(0.23, 0.24, 0.50), pv=(0.76, 0.24, 0.22), heart=(0.65, 0.17, 0.18), heartR=(0.28, 0.32, 0.61), la=(0.80, 0.40, 0.28), ra=(0.40, 0.54, 0.76), pa=(0.29, 0.33, 0.63),
                  myo=(0.52, 0.13, 0.12), myocut=(0.59, 0.17, 0.15), epi=(0.82, 0.72, 0.54), endo=(0.77, 0.35, 0.31), endoR=(0.41, 0.45, 0.72),
@@ -2600,7 +2601,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 ct.SetColor(tt, f"c{tt}", c[0], c[1], c[2], 1.0)
         cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
         if cap is not None and cap.GetDisplayNode(): cap.GetDisplayNode().SetColor(*MYO_CUT_COLOR)
-        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]
+        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]; self.VR_NEUTRAL = p["vrN"]; self.VR_MUSCLE = p.get("vrMuscle")
         if rebuildVR and getattr(self, "vrOn", False) and getattr(self, "vrDisplay", None) is not None:
             try:
                 self.vrDisplay.SetVisibility(False); self.vrDisplay = None; self.showVR(True, getattr(self, "vrMode", None))
@@ -3184,6 +3185,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                  ("hc", ("pulmonary artery",), (0.42, 0.50, 0.88), "R"),
                  ("tot", ("vena cava",), (0.50, 0.62, 0.92), "R")]
     VR_NEUTRAL = (0.88, 0.72, 0.62)
+    VR_MUSCLE = None
 
     def _gridNode(self, src, lo, hi, step):
         """src の一部（lo..hi, ijk = z,y,x）を step 倍の粗さで覆う空の参照ボリューム（ラベルの書き出し先）"""
@@ -3349,6 +3351,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             out = np.empty(hu.shape + (4,), np.uint8)
             out[..., :3] = np.clip(rgb * 255.0, 0, 255).astype(np.uint8); out[..., 3] = v.astype(np.uint8)
             del hu, t, v, rgb, bloc, wgt
+        mus = getattr(self, "VR_MUSCLE", None)
+        if mus is not None:                                               # 心筋の濃さ（目盛り 100〜105）は金、135 から上（血液の面）は部屋の色。間はなめらかに（作る時に 1 回だけ）
+            m255 = np.array(mus, np.float32) * 255.0
+            for z0 in range(0, out.shape[0], 24):
+                sl = out[z0:z0 + 24]; w = np.clip((sl[..., 3].astype(np.float32) - 105.0) / 30.0, 0.0, 1.0); w = w * w * (3.0 - 2.0 * w)
+                for k in range(3): sl[..., k] = (sl[..., k].astype(np.float32) * w + m255[k] * (1.0 - w)).astype(np.uint8)
+                del sl, w
         spz = sp[0] * ds
         zf = int(round(sp[0] / (1.0 * ds))) if sp[0] > 1.5 else 1      # 厚いスライス（2〜5mm）は z を 1mm（粗い格子は 2mm）に曲線補間（板状の段差を消す）
         if zf > 1:
@@ -3502,7 +3511,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _vrDefaults(self, mode):
         c = getattr(self, "_calVR", None) or self._cal(); myo = float(c.get("myo", 80.0)); fat = float(c.get("fat", -80.0)); bL = float(c.get("blood", 350.0))
         vfat = 100.0 + 100.0 * (fat - myo) / max(bL - myo, 25.0)
-        if mode == "blood": return 150.0, 60.0                        # 心筋と血液の中間から上を不透明に
+        if mode == "blood": return 150.0, 40.0                        # 心筋と血液の中間から上を不透明に（立ち上がりを狭く＝面がくっきり）
         a = (vfat + 100.0) / 2.0; b = 150.0                           # 脂肪と心筋の中間 〜 心筋と血液の中間
         return (a + b) / 2.0, b - a
 
@@ -3556,7 +3565,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             for x, y in pts: otf.AddPoint(x, y)
             vp.SetScalarOpacity(otf)
             vp.ShadeOn(); vp.SetInterpolationTypeToLinear()
-            sh = self._shade(); vp.SetAmbient(sh["vamb"]); vp.SetDiffuse(sh["vdif"]); vp.SetSpecular(sh["vspec"]); vp.SetSpecularPower(25)   # 陰影の設定どおり
+            sh = self._shade(); vp.SetAmbient(sh["vamb"]); vp.SetDiffuse(sh["vdif"]); vp.SetSpecular(sh["vspec"]); vp.SetSpecularPower(30)   # 陰影の設定どおり
+            vp.SetScalarOpacityUnitDistance(0.5)                              # 半透明のもやを減らして面をくっきり（重さは同じ）
             self._vrOtfProp, self._vrOtfMode = vp, mode
         self._vrLabel()
 
@@ -4845,8 +4855,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     # ---------------------------------------------------------------- look
     # VR の「光の回り込み」（全体照明）は、この PC で止まるほど重かったので使わない。VR は光の当て方（環境光・拡散・つや）だけで陰影を変える
     SHADE = {"なし": dict(ssao=False, rad=10.0, ker=32, k2f=2.2, k2h=3.5, k2b=4.0, kI=0.95, samb=0.18, vamb=0.30, vdif=0.75, vspec=0.25),
-             "ふつう": dict(ssao=True, rad=16.0, ker=32, k2f=5.0, k2h=10.0, k2b=3.0, kI=1.50, samb=0.08, vamb=0.18, vdif=0.88, vspec=0.35),
-             "強め": dict(ssao=True, rad=22.0, ker=32, k2f=8.0, k2h=16.0, k2b=2.5, kI=1.75, samb=0.04, vamb=0.08, vdif=1.00, vspec=0.45)}
+             "ふつう": dict(ssao=True, rad=16.0, ker=32, k2f=5.0, k2h=10.0, k2b=3.0, kI=1.50, samb=0.08, vamb=0.10, vdif=0.62, vspec=0.40),
+             "強め": dict(ssao=True, rad=22.0, ker=32, k2f=8.0, k2h=16.0, k2b=2.5, kI=1.75, samb=0.04, vamb=0.05, vdif=0.56, vspec=0.45)}
     # 明るさ: 正面の光と環境光を下げた分、斜めの光（kI）を強くして、全体の平均の明るさは「なし」とほぼ同じ（暗くしない）
     # 重さの約束: どの段階も 1 コマの計算量は同じ（SSAO の点の数は 32 まで）。違うのは光の向きの強さ（正面からの光を弱く・斜めの光を強く）と環境光だけ。動かしている間に増える計算はない
     SHADE_KEY = "HUCViewS/shading"
