@@ -481,7 +481,10 @@ class GraftMixin:
         for i, k in enumerate(c["rings"]):
             m = self._gTube(R + 1.6, max(0, k - 5), min(K - 1, k + 5), off=0.5)
             if m is not None: self._gModel(f"フェルト{i + 1}", m, FELT, 1.0)
-        self._gMetal(); self._gBranchModels(); self._gFlapModel()
+        self._gMetal(); self._gFlapModel()
+        # 頸部分枝: AI のラベル（TotalSegmentator）は術後の頸部で別の所（造影されていない組織など）を枝としていることがあり、
+        # 間違った血管を出すのはビューアとして致命的なので、確かめた方法でたどれるまで出さない（BRANCHES_FROM_AI = False）
+        if getattr(self, "BRANCHES_FROM_AI", False): self._gBranchModels()
         txt = []
         if graft: txt.append("人工血管 " + "、".join(f"{s[a]:.0f}〜{s[b]:.0f} mm" for a, b in graft))
         if c["stent"]: txt.append("ステント " + "、".join(f"{s[a]:.0f}〜{s[b]:.0f} mm" for a, b in c["stent"]))
