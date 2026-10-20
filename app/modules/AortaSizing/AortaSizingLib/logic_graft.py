@@ -9,7 +9,7 @@ from .common import *
 from scipy import ndimage
 
 GP = "手術 "                                                                # この機能で作るモデルの名前の頭（画面を離れる時に隠す）
-WHITE = (0.96, 0.96, 0.94); FELT = (0.86, 0.82, 0.70); FABRIC = (0.88, 0.91, 0.96)
+WHITE = (0.96, 0.96, 0.94); FELT = (0.86, 0.82, 0.70); FABRIC = (0.93, 0.94, 0.97)
 RED = (0.78, 0.18, 0.18); FLAP = (0.96, 0.72, 0.74); METALC = (0.80, 0.83, 0.90)
 ST = 0.5                                                                    # 伸ばした画像の断面の間隔（mm）
 BR_KEYS = ("brachiocephalic trunk", "common carotid artery left", "subclavian artery left",
@@ -53,6 +53,20 @@ def _poly(P, T):
     ca = vtk.vtkCellArray(); ca.SetCells(len(T), numpy_to_vtkIdTypeArray(np.ascontiguousarray(cells), deep=True)); o.SetPolys(ca)
     nm = vtk.vtkPolyDataNormals(); nm.SetInputData(o); nm.SplittingOff(); nm.ConsistencyOn(); nm.Update()
     out = vtk.vtkPolyData(); out.DeepCopy(nm.GetOutput()); return out
+
+
+def _cyl(a, b, r, crimp=0.0, period=2.5, sides=32):
+    """点 a〜b の筒（半径 r、crimp: しわの深さ）"""
+    a = np.asarray(a, float); b = np.asarray(b, float); w = b - a; L = np.linalg.norm(w)
+    if L < 0.5: return None
+    w /= L; e = np.array([1.0, 0, 0]) if abs(w[0]) < 0.9 else np.array([0, 1.0, 0]); u = np.cross(w, e); u /= np.linalg.norm(u); v = np.cross(w, u)
+    ss = np.linspace(0, L, max(2, int(L / 0.5) + 1)); ang = np.linspace(0, 2 * np.pi, sides, endpoint=False)
+    rr = r + (crimp * np.sin(2 * np.pi * ss / period) if crimp > 0 else 0 * ss)
+    Q = a[None, None, :] + ss[:, None, None] * w[None, None, :] + rr[:, None, None] * (np.cos(ang)[None, :, None] * u[None, None, :] + np.sin(ang)[None, :, None] * v[None, None, :])
+    n = len(ss); i = np.arange(n - 1)[:, None]; k = np.arange(sides)[None, :]
+    p0 = i * sides + k; p1 = i * sides + (k + 1) % sides; p2 = (i + 1) * sides + (k + 1) % sides; p3 = (i + 1) * sides + k
+    T = np.concatenate([np.stack([p0, p1, p2], -1).reshape(-1, 3), np.stack([p0, p2, p3], -1).reshape(-1, 3)])
+    return _poly(Q.reshape(-1, 3), T)
 
 
 def _tri(pd):
@@ -133,13 +147,13 @@ class GraftMixin:
         return out
 
     # ================================================================ しわ（スキャロップ）
-    def _gStraightFrom(self, vol, s0, s1, ds=0.25, half=30.0, du=0.3):
-        """中心線にそって、別の（細かい）画像から伸ばした画像を作る"""
-        a = slicer.util.arrayFromVolume(vol)
+    def _gStraightFrom(self, vol, s0, s1, ds=0.25, half=30.0, du=0.3, path=None):
+        """中心線（path = (s, P, N, B)、無ければ大動脈）にそって、別の（細かい）画像から伸ばした画像を作る"""
+        a = slicer.util.arrayFromVolume(vol); s_, P_, N_, B_ = path if path is not None else (self.s, self.P, self.N, self.B)
         M = vtk.vtkMatrix4x4(); vol.GetRASToIJKMatrix(M); R2I = np.array([[M.GetElement(i, j) for j in range(4)] for i in range(4)])
-        sk = np.arange(s0, s1, ds); P = np.c_[[np.interp(sk, self.s, self.P[:, j]) for j in range(3)]].T
-        N = np.c_[[np.interp(sk, self.s, self.N[:, j]) for j in range(3)]].T; N /= np.linalg.norm(N, axis=1, keepdims=True)
-        B = np.c_[[np.interp(sk, self.s, self.B[:, j]) for j in range(3)]].T; B /= np.linalg.norm(B, axis=1, keepdims=True)
+        sk = np.arange(s0, s1, ds); P = np.c_[[np.interp(sk, s_, P_[:, j]) for j in range(3)]].T
+        N = np.c_[[np.interp(sk, s_, N_[:, j]) for j in range(3)]].T; N /= np.linalg.norm(N, axis=1, keepdims=True)
+        B = np.c_[[np.interp(sk, s_, B_[:, j]) for j in range(3)]].T; B /= np.linalg.norm(B, axis=1, keepdims=True)
         u = np.arange(-half, half + 1e-6, du); n = len(u); out = np.full((len(sk), n, n), -1000.0, np.float32)
         for c0 in range(0, len(sk), 200):                                   # 少しずつ（メモリ節約）
             c1 = min(len(sk), c0 + 200)
@@ -252,7 +266,32 @@ class GraftMixin:
         if best is None or abs(best[2] - best[3]) < max(minStep, 0.08 * best[2]): return None
         return float(0.5 * (s_[best[1] - 1] + s_[best[1]]))
 
-    def _gBranches(self, status=print):
+    def _gBranchHires(self, t, hires, smax=90.0):
+        """細かい画像で枝にそって切った像から、吻合部らしい所を探す:
+        ① くびれ（太さが前後より 2 割以上細い所）  ② 継ぎ目の線（内腔を横切る細い暗い線、ふだんの 1.8 倍以上）。8〜60 mm で最初の所"""
+        sd = t["s"]; P = ndimage.gaussian_filter1d(t["R"], 4, axis=0, mode="nearest"); T = np.gradient(P, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True)
+        N = np.cross(T, [1.0, 0, 0]); N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-6); B = np.cross(T, N)
+        S, sk, _, _ = self._gStraightFrom(hires, 0, min(float(sd[-1]), smax), ds=0.25, half=12, du=0.25, path=(sd, P, N, B))
+        R, MET = self._gEdge(S, 0.25, 36)
+        if np.isnan(R).mean() > 0.5: return None
+        D = ndimage.median_filter(np.nan_to_num(2 * np.nanmedian(R, axis=1)), 9)
+        c = S.shape[1] // 2; yy, xx = np.mgrid[:S.shape[1], :S.shape[1]]; rad = np.hypot(yy - c, xx - c) * 0.25; seam = np.zeros(len(sk))
+        for k in range(len(sk)):
+            m = rad <= max(1.0, 0.375 * D[k])
+            if m.sum() < 10 or D[k] < 2: continue
+            v = ndimage.gaussian_filter(S[k], 0.8)[m]; seam[k] = np.median(v) - np.percentile(v, 3)
+        seam = ndimage.uniform_filter1d(seam, 6); w = int(4 / 0.25); g0 = int(2 / 0.25)
+        rng = [k for k in range(int(8 / 0.25), min(len(sk) - w - g0, int(60 / 0.25)))]
+        if not rng: return None
+        base = np.median(seam[rng[0]:rng[-1] + 1]) + 1e-3
+        for k in rng:                                                        # ① くびれ
+            l = np.median(D[k - g0 - w:k - g0]); r = np.median(D[k + g0:k + g0 + w])
+            if D[k] > 2 and D[k] < 0.8 * min(l, r) and D[k] == D[max(0, k - w):k + w].min(): return float(sk[k])
+        for k in rng:                                                        # ② 継ぎ目の線
+            if seam[k] >= 1.8 * base and seam[k] == seam[max(0, k - w):k + w].max(): return float(sk[k])
+        return None
+
+    def _gBranches(self, status=print, hires=None):
         status("頸部分枝をたどっています…")
         tr = {}; sA = {}
         vein = self._mask(("brachiocephalic vein", "superior vena cava", "subclavian vein", "jugular vein"))   # 濃く染まった無名静脈が枝に重なる
@@ -266,13 +305,19 @@ class GraftMixin:
                     if k2 != key and m2 is not None: ex |= m2 & ~m
                 t = self._gBranchTrack(m & ~(vein if vein is not None else False), ex)
                 if t is not None: tr[key] = t
+        def anast(key, **kw):
+            h = None
+            if hires is not None:
+                try: h = self._gBranchHires(tr[key], hires)
+                except Exception as e: print("[graft] branch hires", key, e)
+            return h if h is not None else self._gStep(tr[key]["s"], tr[key]["D"], **kw)
         for key in BR_KEYS[:3]:
             if key in tr:
-                st_ = self._gStep(tr[key]["s"], tr[key]["D"]); sA[key] = st_ if st_ is not None else float(tr[key]["s"][-1]) + 1.0
+                st_ = anast(key); sA[key] = st_ if st_ is not None else float(tr[key]["s"][-1]) + 1.0
         if "brachiocephalic trunk" in tr and sA.get("brachiocephalic trunk", 0) > tr["brachiocephalic trunk"]["s"][-1]:
             for key in BR_KEYS[3:]:                                         # 腕頭で段差なし → 右総頸・右鎖骨下でさがす
                 if key in tr:
-                    st_ = self._gStep(tr[key]["s"], tr[key]["D"], minL=3.0); sA[key] = st_ if st_ is not None else 0.0
+                    st_ = anast(key, minL=3.0); sA[key] = st_ if st_ is not None else 0.0
         for key in tr: sA.setdefault(key, -1.0)
         return tr, sA
 
@@ -361,7 +406,7 @@ class GraftMixin:
             except Exception as e: print("[graft] scallop", e); seeds = []
         graft = list(c["graft"])
         if seeds: graft = _merge(graft + self._gExtend(seeds, c))
-        tr, sA = self._gBranches(status)
+        tr, sA = self._gBranches(status, hires)
         memb = None
         if flap:
             status("大動脈の中の膜（フラップ）を探しています…")
@@ -432,7 +477,7 @@ class GraftMixin:
             if m is not None: self._gModel(f"人工血管（ステントの外）{i + 1}", m, WHITE, 0.6)
         for i, (a, b) in enumerate(c["stent"]):
             m = self._gTube(R, a, b, off=0.3)
-            if m is not None: self._gModel(f"ステントグラフト（布）{i + 1}", m, FABRIC, 0.5)
+            if m is not None: self._gModel(f"ステントグラフト（布）{i + 1}", m, FABRIC, 0.6)
         for i, k in enumerate(c["rings"]):
             m = self._gTube(R + 1.6, max(0, k - 5), min(K - 1, k + 5), off=0.5)
             if m is not None: self._gModel(f"フェルト{i + 1}", m, FELT, 1.0)
@@ -498,6 +543,22 @@ class GraftMixin:
         if nat.GetNumberOfPoints():
             nat.GetPointData().SetScalars(None); nm = vtk.vtkPolyDataNormals(); nm.SetInputData(nat); nm.SplittingOff(); nm.Update()
             o = vtk.vtkPolyData(); o.DeepCopy(nm.GetOutput()); self._gModel("頸部分枝", o, RED, 1.0, 0.45, 22)
+        # 枝の始まり（AI のラベルは大動脈から少し離れて始まる）と大動脈の人工血管の間を筒でつなぐ（途切れて見えないように）
+        Rm = np.median(g["f"]["R"], axis=1); tree = cKDTree(self.P); app_w = vtk.vtkAppendPolyData(); app_r = vtk.vtkAppendPolyData(); nw = nr = 0
+        for key in BR_KEYS[:3]:
+            t_ = tr.get(key)
+            if t_ is None: continue
+            p0 = t_["R"][0]; d0, k = tree.query(p0)
+            if d0 > Rm[k] + 30: continue                                    # 大動脈から遠すぎる（たどり違い）
+            u = (p0 - self.P[k]) / max(d0, 1e-3); q = self.P[k] + u * max(Rm[k] - 2.0, 1.0)
+            sel = (t_["s"] >= 5) & (t_["s"] <= 20); r = 0.5 * float(np.median(t_["D"][sel] if sel.any() else t_["D"]))
+            gk = sA.get(key, -1.0) > 0; cy = _cyl(q, p0 + u * 1.5, max(r, 2.0), 0.3 if gk else 0.0)
+            if cy is None: continue
+            (app_w if gk else app_r).AddInputData(cy)
+            if gk: nw += 1
+            else: nr += 1
+        if nw: app_w.Update(); o = vtk.vtkPolyData(); o.DeepCopy(app_w.GetOutput()); self._gModel("頸部分枝（人工血管・つなぎ）", o, WHITE, 1.0)
+        if nr: app_r.Update(); o = vtk.vtkPolyData(); o.DeepCopy(app_r.GetOutput()); self._gModel("頸部分枝（つなぎ）", o, RED, 1.0, 0.45, 22)
 
     def _gFlapModel(self):
         M = self.gState.get("memb")
