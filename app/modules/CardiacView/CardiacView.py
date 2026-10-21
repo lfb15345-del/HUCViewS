@@ -37,7 +37,7 @@ LEGEND_WALL = [("外膜", (0.84, 0.72, 0.64)), ("左心系の内膜", (0.94, 0.7
 IMPLANT_COLOR = (0.80, 0.83, 0.90)  # 人工物（金属: 人工弁のリング・ステント・クリップなど）: 銀
 CALC_COLOR = (1.00, 0.92, 0.55)     # 石灰化: 明るい黄白
 WIRE_COLOR = (0.96, 0.56, 0.20)     # 胸骨ワイヤー（金属）: 銅色（骨の白と見分ける）
-PATCH_COLOR = (0.93, 0.75, 0.61)    # パッチ: 肌色（真っ白だとまぶしい・浮く。石灰化の黄白・金属の銀とは別）
+PATCH_COLOR = (0.90, 0.66, 0.56)    # パッチ: 肌色（真っ白だとまぶしい・浮く。石灰化の黄白・金属の銀とは別）
 LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
 # ---- 色合い（設定 → 見た目 → 色合い）。分け方（どの部屋・血管を何色の系統にするか）は同じで、色の濃さ・光沢だけ変える
@@ -3243,6 +3243,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _applyVRTints(self, rgb, src, lo, step):
         """VR の色に「範囲の色」を重ねる。self.vrTints = [dict(mask=配列 (z,y,x), ijkToRAS=4x4, color=(r,g,b)), ...]
         範囲の各点を VR の粗い格子へ写して塗る（範囲だけ計算するので速い）"""
+        self._vrTintHits = []
         tints = list(getattr(self, "vrTints", None) or [])
         for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):
             tc = n.GetAttribute("CV.vrTint"); pd = n.GetPolyData()
@@ -3267,6 +3268,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             hit = np.zeros(sh, bool); hit[g[2][ok], g[1][ok], g[0][ok]] = True
             hit = ndimage.binary_dilation(hit, iterations=1)
             rgb[hit] = np.array(t.get("color", (0.15, 0.85, 0.35)), np.float32)
+            self._vrTintHits.append((hit, np.array(t.get("color", (0.15, 0.85, 0.35)), np.float32)))   # 淡くした後にもう一度この色で塗る（パッチが白くならないように）
 
     def setupVR(self, status=lambda m: None):
         """心臓まわりだけ切り出した元の CT を、部屋ごとに色分け・造影の目盛りをそろえた RGBA の VR にする"""
@@ -3404,6 +3406,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 for k in range(3):
                     c = sl[..., k].astype(np.float32); sl[..., k] = (c + (255.0 - c) * f).astype(np.uint8)
                 del sl, w, f
+        for hit, col in getattr(self, "_vrTintHits", None) or []:            # パッチなど: 淡くする前の色のまま（切り口もこの色）
+            try:
+                if hit.shape != out.shape[:3]:                                    # 細かい格子（2 倍）にした時
+                    hit = np.repeat(np.repeat(np.repeat(hit, 2, 0), 2, 1), 2, 2)[:out.shape[0], :out.shape[1], :out.shape[2]]
+                out[hit, :3] = np.clip(col * 255.0, 0, 255).astype(np.uint8)
+            except Exception as e: print("VR tint2:", e)
+        self._vrTintHits = []
         spz = sp[0] * ds
         zf = int(round(sp[0] / (1.0 * ds))) if sp[0] > 1.5 else 1      # 厚いスライス（2〜5mm）は z を 1mm（粗い格子は 2mm）に曲線補間（板状の段差を消す）
         if zf > 1:
