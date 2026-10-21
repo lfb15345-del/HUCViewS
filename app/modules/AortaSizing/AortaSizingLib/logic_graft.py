@@ -9,7 +9,7 @@ from .common import *
 from scipy import ndimage
 
 GP = "手術 "                                                                # この機能で作るモデルの名前の頭（画面を離れる時に隠す）
-WHITE = (0.96, 0.96, 0.94); FELT = (0.86, 0.82, 0.70); FABRIC = (0.93, 0.94, 0.97)
+WHITE = (0.96, 0.88, 0.64); FELT = (0.76, 0.64, 0.44); FABRIC = (0.93, 0.94, 0.97)   # 人工血管 = 淡いクリーム（心臓のパッチと同じ・生体らしい色）、フェルト = 濃い黄土色（人工血管と見分ける）
 RED = (0.78, 0.18, 0.18); FLAP = (0.96, 0.72, 0.74); METALC = (0.80, 0.83, 0.90)
 ST = 0.5                                                                    # 伸ばした画像の断面の間隔（mm）
 BR_KEYS = ("brachiocephalic trunk", "common carotid artery left", "subclavian artery left",
@@ -737,7 +737,7 @@ class GraftMixin:
         pd = vtk.vtkPolyData(); pd.DeepCopy(sm.GetOutput()); pd.GetPointData().Initialize(); return pd
 
     def _gUserBranchModels(self):
-        """クリックでたどった頸部分枝: 起始部〜吻合部（手で決めた所）を白（人工血管）、その先を赤"""
+        """クリックでたどった頸部分枝: 起始部〜吻合部（手で決めた所）をクリーム色（人工血管）、その先を赤"""
         from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
         from scipy.spatial import cKDTree
         g = self.gState; bs = g.get("userBr") or []

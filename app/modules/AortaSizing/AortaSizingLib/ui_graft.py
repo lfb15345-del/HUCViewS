@@ -12,20 +12,20 @@ class GraftUIMixin:
         self.gHires.setToolTip("人工血管のしわ（スキャロップ）を探す画像。0.3〜0.5 mm の再構成画像（冠状断・弓部にそった斜位の矢状断など）を選ぶ。なしでも形だけで判定する")
         self.gRefresh = self._btn("↻", None, "画像の一覧を読み直す"); r.addWidget(self.gRefresh)
         self.gAutoBtn = self._btn("自動で色分け", "primary", "人工弁のリング・正円で太さ一定・フェルトの輪・ステント（金属）・太さの段差、"
-                                  "細かい画像があれば人工血管のしわから、人工血管（白）・ステントグラフトの布（青白）・フェルト（黄土色）・頸部分枝・フラップ（薄ピンク）を色分けする")
+                                  "細かい画像があれば人工血管のしわから、人工血管（クリーム色）・ステントグラフトの布（青白）・フェルト（黄土色）・頸部分枝・フラップ（薄ピンク）を色分けする")
         c.addWidget(self.gAutoBtn)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.gFromBtn = self._btn("ここから", None, "ストレッチ像のカーソルの位置を「ここから」にする"); r.addWidget(self.gFromBtn)
         self.gToBtn = self._btn("ここまで", None, "ストレッチ像のカーソルの位置を「ここまで」にする"); r.addWidget(self.gToBtn)
         self.gRangeLab = self._lab("—", "muted"); r.addWidget(self.gRangeLab, 1)
         r = qt.QHBoxLayout(); c.addLayout(r)
-        self.gAddBtn = self._btn("人工血管にする", None, "「ここから〜ここまで」を人工血管（白）にする"); r.addWidget(self.gAddBtn, 1)
+        self.gAddBtn = self._btn("人工血管にする", None, "「ここから〜ここまで」を人工血管（クリーム色）にする"); r.addWidget(self.gAddBtn, 1)
         self.gDelBtn = self._btn("人工血管から外す", None, "「ここから〜ここまで」を人工血管から外す"); r.addWidget(self.gDelBtn, 1)
         r = qt.QHBoxLayout(); c.addLayout(r)
         self.gTrBtn = self._btn("頸部分枝をたどる（オプション）", None, "MPR か 3D で、たどりたい頸部の動脈の先のほうをクリック → 大動脈からそこまで、造影された内腔の中だけを通って"
                                 "その血管を描く（1 本ずつ。何本でも。もう一度押すと終わり）", True)
         r.addWidget(self.gTrBtn, 1)
-        self.gBrBtn = self._btn("枝の吻合部をクリック", None, "MPR か 3D で、たどった枝の吻合部をクリック → 起始部からそこまでを人工血管（白）にする（もう一度押すと終わり）", True)
+        self.gBrBtn = self._btn("枝の吻合部をクリック", None, "MPR か 3D で、たどった枝の吻合部をクリック → 起始部からそこまでを人工血管（クリーム色）にする（もう一度押すと終わり）", True)
         r.addWidget(self.gBrBtn, 1)
         r = qt.QHBoxLayout(); c.addLayout(r); r.addStretch(1)
         self.gUndoBtn = self._btn("1 つ戻す", None, "手で直したのを 1 つ戻す"); r.addWidget(self.gUndoBtn)
@@ -34,7 +34,7 @@ class GraftUIMixin:
         self.gClearBtn = self._btn("消す", None, "手術のイメージを消して元の血管に戻す"); r.addWidget(self.gClearBtn)
         self.gLab = qt.QLabel("—"); self.gLab.setWordWrap(True); self.gLab.setStyleSheet("font-size:12px; color:#dfe6ee")
         self.gLab.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred); self.gLab.setMinimumWidth(10); c.addWidget(self.gLab)
-        c.addWidget(self._lab("白 = 人工血管・青白 = ステントグラフトの布・黄土色 = フェルト・薄ピンク = フラップ・赤 = 自分の血管。"
+        c.addWidget(self._lab("クリーム色 = 人工血管・青白 = ステントグラフトの布・黄土色 = フェルト・薄ピンク = フラップ・赤 = 自分の血管。"
                               "CT を加工して作った手術のイメージ（教育・説明用）で、診断には使いません。", "muted"))
         self._gFrom = self._gTo = None; self._gVols = [None]; self._gPickObs = None
         self.gRefresh.connect("clicked()", self._gFill); self.gAutoBtn.connect("clicked()", self.onGraftAuto)
