@@ -5231,6 +5231,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def studioLighting(self, bgIndex=0, ssao=False):
         v = self._view(); vn = self._viewNode()
         vn.SetBoxVisible(False); vn.SetAxisLabelsVisible(False)
+        self._noDepthPeeling()
         self.setBackground(bgIndex)
         try:
             ren = v.renderWindow().GetRenderers().GetFirstRenderer()
@@ -5248,6 +5249,17 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e:
             print("lighting:", e)
         v.forceRender()
+
+    def _noDepthPeeling(self):
+        """半透明は「深さの剥離」を使わず、1 回で描く方式（OIT）にする。
+        剥離は GPU によって（AMD Radeon など）症例しだいで描画が終わらなくなる（MAC 重症 AS の症例で固まった）。
+        半透明は心筋の切り口（平らな 1 枚）と外形くらいなので、見た目はほぼ同じで軽い。保存した症例を開いた時も切る"""
+        try:
+            vn = self._viewNode()
+            if vn.GetUseDepthPeeling(): vn.SetUseDepthPeeling(False)
+            ren = self._view().renderWindow().GetRenderers().GetFirstRenderer()
+            if ren.GetUseDepthPeeling(): ren.SetUseDepthPeeling(False)
+        except Exception as e: print("depth peeling:", e)
 
     def _applySurfAmbient(self, s=None):
         a = float((s or self._shade()).get("samb", 0.15))

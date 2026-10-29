@@ -124,7 +124,7 @@ class ViewMixin:
         except Exception: pass
         try:
             ren = v3.renderWindow().GetRenderers().GetFirstRenderer()
-            ren.SetUseDepthPeeling(True); ren.SetMaximumNumberOfPeels(8); ren.SetOcclusionRatio(0.1)
+            ren.SetUseDepthPeeling(False); vn.SetUseDepthPeeling(False)          # 深さの剥離は使わない（GPU によって描画が終わらなくなる）。半透明は 1 回で描く方式
             ren.SetUseSSAO(True); ren.SetSSAORadius(12.0); ren.SetSSAOBias(0.01); ren.SetSSAOKernelSize(32); ren.SetSSAOBlur(True)
             v3.renderWindow().SetMultiSamples(8)                               # アンチエイリアスで輪郭をなめらかに
             if getattr(self, "_tvMode", False): ren.SetUseDepthPeeling(False); ren.SetUseSSAO(False)   # TEVAR: 半透明（血管・グラフトの布）を描くため
