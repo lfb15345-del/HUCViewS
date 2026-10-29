@@ -3,7 +3,7 @@ r"""
 CardiacView — 3D Slicer scripted module（かんたんモード版）
 HU 帯域ごとの等値面レイヤー ＋ スライダーで動かす切断面 ＋ 視点ボタン。
 """
-import os, math, time, re, json
+import os, sys, math, time, re, json
 import numpy as np
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
@@ -2014,7 +2014,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             """AI（別プロセス）の出力を別スレッドで読む。画面はその間も動く（前は出力が途切れる 20〜60 秒ほど「応答なし」になった）"""
             import threading, queue
             from subprocess import CalledProcessError
-            q = queue.Queue()
+            q = queue.Queue(); killed = [False]
             def reader():
                 try:
                     while True:
@@ -2022,6 +2022,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                         except UnicodeDecodeError: continue
                         if not line: break
                         q.put(line)
+                        if sys.platform == "darwin" and "Saved in " in line:     # Mac: 保存後に AI の後片付けが終わらず止まることがある（元の拡張と同じ対処）
+                            try: proc.kill()
+                            except Exception: pass
+                            killed[0] = True; break
                 finally: q.put(None)
             threading.Thread(target=reader, daemon=True).start()
             output = ""
@@ -2039,7 +2043,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 if returnOutput: output += line
                 tsl.log(line.rstrip())
             proc.wait()
-            if proc.returncode != 0: raise CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+            if proc.returncode != 0 and not killed[0]: raise CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
             return output if returnOutput else None
         tsl.logProcessOutput = _logNonBlocking
         import importlib.util as _iu
