@@ -914,6 +914,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             else: print("ui tick:", e)
 
     def enter(self):
+        try: self.logic._noDepthPeeling()                                    # 大動脈サイジングなどから戻った時も（剥離は AMD で固まる）
+        except Exception: pass
         try: self._fillPreCombo()
         except Exception: pass
         try: self._sync4D()
@@ -1723,7 +1725,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                     model = self._surfaceFromBinary(remaining, work, gname, col, sp["smooth"])
                     model.GetDisplayNode().SetVisibility(sp["visible"]); self.layerModels[gname] = model; self.visible[gname] = sp["visible"]
                 continue
-            model = self._surfaceFromBinary(binary, work, sp["name"], sp["color"], sp["smooth"])
+            model = self._surfaceFromBinary(binary, work, sp["name"], sp["color"], sp["smooth"], step=2 if sp["name"] == "軟部組織" else 1)
             model.GetDisplayNode().SetVisibility(sp["visible"]); self.layerModels[sp["name"]] = model; self.visible[sp["name"]] = sp["visible"]
             if sp["name"] == "軟部組織":
                 # 他の組織を覆い隠さないよう半透明・控えめな色に
@@ -2005,20 +2007,24 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         import TotalSegmentator
         tsl = TotalSegmentator.TotalSegmentatorLogic()
         tsl.logCallback = lambda t: slicer.app.processEvents()      # AI 計算中も画面（進捗表示）を止めない
-        try:
-            import torch, totalsegmentator                           # noqa: F401  新しく入れた PC では初回だけ AI の部品を入れる
-        except Exception:
+        import importlib.util as _iu
+        if _iu.find_spec("torch") is None or _iu.find_spec("totalsegmentator") is None:   # 新しく入れた PC では初回だけ AI の部品を入れる（読み込みはしない＝速い）
             status("初回だけ AI の部品（PyTorch・TotalSegmentator）を入れています。数分〜十数分かかります…"); slicer.app.processEvents()
             tsl.setupPythonRequirements()
         seg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", f"{vol.GetName()} {kind}")
-        seg.SetReferenceImageGeometryParameterFromVolumeNode(vol)
+        inp = self._aiInput(vol, kind)
+        seg.SetReferenceImageGeometryParameterFromVolumeNode(inp)
+        t0 = time.time()
         try:
             if kind == "total":
-                tsl.process(vol, seg, quality="fast", task="total")
+                tsl.process(inp, seg, quality="fast", task="total")
             else:
-                tsl.process(vol, seg, task="heartchambers_highres")
+                tsl.process(inp, seg, task="heartchambers_highres")
         except Exception:
             slicer.mrmlScene.RemoveNode(seg); raise
+        finally:
+            if inp is not vol: slicer.mrmlScene.RemoveNode(inp)
+        print(f"AI {kind}: {time.time() - t0:.0f} 秒（渡した CT {tuple(round(x, 2) for x in inp.GetSpacing()) if inp is not vol else '元のまま'}）")
         if seg.GetSegmentation().GetNumberOfSegments() == 0:
             slicer.mrmlScene.RemoveNode(seg); raise RuntimeError("結果が空でした")
         seg.SetReferenceImageGeometryParameterFromVolumeNode(vol)
@@ -2084,6 +2090,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def autoPipeline(self, vol, specs, boneLayer, status=lambda m: None):
         """① ボタン: セグメンテーション → 閾値の自動調整 → 3D 作成 → 品質メモ"""
         t0 = time.time()
+        self._noDepthPeeling()                                                # 作る途中の描画でも剥離を使わない（AMD で固まる）
         self.sourceVolume = vol; self.calib = {}
         if self._segFor(vol, "total") is None:
             status("1/4 臓器を自動認識中（TotalSegmentator・約2〜4分）…"); slicer.app.processEvents()
@@ -2169,10 +2176,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         name = f"{vol.GetName()}_cv{spacing:.1f}mm"
         out = slicer.mrmlScene.GetFirstNodeByName(name)
         if out and out.GetImageData(): return out
-        out = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", name)
-        p = {"InputVolume": vol.GetID(), "OutputVolume": out.GetID(),
-             "outputPixelSpacing": f"{spacing},{spacing},{spacing}", "interpolationType": "bspline"}
-        slicer.cli.runSync(slicer.modules.resamplescalarvolume, None, p)
+        out = self._resliceTo(vol, (spacing, spacing, spacing), name, cubic=True)
         try:                                                   # ノイズと 5mm 厚の段差をならしてから面を作る（ツルツルに）
             from scipy import ndimage
             a = slicer.util.arrayFromVolume(out).astype(np.float32)
@@ -2185,6 +2189,33 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             print("denoise:", e)
         out.SetDisplayVisibility(False)
         return out
+
+    def _resliceTo(self, vol, spacing, name, cubic=False):
+        """vol を spacing (x, y, z mm) に作り直した新しいボリューム（向き・原点はそのまま）。
+        Slicer の再サンプリング（別プロセス）より 10 倍ほど速い（0.35 mm の CT → 0.8 mm で 1〜2 秒）"""
+        img = vol.GetImageData(); cur = vol.GetSpacing(); dims = img.GetDimensions()
+        src = vtk.vtkImageData(); src.ShallowCopy(img); src.SetSpacing(*cur); src.SetOrigin(0, 0, 0)
+        n = [max(1, int(math.floor((dims[i] - 1) * cur[i] / spacing[i])) + 1) for i in range(3)]
+        rs = vtk.vtkImageReslice(); rs.SetInputData(src)
+        rs.SetOutputSpacing(*spacing); rs.SetOutputOrigin(0, 0, 0); rs.SetOutputExtent(0, n[0] - 1, 0, n[1] - 1, 0, n[2] - 1)
+        rs.SetInterpolationModeToCubic() if cubic else rs.SetInterpolationModeToLinear()
+        rs.SetBackgroundLevel(float(img.GetScalarRange()[0])); rs.Update()
+        o = vtk.vtkImageData(); o.DeepCopy(rs.GetOutput()); o.SetSpacing(1, 1, 1); o.SetOrigin(0, 0, 0)
+        out = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", name)
+        D = vtk.vtkMatrix4x4(); vol.GetIJKToRASDirectionMatrix(D)
+        out.SetIJKToRASDirectionMatrix(D); out.SetSpacing(*spacing); out.SetOrigin(vol.GetOrigin())
+        out.SetAndObserveImageData(o)
+        out.SetDisplayVisibility(False)
+        return out
+
+    def _aiInput(self, vol, kind):
+        """AI（TotalSegmentator）に渡す CT。AI はどうせ自分の格子（total 速い版 3 mm・心腔 0.73×0.73×1.0 mm）に作り直すので、
+        それより細かい CT は先に近い細かさにしてから渡す（書き出し・読み込み・作り直しが 10〜50 分の 1 になる）。粗くはしない"""
+        cur = vol.GetSpacing()
+        want = (1.5, 1.5, 1.5) if kind == "total" else (0.7, 0.7, 1.0)
+        sp = tuple(max(cur[i], want[i]) for i in range(3))
+        if all(abs(sp[i] - cur[i]) < 0.02 for i in range(3)): return vol
+        return self._resliceTo(vol, sp, f"cv_ai_{kind}", cubic=False)
 
     def _segFor(self, vol, kind):
         """vol に対応するセグメンテーション。kind: "total" / "heartchambers" """
@@ -2276,8 +2307,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             keep[i] = True
         return keep[lab].astype(np.uint8)
 
-    def _surfaceFromBinary(self, binary, vol, name, color, smooth, keepSmall=False):
+    def _surfaceFromBinary(self, binary, vol, name, color, smooth, keepSmall=False, step=1):
+        """step=2: 格子を 1/2 にして面を作る（半透明の軟部組織など細かさのいらない層。三角形が 1/4 で 4 倍速い）"""
         from vtk.util.numpy_support import numpy_to_vtk
+        full = binary
+        if step > 1: binary = np.ascontiguousarray(binary[::step, ::step, ::step])
         img = vtk.vtkImageData(); img.SetDimensions(binary.shape[2], binary.shape[1], binary.shape[0])
         img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
         img.GetPointData().SetScalars(numpy_to_vtk(np.ascontiguousarray(binary.ravel()), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR))
@@ -2286,6 +2320,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             cast = vtk.vtkImageCast(); cast.SetInputData(img); cast.SetOutputScalarTypeToFloat(); cast.Update()
             gs = vtk.vtkImageGaussianSmooth(); gs.SetInputConnection(cast.GetOutputPort())
             sd = 0.8 if smooth == 1 else 1.3
+            if step > 1: sd = max(0.6, sd / step)                       # mm で同じぼかし
             gs.SetStandardDeviations(sd, sd, sd); gs.SetRadiusFactors(2, 2, 2); gs.Update(); src = gs.GetOutput()
         mc = vtk.vtkFlyingEdges3D(); mc.SetInputData(src); mc.SetValue(0, 0.5)
         mc.ComputeNormalsOff(); mc.ComputeScalarsOff(); mc.ComputeGradientsOff(); mc.Update()
@@ -2300,6 +2335,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             dec = vtk.vtkQuadricDecimation(); dec.SetInputData(pd); dec.SetTargetReduction(1.0 - MAX_TRIS / pd.GetNumberOfPolys()); dec.Update(); pd = dec.GetOutput()
             if smooth >= 1: pd = sinc(pd, 10, 0.08)
         m = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(m)
+        if step > 1:
+            for r in range(3):
+                for c in range(3): m.SetElement(r, c, m.GetElement(r, c) * step)
         tr = vtk.vtkTransform(); tr.SetMatrix(m)
         tp = vtk.vtkTransformPolyDataFilter(); tp.SetInputData(pd); tp.SetTransform(tr); tp.Update()
         # 法線の向きを部品ごとに決める: AutoOrient は閉じた内側の面（心内膜）を外向きにしてしまい逆になる。
@@ -2323,7 +2361,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e:
             print("debris:", e)
         try:
-            result = self._orientByMask(result, binary, vol)
+            result = self._orientByMask(result, full, vol)
         except Exception as e:
             print("orient:", e)
         old = slicer.mrmlScene.GetFirstNodeByName(f"CV {name}")
