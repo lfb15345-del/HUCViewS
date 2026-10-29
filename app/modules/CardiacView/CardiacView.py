@@ -1432,23 +1432,57 @@ class _Inset:
     def setVisible(self, on):
         self.ren.SetDraw(1 if on else 0); self.view.scheduleRender()
 
+    @staticmethod
+    def _small(n):
+        """全体図用の小さい形（格子でまとめた間引き）。部屋の色（CV_room）があれば部屋ごとに分けて色を保つ。
+        形が変わらない限り作り直さない（症例を開いた時に 1 回だけ）"""
+        from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtkIdTypeArray
+        pd = n.GetPolyData(); d = n.GetDisplayNode()
+        cache = getattr(slicer, "_cvInsetCache", None)
+        if cache is None: cache = slicer._cvInsetCache = {}
+        key = (n.GetID(), pd.GetMTime(), tuple(round(x, 3) for x in d.GetColor()))
+        if key in cache: return cache[key]
+        parts = []
+        room = pd.GetPointData().GetArray("CV_room"); rgb = pd.GetPointData().GetArray("CV_roomRGB")
+        try:
+            conn = vtk_to_numpy(pd.GetPolys().GetConnectivityArray()); off = vtk_to_numpy(pd.GetPolys().GetOffsetsArray())
+            tri = conn.reshape(-1, 3) if (len(off) and np.all(np.diff(off) == 3)) else None
+        except Exception: tri = None
+        if room is not None and rgb is not None and tri is not None:
+            R = vtk_to_numpy(room); C = vtk_to_numpy(rgb); cr = R[tri[:, 0]]
+            for r in np.unique(cr):
+                sub = tri[cr == r]
+                if len(sub) < 50: continue
+                ca = vtk.vtkCellArray()
+                ca.SetData(numpy_to_vtkIdTypeArray(np.arange(0, 3 * len(sub) + 1, 3, dtype=np.int64), deep=True), numpy_to_vtkIdTypeArray(sub.ravel().astype(np.int64), deep=True))
+                g = vtk.vtkPolyData(); g.SetPoints(pd.GetPoints()); g.SetPolys(ca)
+                parts.append((g, [int(x) for x in np.median(C[R == r], axis=0)]))
+        if not parts:
+            g = vtk.vtkPolyData(); g.SetPoints(pd.GetPoints()); g.SetPolys(pd.GetPolys())         # 形だけ（色・法線の配列を外すと 10 倍速い）
+            parts.append((g, [int(255 * x) for x in d.GetColor()]))
+        out = []
+        for g, c in parts:
+            dec = vtk.vtkQuadricClustering(); dec.SetInputData(g)
+            dec.SetNumberOfDivisions(64, 64, 64); dec.AutoAdjustNumberOfDivisionsOff(); dec.Update()
+            nm = vtk.vtkPolyDataNormals(); nm.SetInputConnection(dec.GetOutputPort()); nm.SplittingOff(); nm.ConsistencyOn(); nm.NonManifoldTraversalOff(); nm.Update()
+            q = vtk.vtkPolyData(); q.DeepCopy(nm.GetOutput())                      # 法線は部屋ごとに（まとめてから付けると継ぎ目が黒い線になる）
+            if not q.GetNumberOfPoints(): continue
+            col = vtk.vtkUnsignedCharArray(); col.SetNumberOfComponents(3); col.SetName("rgb"); col.SetNumberOfTuples(q.GetNumberOfPoints())
+            for i in range(3): col.FillComponent(i, c[i])
+            q.GetPointData().SetScalars(col); out.append(q)
+        if len(cache) > 40: cache.clear()
+        cache[key] = out
+        return out
+
     def setModels(self, nodes):
         app = vtk.vtkAppendPolyData(); k = 0
         for n in nodes:
             pd = n.GetPolyData(); d = n.GetDisplayNode()
             if pd is None or pd.GetNumberOfPoints() == 0 or d is None: continue
-            g = vtk.vtkPolyData(); g.SetPoints(pd.GetPoints()); g.SetPolys(pd.GetPolys())     # 形だけ（色・法線の配列を外すと 10 倍速い）
-            dec = vtk.vtkQuadricClustering(); dec.SetInputData(g)                    # 格子でまとめる間引き（小さな全体図には十分）
-            dec.SetNumberOfDivisions(48, 48, 48); dec.AutoAdjustNumberOfDivisionsOff(); dec.Update()
-            q = vtk.vtkPolyData(); q.ShallowCopy(dec.GetOutput())
-            col = vtk.vtkUnsignedCharArray(); col.SetNumberOfComponents(3); col.SetName("rgb")
-            c = [int(255 * x) for x in d.GetColor()]
-            col.SetNumberOfTuples(q.GetNumberOfPoints())
-            for i in range(3): col.FillComponent(i, c[i])
-            q.GetPointData().SetScalars(col); app.AddInputData(q); k += 1
+            for q in self._small(n): app.AddInputData(q); k += 1
         if k == 0: return
-        nm = vtk.vtkPolyDataNormals(); nm.SetInputConnection(app.GetOutputPort()); nm.SplittingOff(); nm.Update()
-        self.pd = vtk.vtkPolyData(); self.pd.DeepCopy(nm.GetOutput()); self.bodyMap.SetInputData(self.pd)
+        app.Update()
+        self.pd = vtk.vtkPolyData(); self.pd.DeepCopy(app.GetOutput()); self.bodyMap.SetInputData(self.pd)
         b = self.pd.GetBounds(); lo = np.array(b[0::2]); hi = np.array(b[1::2])
         self.center = (lo + hi) / 2; self.R = float(np.linalg.norm(hi - lo) / 2)
         cam = self.ren.GetActiveCamera(); cam.ParallelProjectionOn()
@@ -3362,6 +3396,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._view().scheduleRender()
 
     INSET_SKIP = ("CV 軟部組織", "CV 骨", "CV 胸骨ワイヤー")
+    INSET_SKIP2 = ("CV 心筋", "CV 心筋断面", "CV 石灰化")
 
     def updateInset(self):
         """左下の全体図を作り直す（モデルを作った後に呼ぶ）"""
@@ -3369,9 +3404,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try:
             ins = getattr(self, "inset", None)
             if ins is None or getattr(slicer, "_cvInset", None) is not ins: ins = self.inset = _Inset(self._view())
-            nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith("CV ") and n.GetName() not in self.INSET_SKIP
-                     and n.GetDisplayNode() is not None and n.GetDisplayNode().GetVisibility()]
-            if not nodes: nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith(("CV 心臓壁", "CV 血管"))]
+            allm = [n for n in slicer.util.getNodesByClass("vtkMRMLModelNode") if n.GetName().startswith("CV ") and n.GetPolyData() is not None and n.GetPolyData().GetNumberOfPoints()]
+            # 全体図は「血液の面」（1 枚の面・部屋ごとの色）で描く。見えている層にかかわらず同じ絵（いつも正面からの全体）。
+            # 心臓壁・心筋は内外 2 枚の面なので、粗くまとめると内と外が混ざってしわしわになる（MAC の症例で目立った）
+            nodes = [n for n in allm if n.GetName().startswith("CV 血管")]
+            if not nodes:
+                nodes = [n for n in allm if n.GetName() not in self.INSET_SKIP + self.INSET_SKIP2 and n.GetDisplayNode() is not None and n.GetDisplayNode().GetVisibility()]
+            if not nodes: nodes = [n for n in allm if n.GetName().startswith("CV 心臓壁")]
             ins.setModels(nodes); ins.followCamera(self._camera()); ins.setVisible(True); ins._autoHidden = False
             self._lastSize = None                                             # 画面が狭ければ次の描画でまた隠す
             self._insetPlane()
