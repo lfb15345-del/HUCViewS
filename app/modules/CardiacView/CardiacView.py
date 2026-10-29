@@ -2115,6 +2115,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         status("4/4 3D を作成中…"); slicer.app.processEvents()
         self.wallFill = True
         self.buildLayers(vol, specs, spacing, boneLayer, status)
+        try:                                                                  # VR もここで 1 回だけ作っておく（保存されて、開いた時に VR がすぐ出る）
+            status("VR を準備中…"); slicer.app.processEvents()
+            c0 = self._camera(); cst = (c0.GetPosition(), c0.GetFocalPoint(), c0.GetViewUp(), c0.GetParallelScale())
+            self.setupVR(status)
+            if self.vrDisplay is not None: self.vrDisplay.SetVisibility(False)
+            c0.SetPosition(*cst[0]); c0.SetFocalPoint(*cst[1]); c0.SetViewUp(*cst[2]); c0.SetParallelScale(cst[3])
+        except Exception as e: print("VR 準備:", e)
         return self.qualityReport(vol, c, time.time() - t0)
 
     def adoptScene(self):
@@ -3624,6 +3631,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def setupVR(self, status=lambda m: None):
         """心臓まわりだけ切り出した元の CT を、部屋ごとに色分け・造影の目盛りをそろえた RGBA の VR にする"""
         from scipy import ndimage
+        self._syncVRPalette()
         src = getattr(self, "sourceVolume", None)
         seg = self._findSegmentation(); hc = self._findChambers()
         if src is None or seg is None: raise RuntimeError("先に「3D を自動で作る」を行ってください")
@@ -3804,11 +3812,60 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self._installVRClip()
         self.vrNode, self.vrDisplay = node, dn
         self.vrScale = (myo, bL)                                     # 表示用: 目盛り → 左心系の HU 相当
+        try:                                                         # 何から作った VR か（症例を開いた時、同じならそのまま使う）
+            node.SetAttribute("CV.vrSig", self._vrSig()); node.SetAttribute("CV.vrScale", f"{myo:.2f},{bL:.2f}"); node.SetAttribute("CV.vrDown", str(int(ds)))
+        except Exception as e: print("VR sig:", e)
         if getattr(self, "vrMode", None) is None: self.vrMode = "tissue"
         self.vrWin = None
         self.setVRWindow()
         status("VR の準備ができました")
         return dn
+
+    VR_CACHE_VER = "1"
+
+    def _syncVRPalette(self):
+        """VR の色を今の色合い（リアル など）に。作り直したばかりのロジック（新しい症例を作った直後）は既定の色のままなので"""
+        p = PALETTES.get(CUR_PALETTE) or PALETTES["リアル"]
+        self.VR_GROUPS = [(g[0], g[1], c, g[3]) for g, c in zip(type(self).VR_GROUPS, p["vr"])]
+        self.VR_NEUTRAL = p["vrN"]; self.VR_PALE = p.get("vrPale"); self.VR_SEPTUM = p.get("vrSeptum")
+
+    def _vrSig(self):
+        """VR の色の元（CT・色合い・パッチの色と形・格子の粗さ）。同じなら保存した VR をそのまま使える"""
+        import hashlib
+        self._syncVRPalette()
+        src = getattr(self, "sourceVolume", None)
+        dims = src.GetImageData().GetDimensions() if src is not None and src.GetImageData() is not None else None
+        parts = [self.VR_CACHE_VER, src.GetName() if src is not None else "", str(dims),
+                 repr([tuple(round(float(x), 3) for x in g[2]) for g in self.VR_GROUPS]), repr(getattr(self, "VR_NEUTRAL", None)),
+                 repr(getattr(self, "VR_PALE", None)), repr(getattr(self, "VR_SEPTUM", None)), f"{float(getattr(self, 'vrSigma', 0.7)):.2f}", str(self._vrDownFactor())]
+        for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):
+            tc = n.GetAttribute("CV.vrTint"); pd = n.GetPolyData()
+            if tc and pd is not None and pd.GetNumberOfPoints():
+                parts.append(f"{n.GetName()}|{tc}|{pd.GetNumberOfPoints()}|" + ",".join(f"{x:.1f}" for x in pd.GetBounds()))
+        for t in getattr(self, "vrTints", None) or []:
+            m = t.get("mask"); parts.append(f"mask|{int(m.sum()) if m is not None else 0}|{t.get('color')}")
+        return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
+
+    def _reuseVR(self):
+        """保存した症例の VR（CV VR）が今の CT・色合い・パッチと同じなら、作り直さずに使う（VR がすぐ出る。作り直しは約 9 秒）"""
+        node = slicer.mrmlScene.GetFirstNodeByName("CV VR")
+        if node is None or not node.IsA("vtkMRMLVectorVolumeNode") or node.GetImageData() is None: return False
+        sc = (node.GetAttribute("CV.vrScale") or "").split(",")
+        if len(sc) != 2 or node.GetAttribute("CV.vrSig") != self._vrSig(): return False
+        vrl = slicer.modules.volumerendering.logic()
+        dn = vrl.GetFirstVolumeRenderingDisplayNode(node) or vrl.CreateDefaultVolumeRenderingNodes(node)
+        dn.SetVisibility(False); dn.SetClipping(False)
+        try:
+            vn = self._viewNode(); vn.SetVolumeRenderingQuality(1); vn.SetVolumeRenderingOversamplingFactor(1.0); vn.SetVolumeRenderingSurfaceSmoothing(True)
+        except Exception as e: print("VR quality:", e)
+        self._installVRClip()
+        self.vrNode, self.vrDisplay = node, dn
+        self.vrScale = (float(sc[0]), float(sc[1])); self.vrDownUsed = int(node.GetAttribute("CV.vrDown") or 1)
+        if getattr(self, "vrMode", None) is None: self.vrMode = "tissue"
+        self.vrWin = None
+        self.setVRWindow()
+        print("VR: 保存した VR をそのまま使いました")
+        return True
 
     def _installVRClip(self):
         """3D 画面を描く直前に、切断面（と自由切断面）を VR の GPU 切り取り面へ写す（アプリ全体で 1 つ）"""
@@ -3996,7 +4053,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         first = on and getattr(self, "vrDisplay", None) is None
         if first:                                                             # 初めての VR で Slicer がカメラを戻してしまうので、今の向き・大きさを保つ
             c = self._camera(); st = (c.GetPosition(), c.GetFocalPoint(), c.GetViewUp(), c.GetParallelScale())
-            self.setupVR()
+            reused = False
+            try: reused = self._reuseVR()
+            except Exception as e: print("VR reuse:", e)
+            if not reused: self.setupVR()
             gen0 = getattr(self, "_camGen", 0)
             def _back(c=c, st=st, gen0=gen0):
                 if getattr(self, "_camGen", 0) != gen0: return                # その間に向きを変えた（パッチの正面など）ならそのまま
