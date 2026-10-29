@@ -2007,6 +2007,41 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         import TotalSegmentator
         tsl = TotalSegmentator.TotalSegmentatorLogic()
         tsl.logCallback = lambda t: slicer.app.processEvents()      # AI 計算中も画面（進捗表示）を止めない
+        base = {"total": "1/4 臓器を自動認識中", "heartchambers": "2/4 心腔を自動認識中"}.get(kind, "AI で認識中")
+        tStart = time.time(); last = [0.0]
+
+        def _logNonBlocking(proc, returnOutput=False):
+            """AI（別プロセス）の出力を別スレッドで読む。画面はその間も動く（前は出力が途切れる 20〜60 秒ほど「応答なし」になった）"""
+            import threading, queue
+            from subprocess import CalledProcessError
+            q = queue.Queue()
+            def reader():
+                try:
+                    while True:
+                        try: line = proc.stdout.readline()
+                        except UnicodeDecodeError: continue
+                        if not line: break
+                        q.put(line)
+                finally: q.put(None)
+            threading.Thread(target=reader, daemon=True).start()
+            output = ""
+            while True:
+                try: line = q.get(timeout=0.1)
+                except queue.Empty:
+                    slicer.app.processEvents()
+                    el = time.time() - tStart
+                    if el - last[0] >= 1.0:
+                        last[0] = el
+                        try: status(f"{base}（AI・{el:.0f} 秒）…")
+                        except Exception: pass
+                    continue
+                if line is None: break
+                if returnOutput: output += line
+                tsl.log(line.rstrip())
+            proc.wait()
+            if proc.returncode != 0: raise CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+            return output if returnOutput else None
+        tsl.logProcessOutput = _logNonBlocking
         import importlib.util as _iu
         if _iu.find_spec("torch") is None or _iu.find_spec("totalsegmentator") is None:   # 新しく入れた PC では初回だけ AI の部品を入れる（読み込みはしない＝速い）
             status("初回だけ AI の部品（PyTorch・TotalSegmentator）を入れています。数分〜十数分かかります…"); slicer.app.processEvents()
@@ -2089,14 +2124,20 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     def autoPipeline(self, vol, specs, boneLayer, status=lambda m: None):
         """① ボタン: セグメンテーション → 閾値の自動調整 → 3D 作成 → 品質メモ"""
+        if getattr(self, "_building", False): raise RuntimeError("いま作っている途中です。終わるまでお待ちください")
+        self._building = True
+        try: return self._autoPipeline(vol, specs, boneLayer, status)
+        finally: self._building = False
+
+    def _autoPipeline(self, vol, specs, boneLayer, status):
         t0 = time.time()
         self._noDepthPeeling()                                                # 作る途中の描画でも剥離を使わない（AMD で固まる）
         self.sourceVolume = vol; self.calib = {}
         if self._segFor(vol, "total") is None:
-            status("1/4 臓器を自動認識中（TotalSegmentator・約2〜4分）…"); slicer.app.processEvents()
+            status("1/4 臓器を自動認識中（AI）…"); slicer.app.processEvents()
             self._runTS(vol, "total", status)
         if self._segFor(vol, "heartchambers") is None:
-            status("2/4 心腔を自動認識中（約4分）…"); slicer.app.processEvents()
+            status("2/4 心腔を自動認識中（AI）…"); slicer.app.processEvents()
             try: self._runTS(vol, "heartchambers", status)
             except Exception as e: print("heartchambers:", e)
         spacing = self.autoSpacing(vol); self.lastSpacing = spacing
