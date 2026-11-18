@@ -62,14 +62,20 @@ def repairCaseFile(path):
     """制御文字で開けなくなった症例ファイルを直す（中の .mrml の文字だけ直して、ほかはそのまま）"""
     import zipfile
     tmp = path + ".fix"
-    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", allowZip64=True) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename.endswith(".mrml"):
-                txt = data.decode("utf-8", "replace")
-                txt = re.sub(r'"[^"<>]*[\x00-\x08\x0b\x0c\x0e-\x1f\x7f][^"<>]*"', lambda m: '"' + _fixText(m.group(0)[1:-1]) + '"', txt)
-                data = _CTRL.sub("", txt).encode("utf-8")
-            zout.writestr(item, data, compress_type=item.compress_type)
+    try:
+        with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", allowZip64=True) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.endswith(".mrml"):
+                    txt = data.decode("utf-8", "replace")
+                    txt = re.sub(r'"[^"<>]*[\x00-\x08\x0b\x0c\x0e-\x1f\x7f][^"<>]*"', lambda m: '"' + _fixText(m.group(0)[1:-1]) + '"', txt)
+                    data = _CTRL.sub("", txt).encode("utf-8")
+                zout.writestr(item, data, compress_type=item.compress_type)
+    except Exception:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)                            # 直せなかった時に、書きかけを残さない（もとのファイルには触っていない）
+        except Exception: pass
+        raise
     bak = path + ".bak"
     if os.path.exists(bak): os.remove(bak)
     os.replace(path, bak); os.replace(tmp, path)
@@ -77,8 +83,28 @@ def repairCaseFile(path):
 
 
 def _safe(s, n=40):
-    s = re.sub(r'[\\/:*?"<>|\s%]+', "_", str(s or "")).strip("_")
-    return s[:n] or "x"
+    s = re.sub(r'[\\/:*?"<>|\s%\x00-\x1f\x7f]+', "_", str(s or "")).strip("_. ")   # 制御文字（日本語の説明に混ざる ESC など）は Windows のファイル名に使えない → 保存に失敗する
+    return s[:n].rstrip("_. ") or "x"
+
+
+def workSignature():
+    """使う人が足したもの（計測・中心線・パッチ）のしるし。保存した時・開いた時のしるしと違えば「保存していない変更がある」。
+    切断面や見る向きなどの「見方」は入れない（見ただけで「変更あり」にしない）"""
+    sig = []
+    try:
+        for n in slicer.util.getNodesByClass("vtkMRMLMarkupsNode"):
+            if n.IsA("vtkMRMLMarkupsPlaneNode") or n.IsA("vtkMRMLMarkupsROINode") or (n.GetName() or "").startswith("cv_"): continue
+            k = n.GetNumberOfControlPoints()
+            if k == 0: continue
+            pts = []
+            for i in range(k):
+                q = [0.0, 0.0, 0.0]; n.GetNthControlPointPosition(i, q); pts.append(tuple(round(float(x), 2) for x in q))
+            sig.append((n.GetClassName(), tuple(pts)))
+        for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):
+            if (n.GetName() or "") == "CV パッチ":
+                pd = n.GetPolyData(); sig.append(("patch", (pd.GetNumberOfPoints(), pd.GetNumberOfCells()) if pd is not None else (0, 0)))
+    except Exception as e: print("[HeartView] workSignature:", e)
+    return tuple(sorted(sig, key=repr))
 
 
 # ============================================================================ app mode
@@ -109,6 +135,10 @@ def enterAppMode():
         _panelToggle(mw, dock)
         guardPanelWheel(dock)
     except Exception as e: print("panel:", e)
+    try:
+        if getattr(slicer, "_hvExitGuard", None) is None:
+            slicer._hvExitGuard = _ExitGuard(); mw.installEventFilter(slicer._hvExitGuard)
+    except Exception as e: print("exit guard:", e)
     slicer.heartviewAppMode = True
     slicer.util.selectModule("HeartView")
     mw.showMaximized()
@@ -128,6 +158,29 @@ class _WheelGuard(qt.QObject):
             return True
         except Exception:
             return False
+
+
+class _ExitGuard(qt.QObject):
+    """アプリ画面で窓を閉じる時: 保存していない変更（計測・パッチなど）があれば日本語でたずねてから終わる。無ければそのまま終わる。
+    前は Slicer の英語の確認（Save before exit?）が毎回出て、その「Save」は Slicer の保存の窓（何がどこに保存されるか分かりにくい）を開いていた。
+    作業の途中・ここで何か失敗した時は、前と同じ（Slicer の確認）に任せる"""
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() != qt.QEvent.Close or not getattr(slicer, "heartviewAppMode", False): return False
+            if getattr(self, "_leaving", False):
+                ev.ignore(); return True                                      # 終わる途中の二重押し
+            w = slicer.modules.heartview.widgetRepresentation().self()
+            if getattr(w, "_working", False): return False
+            if w.logic.hasUnsaved():
+                r = w._askLeave(True)
+                if r not in ("save", "discard") or (r == "save" and not w.onSaveCase()):
+                    ev.ignore(); return True                                  # 「やめる」・保存できなかった → 閉じない
+            self._leaving = True; ev.ignore()
+            qt.QTimer.singleShot(5000, lambda: setattr(self, "_leaving", False))   # 万一終わらなかった時に、閉じられないままにしない
+            qt.QTimer.singleShot(0, lambda: slicer.util.exit(0))              # Slicer の確認を通らずに終わる
+            return True
+        except Exception as e:
+            print("[HeartView] 終了の確認:", e); return False
 
 
 def guardPanelWheel(root, every=1500):
@@ -384,6 +437,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.viewButton = btn("見る・切る  ›", "primary", "操作パネル（CardiacView）へ"); row.addWidget(self.viewButton, 1)
         self.aortaButton = btn("大動脈サイジング  ›", "primary", "ステントグラフトのサイジング（中心線 → 径の表 → CSV）"); row.addWidget(self.aortaButton, 1)
         row = qt.QHBoxLayout(); row.setSpacing(6); g.addLayout(row)
+        self.saveCaseButton = btn("症例を保存", None, "計測・パッチなど、今の状態を症例のファイルに上書き保存します\n（3D を作った時に 1 回、自動で保存されます。その後に足したものは、これで保存します）"); row.addWidget(self.saveCaseButton, 1)
         self.pngButton = btn("画像で保存", None, "今の画面を PNG で保存"); row.addWidget(self.pngButton, 1)
         self.openDirButton = btn("保存フォルダ", None, "保存した症例・画像のフォルダを開く"); row.addWidget(self.openDirButton, 1)
 
@@ -401,6 +455,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.buildButton.connect("clicked()", self.onBuild)
         self.viewButton.connect("clicked()", lambda: slicer.util.selectModule("CardiacView"))
         self.pngButton.connect("clicked()", self.onPNG)
+        self.saveCaseButton.connect("clicked()", lambda: self.onSaveCase())
         self.aortaButton.connect("clicked()", lambda: slicer.util.selectModule("AortaSizing"))
         self.openDirButton.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(casesDir())))
         self.slicerButton.connect("clicked()", self.onSlicerMode)
@@ -409,13 +464,20 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
 
     # ------------------------------------------------------------------ helpers
     def _say(self, msg):
-        self.status.setText(msg); print("[HeartView]", msg); slicer.app.processEvents()
+        self.status.setText(msg)
+        try:
+            import CardiacView; CardiacView.paintStatus(self.status, msg)     # 失敗・注意は色を変える
+        except Exception: pass
+        print("[HeartView]", msg); slicer.app.processEvents()
 
     def _busy(self, on):
         if on: qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         else: qt.QApplication.restoreOverrideCursor()
-        for b in (self.cdButton, self.folderButton, self.caseButton, self.buildButton):
+        self._working = bool(on)
+        for b in (self.cdButton, self.folderButton, self.caseButton, self.saveCaseButton, self.buildButton):
             b.enabled = not on if b is not self.buildButton else (not on and bool(self.table.selectedItems()))
+        for w in (self.table, self.viewButton, self.aortaButton):             # 作業の途中に、表の別の行（プレビューが画面とシーンを替える）や別の画面を押せないように
+            w.enabled = not on
 
     # ------------------------------------------------------------------ ①
     def onCD(self):
@@ -463,7 +525,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
 
     def _onSel(self):
         sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        self.buildButton.enabled = bool(sel)
+        self.buildButton.enabled = bool(sel) and not getattr(self, "_working", False)
         s = self.rows[sel[0].row()] if sel and sel[0].row() < len(getattr(self, "rows", [])) else None
         ph = (s or {}).get("phases") or []
         if len(ph) >= 2:
@@ -482,8 +544,10 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         sel = self.table.selectionModel().selectedRows()
         if not sel: return
         s = self.rows[sel[0].row()]
+        if getattr(self, "_working", False): return                           # 作っている途中の二重押し
+        if not self._confirmLeave(): return                                   # 今の症例の保存していない変更（計測・パッチなど）を、確かめずに消さない
         self._busy(True)
-        prog = Progress(self.progressBar, self.progressLabel); ok = False
+        prog = Progress(self.progressBar, self.progressLabel); ok = False; cv = None
         try:
             prog.enter("load")
             self._say("シリーズを読み込み中…")
@@ -491,9 +555,12 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             cv = slicer.modules.cardiacview.widgetRepresentation().self()
             self.logic.resetCardiacView(cv)
             cv.volumeSelector.setCurrentNode(vol)
-            cv._status = lambda m: (prog.message(m), self._say(m), cv.statusLabel.setText(m))
-            t0 = time.time()
-            cv.onQuick()
+            last = [""]                                                       # CardiacView が最後に出した文（失敗は「エラー: …」で知らせてくる）
+            cv._status = lambda m: (last.__setitem__(0, str(m)), prog.message(m), self._say(m), type(cv)._status(cv, m))
+            built = cv.onQuick()
+            # onQuick は中の失敗を外へ出さない（「エラー: …」と出して False を返す）。ここで止めないと、作りかけを保存して「完了」と出してしまう
+            if built is False or last[0].startswith("エラー") or not cv.logic.layerModels:
+                raise RuntimeError((last[0].split(":", 1)[-1].strip() if last[0].startswith("エラー") else "") or "3D を作れませんでした")
             self._say(cv.statusLabel.text)
             ph = s.get("phases") or []
             if len(ph) >= 2:                                                  # 4D: ほかの位相も読み込んで、動く心臓を準備
@@ -503,10 +570,14 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
                 except Exception as e:
                     import traceback; traceback.print_exc(); self._say(f"4D の準備に失敗しました（3D はそのまま使えます）: {e}")
             prog.enter("save")
-            path = self.logic.saveCase(s)
+            try:
+                path = self.logic.saveCase(s); saved = f"\n症例を保存しました（{os.path.basename(path)}）。"
+            except Exception as e:                                            # 3D はできている。保存の失敗だけを知らせて、そのまま見られるようにする
+                import traceback; traceback.print_exc(); saved = f"\n⚠ 症例を保存できませんでした: {e}"
+                slicer.util.warningDisplay(f"3D はできましたが、症例を保存できませんでした。\n{e}", windowTitle=APP_TITLE)
             ok = True
             n4 = cv.logic.n4D() if hasattr(cv.logic, "n4D") else 0
-            self._say(cv.statusLabel.text + f"\n症例を保存しました（{os.path.basename(path)}）。"
+            self._say(cv.statusLabel.text + saved
                       + (f"\n4D（{n4} 位相）も準備できました。操作パネルの「4D」の ▶ 再生で動きます。" if n4 >= 2 else ""))
             slicer.util.selectModule("CardiacView")
         except Exception as e:
@@ -515,11 +586,56 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         finally:
             prog.finish(ok)
             self._busy(False)
+            try:
+                if cv is not None: cv.__dict__.pop("_status", None)           # CardiacView の文の出し方を元に戻す（この後の文を、入口の進み具合へ流し続けない）
+            except Exception: pass
+
+    # ------------------------------------------------------------------ 保存していない変更
+    def _askLeave(self, exiting=False):
+        """保存していない変更がある時にたずねる（exiting = アプリを終わる時）。戻り値: "save" / "discard" / "cancel" """
+        go = "終了" if exiting else "続ける"
+        mb = qt.QMessageBox(slicer.util.mainWindow()); mb.setWindowTitle(APP_TITLE); mb.setIcon(qt.QMessageBox.Question)
+        mb.setText("今の症例に、保存していない変更（計測・パッチなど）があります。")
+        bs = mb.addButton(f"保存して{go}", qt.QMessageBox.AcceptRole); mb.addButton(f"保存しないで{go}", qt.QMessageBox.DestructiveRole)
+        bc = mb.addButton("やめる", qt.QMessageBox.RejectRole)
+        mb.setDefaultButton(bs); mb.setEscapeButton(bc)
+        mb.exec_() if hasattr(mb, "exec_") else mb.exec()
+        c = mb.clickedButton(); t = str(c.text) if c is not None else ""
+        return {f"保存して{go}": "save", f"保存しないで{go}": "discard"}.get(t, "cancel")
+
+    def _confirmLeave(self):
+        """今の症例を閉じる（別の 3D を作る・別の症例を開く）前に、保存していない変更があれば確かめる。True = 続けてよい / False = やめる。
+        3D を作った後に足したもの（計測・パッチなど）は自動では保存されないので、黙って消さない（アプリを終わる時は _ExitGuard が同じことをたずねる）"""
+        try:
+            if not self.logic.hasUnsaved(): return True
+            r = self._askLeave()
+        except Exception as e:
+            print("[HeartView] 確認できませんでした（前と同じように続けます）:", e); return True
+        if r == "discard": return True
+        if r != "save": return False
+        return self.onSaveCase()
+
+    def onSaveCase(self, say=None):
+        """今の症例を、症例のファイルに上書き保存する。戻り値: 保存できたか"""
+        say = say or self._say
+        if getattr(self, "_working", False): return False
+        if not self.logic.caseOpen():
+            say("保存する症例がありません（先に 3D を作るか、保存した症例を開いてください）。"); return False
+        self._busy(True)
+        try:
+            say("症例を保存しています…"); p = self.logic.saveCurrent(); say(f"症例を保存しました（{os.path.basename(p)}）。"); return True
+        except Exception as e:
+            import traceback; traceback.print_exc(); say(f"エラー: {e}")
+            slicer.util.errorDisplay(f"症例を保存できませんでした。\n{e}", windowTitle=APP_TITLE); return False
+        finally:
+            self._busy(False)
 
     # ------------------------------------------------------------------ 保存した症例
     def onOpenCase(self):
+        if getattr(self, "_working", False): return
         path = qt.QFileDialog.getOpenFileName(None, "保存した症例を開く", casesDir(), "症例 (*.mrb)")
         if not path: return
+        if not self._confirmLeave(): return
         self._busy(True)
         try:
             self._say("症例を開いています…")
@@ -528,13 +644,18 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             slicer.util.selectModule("CardiacView")
         except Exception as e:
             import traceback; traceback.print_exc(); self._say(f"エラー: {e}")
+            slicer.util.errorDisplay(f"症例を開けませんでした。\n{e}", windowTitle=APP_TITLE)
         finally:
             self._busy(False)
 
     # ------------------------------------------------------------------ ③
     def onPNG(self):
-        p = self.logic.savePNG()
-        self._say(f"画像を保存しました: {p}")
+        try:
+            p = self.logic.savePNG()
+            if not os.path.exists(p): raise RuntimeError("ファイルができませんでした")
+            self._say(f"画像を保存しました: {p}")
+        except Exception as e:
+            import traceback; traceback.print_exc(); self._say(f"エラー: 画像を保存できませんでした（{e}）")
 
     def _updateLicLabel(self):
         ok = bool(tsLicense())
@@ -603,6 +724,8 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         ScriptedLoadableModuleLogic.__init__(self)
         self._tmp = None
         self.caseInfo = {}
+        self.casePath = None        # 今の症例のファイル（開いたファイル・作った時に保存したファイル）
+        self.savedSig = None        # そのファイルに保存した時点の workSignature()
 
     # ---- CD / USB を探す
     def findDicomMedia(self):
@@ -659,7 +782,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
                     if not files: continue
                     f = files[0]; val = lambda tag: (db.fileValue(f, tag) or "").strip()
                     mod = val("0008,0060"); itype = val("0008,0008").upper()
-                    desc = val("0008,103E") or "(説明なし)"; num = val("0020,0011")
+                    desc = _fixText(val("0008,103E")) or "(説明なし)"; num = val("0020,0011")   # 日本語の説明に混ざる制御文字（ESC）を直す（表が読めない・ファイル名に使えない）
                     try: thick = float(val("0018,0050") or 0)
                     except Exception: thick = 0.0
                     contrast = bool(val("0018,0010")) or desc.upper().startswith("CE")
@@ -713,6 +836,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
     def loadSeries(self, s):
         from DICOMLib import DICOMUtils
         slicer.mrmlScene.Clear(0)                                  # 前の症例を消してから（取り違え・メモリ不足防止）
+        self.casePath = None; self.savedSig = None
         ids = DICOMUtils.loadSeriesByUID([s["uid"]])
         vols = [slicer.mrmlScene.GetNodeByID(i) for i in ids]
         vols = [v for v in vols if v is not None and v.IsA("vtkMRMLScalarVolumeNode")]
@@ -819,20 +943,59 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
 
     def saveCase(self, s):
         name = f"{s.get('studyDate', '') or time.strftime('%Y%m%d')}_{_safe(s.get('seriesNumber', ''), 6)}_{_safe(s.get('rawDesc', ''), 24)}_{time.strftime('%H%M')}.mrb"
-        path = os.path.join(casesDir(), name)
+        return self._saveTo(os.path.join(casesDir(), name))
+
+    def caseOpen(self):
+        """3D を作った・開いた症例がシーンにあるか（CardiacView の面は、名前が「CV 」で始まるモデル）"""
+        try: return any((n.GetName() or "").startswith("CV ") for n in slicer.util.getNodesByClass("vtkMRMLModelNode"))
+        except Exception: return False
+
+    def hasUnsaved(self):
+        """開いている症例に、保存していない変更（計測・中心線・パッチ）があるか。保存できていない症例は「ある」"""
+        if not self.caseOpen(): return False
+        return self.savedSig is None or workSignature() != self.savedSig
+
+    def saveCurrent(self):
+        """今の症例を、開いたファイル（作った時に保存したファイル）に上書きする。まだファイルが無ければ新しい名前で"""
+        return self._saveTo(self.casePath or os.path.join(casesDir(), time.strftime("%Y%m%d_%H%M%S") + ".mrb"))
+
+    def _saveTo(self, path):
+        """シーンを症例のファイルに保存する。失敗は例外で知らせる（slicer.util.saveScene は失敗しても例外を出さず False を返すので、
+        前は保存できなくても「保存しました」と出ていた）。先に別の名前で書いてから入れ替える（上書きの途中で失敗しても、前のファイルを壊さない）"""
         cleanSceneText()
-        slicer.util.saveScene(path)
+        tmp = (path[:-4] if path.lower().endswith(".mrb") else path) + ".saving.mrb"
+        ok = False
+        try: ok = bool(slicer.util.saveScene(tmp))
+        except Exception as e: print("[HeartView] saveScene:", e)
+        if not ok or not os.path.exists(tmp) or os.path.getsize(tmp) < 1024:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except Exception: pass
+            raise RuntimeError(f"保存できませんでした（{os.path.basename(path)}）。保存先に書き込めるか・空き容量があるかを確かめてください")
+        try: os.replace(tmp, path)
+        except OSError as e:                                                 # 前のファイルを別のソフトがつかんでいる等: 書いたものは捨てずに、別の名前で残す
+            alt = (path[:-4] if path.lower().endswith(".mrb") else path) + time.strftime("_%H%M%S") + ".mrb"
+            print(f"[HeartView] {os.path.basename(path)} を入れ替えられません（{e}）。別の名前で保存します: {os.path.basename(alt)}")
+            os.replace(tmp, alt); path = alt
+        self.casePath = path; self.savedSig = workSignature()
         return path
 
     def openCase(self, path):
         import CardiacView
         slicer.mrmlScene.Clear(0)
-        try: slicer.util.loadScene(path)
-        except RuntimeError as e:
-            if "XML" not in str(e) and "Syntax" not in str(e): raise
-            print("[HeartView] 症例ファイルの文字を直して開き直します:", os.path.basename(path))
-            repairCaseFile(path); slicer.mrmlScene.Clear(0); slicer.util.loadScene(path)
+        self.casePath = None; self.savedSig = None                            # 途中で失敗しても、前の症例のファイルを「今の症例」と思ったままにしない（上書き保存で取り違えない）
         cv = slicer.modules.cardiacview.widgetRepresentation().self()
+        try:
+            try: slicer.util.loadScene(path)
+            except RuntimeError as e:
+                if "XML" not in str(e) and "Syntax" not in str(e): raise
+                print("[HeartView] 症例ファイルの文字を直して開き直します:", os.path.basename(path))
+                repairCaseFile(path); slicer.mrmlScene.Clear(0); slicer.util.loadScene(path)
+        except Exception as e:                                                # 読めないファイル: 読みかけを残さず、何も開いていない状態に戻してから知らせる
+            import traceback; traceback.print_exc()
+            try: slicer.mrmlScene.Clear(0); self.resetCardiacView(cv)
+            except Exception as e2: print("[HeartView] 片付け:", e2)
+            raise RuntimeError(f"このファイルは読み込めませんでした（壊れているか、症例のファイルではありません）: {os.path.basename(path)}") from e
         self.resetCardiacView(cv)
         cv.logic.adoptScene()
         if cv.logic.sourceVolume is not None: cv.volumeSelector.setCurrentNode(cv.logic.sourceVolume)
@@ -842,6 +1005,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e: print("[HeartView] 症例の点検:", e)
         cv.logic.setCapOpacity(cv.capSlider.value / 100.0)
         cv.onFourChamber() if cv.logic._findChambers() is not None else cv.onVSD()
+        self.casePath = path; self.savedSig = workSignature()                 # ここから後に足したもの（計測・パッチ）が「保存していない変更」
         qt.QTimer.singleShot(400, lambda: (cv.logic._fitParallel(recenter=True), cv.logic._viewSizeWatch(), cv.logic._view().scheduleRender()))   # 画面の大きさに合わせて全体を収める
 
     def savePNG(self):

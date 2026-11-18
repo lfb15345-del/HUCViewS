@@ -173,6 +173,24 @@ QWidget#cvRoot QScrollBar::handle:vertical { background:#3a404c; border-radius:4
 QWidget#cvRoot QScrollBar::add-line, QWidget#cvRoot QScrollBar::sub-line { height:0; }
 """
 
+def statusKind(msg):
+    """画面の文の種類: "err"（失敗）/ "warn"（注意）/ ""（ふつう）"""
+    m = str(msg or "")
+    if re.match(r"\s*(?:\S{1,6} ?)?エラー", m): return "err"                 # 「エラー: …」「VR エラー: …」「読み込みエラー: …」
+    return "warn" if ("⚠" in m or "失敗" in m) else ""
+
+
+STATUS_CSS = {"err": "color:#ff8f85; font-size:12px;", "warn": "color:#f2c66d; font-size:12px;"}
+
+
+def paintStatus(label, msg):
+    """失敗・注意の文は色と大きさを変える（前は、ふつうの案内と同じ小さい灰色の字で、見落としやすかった）"""
+    try:
+        css = STATUS_CSS.get(statusKind(msg), "")
+        if css != (label.styleSheet or ""): label.setStyleSheet(css)
+    except Exception: pass
+
+
 def _iconCSS():
     """スピン・コンボの矢印とチェックの印（SVG を一時フォルダに書いて使う）"""
     try:
@@ -738,7 +756,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
                 "area": "輪郭を囲むようにクリック、終わったら右クリック", "angle": "3 点クリック（2 点目が角の頂点）"}
         for key, b in self.measureButtons.items():
             b.connect("clicked()", lambda k=key: (self.logic.startMeasure(k), self._status(msgs[k] + "（3D の面・VR の上、または断面）")))
-        self.rulerClearButton.connect("clicked()", self.logic.clearRulers)
+        self.rulerClearButton.connect("clicked()", lambda: self.logic.clearRulers())   # 押した時のロジックで（入口が症例ごとにロジックを作り直す）
         self.vrBloodButton.connect("clicked()", lambda: self._onVR("blood"))
         self.bgCombo.connect("currentIndexChanged(int)", lambda i: self.logic.setBackground(i))
         self.paletteCombo.connect("currentIndexChanged(int)", self.onPalette)
@@ -798,7 +816,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         for k, text, tip in (("line", "直線", "2 点クリックで長さ"), ("curve", "カーブ", "曲線に沿った長さ（血管・弁輪など）"),
                              ("area", "面積", "囲んだ面積と周長"), ("angle", "角度", "3 点で角度")):
             add(k, text, tip, lambda k=k: (self.logic.startMeasure(k), self._status(msgs[k] + "（3D の面・VR の上、または断面）")))
-        add("clear", "消去", "計測をすべて消す（1 つだけ消す時は、マウスを乗せて Delete）", self.logic.clearRulers)
+        add("clear", "消去", "計測をすべて消す（1 つだけ消す時は、マウスを乗せて Delete）", lambda: self.logic.clearRulers())
         tb.addSeparator()
         lg = qt.QButtonGroup(tb); lg.setExclusive(True); self._tbLayoutGroup = lg
         for key, k, text, tip in (("one", "3d", "1画面", "3D だけを大きく"), ("two", "cut", "2画面", "左に 3D、右に今切っている面の断面"),
@@ -856,7 +874,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         finally: qt.QApplication.restoreOverrideCursor()
         if msg:
             self.shadeCombo.blockSignals(True); self.shadeCombo.currentIndex = ("なし", "ふつう", "強め").index(self.logic.shadeLevel); self.shadeCombo.blockSignals(False)
-            try: self.statusLabel.setText(msg)
+            try: self.statusLabel.setText(msg); paintStatus(self.statusLabel, msg)
             except Exception: print(msg)
 
     def onPalette(self, i):
@@ -1033,7 +1051,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         return specs
 
     def _status(self, msg):
-        self.statusLabel.text = msg; slicer.app.processEvents()
+        self.statusLabel.text = msg; paintStatus(self.statusLabel, msg); slicer.app.processEvents()
 
     def _applyCut(self):
         axis = CUT_MODES[self.cutCombo.currentIndex][1]
@@ -1125,7 +1143,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def onQuick(self):
         vol = self.volumeSelector.currentNode()
-        if not vol: self._status("CT を選んでください"); return
+        if not vol: self._status("CT を選んでください"); return False
         try:
             vol, note = self.logic.resolveSource(vol)
             if note:
@@ -1136,13 +1154,18 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
             specs = self._layerSpecs()
             rep = self.logic.autoPipeline(vol, specs, self.boneCheck.checked, self._status)
-            self.resSpin.value = self.logic.lastSpacing
-            for row in self.layerRows:                       # 自動で決めた閾値を詳細設定にも反映
-                if row["name"].text == "血液・血管": row["lo"].value = int(self.logic.calib["blood_lo"])
-            self.fillCheck.blockSignals(True); self.fillCheck.checked = True; self.fillCheck.blockSignals(False)
-            self.logic.setCapOpacity(self.capSlider.value / 100.0)
-            self.logic.updateInset()
-            self.onScene(str(qt.QSettings().value("CardiacView/scene", "heart") or "heart"), remember=False)
+            try:                                             # ここから下は「見せ方の準備」。失敗しても 3D はできているので、作成の失敗にはしない（入口は失敗だと症例を保存しない）
+                self.resSpin.value = self.logic.lastSpacing
+                for row in self.layerRows:                   # 自動で決めた閾値を詳細設定にも反映
+                    if row["name"].text == "血液・血管": row["lo"].value = int(self.logic.calib["blood_lo"])
+                self.fillCheck.blockSignals(True); self.fillCheck.checked = True; self.fillCheck.blockSignals(False)
+                self.logic.setCapOpacity(self.capSlider.value / 100.0)
+                self.logic.updateInset()
+                sc = str(qt.QSettings().value("CardiacView/scene", "heart") or "heart")
+                self.onScene(sc if sc in self.sceneButtons else "heart", remember=False)   # 覚えた値が壊れていても心臓の表示から
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                rep += f"\n⚠ 表示の準備の一部に失敗しました（{e}）。上の「見たいもの」を押し直してください"
             try:
                 self.logic.setScale(self.scaleCheck.checked)
                 key = next((k for k, b in self.rmodeButtons.items() if b.checked), "zoom"); self.logic.setRightMode(key)
@@ -1152,14 +1175,16 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
                 self.ssaoCheck.blockSignals(True); self.ssaoCheck.checked = self.logic._view().renderWindow().GetRenderers().GetFirstRenderer().GetUseSSAO(); self.ssaoCheck.blockSignals(False)
             except Exception as e: print("tune:", e)
             self._status(rep)
+            return True
         except Exception as e:
             import traceback; traceback.print_exc()
             self._status(f"エラー: {e}")
+            return False
         finally:
             qt.QApplication.restoreOverrideCursor()
 
     def onBuild(self):
-        self.onQuick()
+        return self.onQuick()
 
     def _toSurfaces(self):
         """面の表示（色分け面・心筋の断面など）へ切り替える前に、VR と 4D を止める。
@@ -1384,10 +1409,29 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         return self._onSave()
 
     def _onSave(self):
-        path = qt.QFileDialog.getSaveFileName(None, "シーンを保存", "", "Medical Reality Bundle (*.mrb)")
-        if path:
-            if not path.lower().endswith(".mrb"): path += ".mrb"
-            slicer.util.saveScene(path); self._status(f"保存: {path}")
+        hvL = None                                                           # アプリ画面では、入口（HeartView）が今の症例のファイルを覚えている
+        if getattr(slicer, "heartviewAppMode", False):
+            try: hvL = slicer.modules.heartview.widgetRepresentation().self().logic
+            except Exception: hvL = None
+        path = qt.QFileDialog.getSaveFileName(None, "シーンを保存", getattr(hvL, "casePath", None) or "", "Medical Reality Bundle (*.mrb)")
+        if not path: return
+        if not path.lower().endswith(".mrb"): path += ".mrb"
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            self._status("保存しています…")
+            if hvL is not None and hasattr(hvL, "_saveTo"):
+                hvL._saveTo(path)                                            # 別の名前で書いてから入れ替える・失敗は例外・名前の制御文字を直す
+            else:
+                try:
+                    import HeartView; HeartView.cleanSceneText()                   # 名前に混ざった制御文字（日本語の DICOM）で、保存したファイルが開けなくなるのを防ぐ
+                except Exception as e: print("cleanSceneText:", e)
+                if not slicer.util.saveScene(path) or not os.path.exists(path):   # 失敗しても例外は出ない（False が返る）
+                    raise RuntimeError(f"保存できませんでした（{path}）。保存先に書き込めるか・空き容量があるかを確かめてください")
+            self._status(f"保存: {path}")
+        except Exception as e:
+            import traceback; traceback.print_exc(); self._status(f"エラー: {e}")
+        finally:
+            qt.QApplication.restoreOverrideCursor()
 
 
 # =============================================================================== Logic
@@ -2198,6 +2242,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             d = n.GetDisplayNode(); self.visible[key] = bool(d.GetVisibility()) if d else False
         if "心筋" in self.layerModels: self.visible["心筋"] = True
         self.workVolume = None; self.sourceVolume = None
+        self._patchRemoved = []                                              # 前に開いていた症例の「外したパッチ」の記録を持ち越さない
         vols = [v for v in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
                 if not v.IsA("vtkMRMLLabelMapVolumeNode") and not v.IsA("vtkMRMLVectorVolumeNode")]   # VR（CV VR）・ラベルは作業用の画像ではない
         work = next((v for v in vols if v.GetAttribute("CardiacView.calib") is not None), None) \
@@ -2670,6 +2715,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
         proj = corners @ n; dmin, dmax = proj.min(), proj.max()
         frac = float(np.clip((dmax - center @ n) / max(dmax - dmin, 1e-6), 0, 1))
+        self.cutSign = 1.0                                                   # 「反転」を押した後でも、四腔断面はカメラの側を切る（反転のままだと奥を切って、切り口が見えない）
         self.setCut("VIEW", frac)
         self._view().forceRender()
         return frac
@@ -2797,13 +2843,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             def look(mask):
                 h = np.zeros(len(P), bool); h[ok] = mask[k[ok], j[ok], i[ok]]; return h
             b = look(blood)
-            if left is not None:
-                l = look(left); r = look(right); lh += l; rh += r; b = b | l | r
+            if left is not None or right is not None:                         # 片側の心腔ラベルが無い（先天性・術後など）時は、無い側を空として扱う（前は右が無いと落ちて、壁の色分けも心筋も作られなかった）
+                l = look(left) if left is not None else np.zeros(len(P), bool)
+                r = look(right) if right is not None else np.zeros(len(P), bool)
+                lh += l; rh += r; b = b | l | r
             endo += b
         isEndo = endo / len(steps) >= 0.34
         cls = np.zeros(len(P), np.int8)                    # 0 = 外膜, 1 = 左心系, 2 = 右心系
         cls[isEndo] = 1
-        if left is not None: cls[isEndo & (rh > lh)] = 2
+        if left is not None or right is not None: cls[isEndo & (rh > lh)] = 2
         # まだら（外膜に内膜色の点が散る）を防ぐ: メッシュの近所で多数決
         try:
             from scipy import sparse
@@ -3420,7 +3468,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         gf = vtk.vtkGeometryFilter(); gf.SetInputConnection(th.GetOutputPort()); gf.Update()
         new = vtk.vtkPolyData(); new.DeepCopy(gf.GetOutput())
         new.GetPointData().RemoveArray("RegionId"); new.GetCellData().RemoveArray("RegionId")
-        prev = vtk.vtkPolyData(); prev.DeepCopy(pd); self.__dict__.setdefault("_patchRemoved", []).append(prev)
+        prev = vtk.vtkPolyData(); prev.DeepCopy(pd); self.__dict__.setdefault("_patchRemoved", []).append((node.GetID(), prev))   # どのパッチの記録か（ノード）も覚える
         node.SetAndObservePolyData(new)
         if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False): self.vrDisplay = None
         self._view().scheduleRender()
@@ -3430,7 +3478,12 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         st_ = getattr(self, "_patchRemoved", None) or []
         node = self.layerModels.get(self.PATCH_KEY)
         if not st_ or node is None: return False
-        node.SetAndObservePolyData(st_.pop()); self._view().scheduleRender(); return True
+        nid, prev = st_.pop()
+        if nid != node.GetID() or not slicer.mrmlScene.IsNodePresent(node):       # 別の症例・別のパッチの記録（開き直した後など）は使わない
+            self._patchRemoved = []; return False
+        node.SetAndObservePolyData(prev)
+        if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False): self.vrDisplay = None      # 外した時と同じ: 次の VR でパッチの色を塗り直す
+        self._view().scheduleRender(); return True
 
     def patchUndo(self):
         st = getattr(self, "_strokes", None) or []
@@ -3491,6 +3544,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 half_ = 0.5 * float((cc[0 if side == "L" else 1] - c) @ n) if cc is not None else ext + 6.0   # パッチと部屋の真ん中の間
                 s_ = float(c @ n + max(ext + 3.0, half_))
         self._lockN = n.tolist(); self._lockPrev = "VIEW"
+        self.cutSign = 1.0                                                   # 「反転」を押した後でも、パッチの手前（カメラの側）を切る
         self.setCut("LOCK", float(np.clip((dmax - s_) / max(dmax - dmin, 1e-6), 0, 1)))
         cn.ResetClippingRange(); self._view().forceRender(); self._syncCutUI()
         return True
@@ -3636,7 +3690,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             return True
         if self.cutAxis == "LOCK":
             prev = getattr(self, "_lockPrev", "VIEW"); self._lockN = None
-            self.setCut(prev if prev != "LOCK" else "VIEW", getattr(self, "cutFrac", 0.5)); self._syncCutUI()
+            f = getattr(self, "cutFrac", 0.5)
+            if prev in (0, 1, 2): f = 1.0 - f                                 # 軸で切る時は位置の数え方が逆（固定中は遠い側から、軸は近い側から）。そのまま渡すと、外した時に切る位置が反対側へ飛ぶ
+            self.setCut(prev if prev != "LOCK" else "VIEW", f); self._syncCutUI()
         return False
 
     def _ensureViewObserver(self):
@@ -4380,23 +4436,54 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def _perfLog(self, rec):
         """性能の記録（患者情報なし: GPU 名・描画時間だけ）。PC の中と、届けば NAS の logs にも残す（離れた所から調整できるように）"""
         import json
-        line = time.strftime("%Y-%m-%d %H:%M ") + (os.environ.get("COMPUTERNAME") or __import__("socket").gethostname()) + " " + json.dumps(rec, ensure_ascii=False) + "\n"
-        for d in (os.path.expanduser("~"), self._nasLogDir()):
+        pc = os.environ.get("COMPUTERNAME") or __import__("socket").gethostname()
+        line = time.strftime("%Y-%m-%d %H:%M ") + pc + " " + json.dumps(rec, ensure_ascii=False) + "\n"
+        home = os.path.expanduser("~")
+        for d in (home, self._nasLogDir()):
             if not d: continue
+            t0 = time.time()
             try:
                 os.makedirs(d, exist_ok=True)
-                with open(os.path.join(d, "HUCViewS_performance.txt" if d == os.path.expanduser("~") else f"{os.environ.get('COMPUTERNAME') or __import__('socket').gethostname()}_performance.txt"), "a", encoding="utf-8") as f: f.write(line)
-            except Exception: pass
+                with open(os.path.join(d, "HUCViewS_performance.txt" if d == home else f"{pc}_performance.txt"), "a", encoding="utf-8") as f: f.write(line)
+                if d != home and time.time() - t0 > 2.0: slicer._cvNasLog = (time.time(), None)      # 書くのに時間のかかる NAS は、しばらく休む（画面を止めない）
+            except Exception:
+                if d != home: slicer._cvNasLog = (time.time(), None)
+
+    NAS_RETRY_S = 1800.0     # NAS に届かなかった・遅かった時、次に確かめるまでの時間（秒）
 
     def _nasLogDir(self):
+        """性能の記録を置く NAS のフォルダ（届く時だけ）。届かない NAS の確かめは数秒〜数十秒戻らない（その間、画面が止まる）ので、
+        結果を 30 分覚えておく（前は 2 分ごとの記録のたびに確かめていて、NAS の無い所で使うと 2 分おきに止まった）"""
         try:
             hv = os.environ.get("HEARTVIEW_HOME")
             if not hv: return None
-            src = open(os.path.join(os.path.dirname(hv), "update_source.txt"), encoding="utf-8-sig").read().strip()
-            return os.path.join(src, "logs") if src and os.path.isdir(src) else None
+            st = getattr(slicer, "_cvNasLog", None)
+            if st and 0 <= time.time() - st[0] < self.NAS_RETRY_S: return st[1]
+            src = None
+            for enc in ("utf-8-sig", "cp932"):                               # 起動時の更新（heartview_start.py）と同じ読み方
+                try: src = open(os.path.join(os.path.dirname(hv), "update_source.txt"), encoding=enc).read().strip(); break
+                except Exception: pass
+            d = None
+            if src and not src.lower().startswith(("http://", "https://")):   # ネット（GitHub）から更新する PC には NAS が無い
+                t0 = time.time(); ok = os.path.isdir(src); dt = time.time() - t0
+                if dt > 2.0: print(f"[CardiacView] NAS の確かめに {dt:.0f} 秒かかりました（届く: {ok}）。しばらく確かめ直しません")
+                d = os.path.join(src, "logs") if ok else None
+            slicer._cvNasLog = (time.time(), d)
+            return d
         except Exception: return None
 
     WEAK_GPU = ("T400", "T600", "T1000", "P400", "P600", "P620", "P1000", "GT 7", "GT 10", "MX", "UHD", "IRIS", "QUADRO K")
+
+    @classmethod
+    def _weakGpuName(cls, name):
+        """GPU の名前が「弱い」の一覧に当たるか。型番（T600・P400 など）は、前後が英数字でない時だけ当たりとする
+        （前は部分一致で、「P400」が Quadro P4000 に、「P600」が P6000 に当たって、強い GPU を弱いと決めていた）"""
+        name = (name or "").upper()
+        for k in cls.WEAK_GPU:
+            if re.fullmatch(r"[TP]\d+", k):
+                if re.search(r"(?<![A-Z0-9])" + k + r"(?!\d)", name): return True
+            elif k in name: return True
+        return False
 
     def _vrDownFactor(self):
         """VR の格子の粗さ（1 = そのまま、2 = 半分）。GPU が弱い（4GB 以下など）PC は 2。PC ごとに覚える"""
@@ -4408,7 +4495,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         mem = None
         try: mem = int(re.search(r"(\d+)\s*MIB", name).group(1))
         except Exception: pass
-        weak = any(k in name for k in self.WEAK_GPU) or (mem is not None and mem <= 4096)
+        weak = self._weakGpuName(name) or (mem is not None and mem <= 4096)
         f = 2 if weak else 1; st.setValue("HUCViewS/vrDown", f); return f
 
     def _tuneVR(self):
@@ -4885,7 +4972,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         """計測: 直線 / 連続点（折れ線）/ カーブ / 面積（閉曲線）/ 角度。3D（面・VR の上）でも断面でもクリックで置く"""
         self.rulers = [n for n in getattr(self, "rulers", []) if slicer.mrmlScene.IsNodePresent(n)]
         key, lab, cls, pre = next(m for m in self.MEASURES if m[0] == kind)
-        num = 1 + sum(1 for n in self.rulers if n.GetAttribute("CV.measure") == kind)
+        used = [re.match(rf"{pre}(\d+)", n.GetName() or "") for n in self._measureNodes() if n.GetAttribute("CV.measure") == kind]
+        num = 1 + max([int(m.group(1)) for m in used if m] or [0])                # 開き直した症例・消した後でも番号が重ならない
         n = slicer.mrmlScene.AddNewNodeByClass(cls, f"{pre}{num}")                 # 3D の文字は英数字だけ表示できる
         n.SetAttribute("CV.measure", kind)
         if kind == "poly": n.SetCurveTypeToLinear()
@@ -4929,8 +5017,14 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def startRuler(self):
         return self.startMeasure("line")
 
+    def _measureNodes(self):
+        """このビューアで置いた計測（印 CV.measure の付いた線・曲線・面積・角度）。シーンから探す（保存した症例を開いた後・ロジックを作り直した後も見つかる）"""
+        return [n for n in slicer.util.getNodesByClass("vtkMRMLMarkupsNode") if n.GetAttribute("CV.measure")]
+
     def clearRulers(self):
-        for n in getattr(self, "rulers", []):
+        nodes = list(getattr(self, "rulers", []))
+        nodes += [n for n in self._measureNodes() if n not in nodes]
+        for n in nodes:
             if slicer.mrmlScene.IsNodePresent(n): slicer.mrmlScene.RemoveNode(n)
         self.rulers = []
 
