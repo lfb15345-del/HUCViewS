@@ -16,10 +16,30 @@ APP_SUBTITLE = "心臓3Dビューア"
 CASES_DIRNAME = "HeartView症例"
 
 
+def casesPath():
+    """症例の保存先（作らない）"""
+    return os.path.join(qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation), CASES_DIRNAME)
+
+
 def casesDir():
-    d = os.path.join(qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation), CASES_DIRNAME)
+    d = casesPath()
     os.makedirs(os.path.join(d, "画像"), exist_ok=True)
     return d
+
+
+def cloudSyncName(path):
+    """path がクラウドと同期するフォルダ（OneDrive・iCloud・Dropbox・Google ドライブ）の中なら、その名前。違えば ""。
+    Windows の「ドキュメント」は、設定によって OneDrive の中に置かれる（その時は、保存した症例＝患者の CT がクラウドにも送られる）"""
+    try:
+        p = os.path.normcase(os.path.abspath(str(path))).replace("\\", "/").lower()
+        for k in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+            e = os.environ.get(k)
+            if e and (p + "/").startswith(os.path.normcase(os.path.abspath(e)).replace("\\", "/").lower().rstrip("/") + "/"): return "OneDrive"
+        for mark, name in (("onedrive", "OneDrive"), ("icloud", "iCloud"), ("com~apple~clouddocs", "iCloud"), ("dropbox", "Dropbox"),
+                           ("google drive", "Google ドライブ"), ("googledrive", "Google ドライブ"), ("マイドライブ", "Google ドライブ")):
+            if any(mark in part for part in p.split("/")): return name
+    except Exception: pass
+    return ""
 
 
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -138,7 +158,10 @@ def enterAppMode():
     try:
         if getattr(slicer, "_hvExitGuard", None) is None:
             slicer._hvExitGuard = _ExitGuard(); mw.installEventFilter(slicer._hvExitGuard)
+            slicer.app.connect("aboutToQuit()", cleanupTmpDicom)              # ほかの終わり方（Slicer の確認を通った時など）でも片付ける
     except Exception as e: print("exit guard:", e)
+    try: fixDicomSetting()
+    except Exception as e: print("dicom setting:", e)
     slicer.heartviewAppMode = True
     slicer.util.selectModule("HeartView")
     mw.showMaximized()
@@ -176,8 +199,18 @@ class _ExitGuard(qt.QObject):
                 if r not in ("save", "discard") or (r == "save" and not w.onSaveCase()):
                     ev.ignore(); return True                                  # 「やめる」・保存できなかった → 閉じない
             self._leaving = True; ev.ignore()
-            qt.QTimer.singleShot(5000, lambda: setattr(self, "_leaving", False))   # 万一終わらなかった時に、閉じられないままにしない
-            qt.QTimer.singleShot(0, lambda: slicer.util.exit(0))              # Slicer の確認を通らずに終わる
+            qt.QTimer.singleShot(60000, lambda: setattr(self, "_leaving", False))  # 万一終わらなかった時に、閉じられないままにしない
+            def leave():
+                mw = None
+                try: mw = slicer.util.mainWindow(); mw.hide(); slicer.app.processEvents()   # 片付け（CD の写しが多いと数秒）の間、窓を残さない
+                except Exception: pass
+                try: cleanupTmpDicom()
+                finally:
+                    try: slicer.util.exit(0)                                  # Slicer の確認を通らずに終わる
+                    except Exception as e:
+                        print("[HeartView] 終了:", e)
+                        if mw is not None: mw.show()
+            qt.QTimer.singleShot(0, leave)
             return True
         except Exception as e:
             print("[HeartView] 終了の確認:", e); return False
@@ -440,6 +473,7 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         self.saveCaseButton = btn("症例を保存", None, "計測・パッチなど、今の状態を症例のファイルに上書き保存します\n（3D を作った時に 1 回、自動で保存されます。その後に足したものは、これで保存します）"); row.addWidget(self.saveCaseButton, 1)
         self.pngButton = btn("画像で保存", None, "今の画面を PNG で保存"); row.addWidget(self.pngButton, 1)
         self.openDirButton = btn("保存フォルダ", None, "保存した症例・画像のフォルダを開く"); row.addWidget(self.openDirButton, 1)
+        self.cloudLabel = lab("", "muted"); g.addWidget(self.cloudLabel); self.cloudLabel.hide(); self._updateCloudNote()
 
         row = qt.QHBoxLayout(); row.setSpacing(2); v.addLayout(row)
         self.slicerButton = btn("Slicer の通常画面", "ghost", "Slicer の通常画面に切り替え（上級者用）"); row.addWidget(self.slicerButton)
@@ -498,6 +532,9 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             self.progressBar.setRange(0, 0); self.progressBar.show(); self.progressLabel.setText("CD から PC へ取り込み中…"); self.progressLabel.show(); slicer.app.processEvents()
             rows, info = self.logic.importFolder(folder)
             self.infoLabel.setText(info); self.infoLabel.setVisible(bool(info))
+            try:
+                import CardiacView; CardiacView.paintStatus(self.infoLabel, info)  # 患者・検査日が混ざっている時（⚠）は色を変える
+            except Exception: pass
             self._fill(rows)
             self.progressBar.setRange(0, 1000); self.progressBar.hide(); self.progressLabel.hide()
             self._say("シリーズを選んで「3D を作る」を押してください（★ がおすすめ）。" if rows else "CT のシリーズが見つかりませんでした。")
@@ -657,6 +694,19 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             import traceback; traceback.print_exc(); self._say(f"エラー: 画像を保存できませんでした（{e}）")
 
+    def _updateCloudNote(self):
+        """症例の保存先がクラウドと同期するフォルダの中なら、入口に知らせを出す（知らないうちに患者の画像が院外へ送られないように）"""
+        try:
+            name = cloudSyncName(casesPath())
+            if name:
+                msg = f"⚠ 症例の保存先が {name} と同期するフォルダの中です。保存した症例（患者の CT）がクラウドにも送られます。場所は「保存フォルダ」で確かめられます。"
+                self.cloudLabel.setText(msg); self.cloudLabel.show()
+                import CardiacView; CardiacView.paintStatus(self.cloudLabel, msg)
+            else: self.cloudLabel.hide()
+            return name
+        except Exception as e:
+            print("[HeartView] 保存先の確認:", e); return ""
+
     def _updateLicLabel(self):
         ok = bool(tsLicense())
         self.licButton.setText("AI ライセンス ✓" if ok else "AI ライセンスを登録（無料）")
@@ -700,6 +750,99 @@ def setTsLicense(lic):
     with open(p, "w", encoding="utf-8") as f: json.dump(cfg, f, indent=2)
 
 
+_TMPDB_RE = re.compile(r"^\d{8}_\d{6}_TempDICOMDatabase(_del)?$")       # Slicer の openTemporaryDatabase() が付ける名前（＋消しかけの印）
+TMPDB_PID = "hucviews_pid.txt"
+
+
+def _isTmpDicomDir(p, tmpRoot=None):
+    """p が、Slicer の一時フォルダの直下にある「取り込み用の一時的な DICOM のデータベース」か（場所と名前の形の両方で見分ける）"""
+    if not p: return False
+    try:
+        root = os.path.normcase(os.path.abspath(tmpRoot or slicer.app.temporaryPath)); q = os.path.normcase(os.path.abspath(str(p)))
+        return os.path.dirname(q) == root and bool(_TMPDB_RE.match(os.path.basename(str(p).replace("\\", "/").rstrip("/"))))
+    except Exception: return False
+
+
+def _rmtree(d):
+    """フォルダごと消す。書き込み禁止の印の付いたファイル（CD から写したファイルは Windows でそうなる）は、印を外してから消す"""
+    import shutil, stat
+    def unlock(func, path, exc):
+        try: os.chmod(path, stat.S_IWRITE); func(path)
+        except Exception: pass
+    try: shutil.rmtree(d, onexc=unlock)                                      # Python 3.12 から
+    except TypeError: shutil.rmtree(d, onerror=unlock)
+    except Exception: pass
+
+
+def _removeTmpDicomDir(d, tmpRoot=None):
+    """一時的な DICOM のデータベース（CD から写した画像と索引。患者の名前が入っている）を消す。戻り値: 消せたか。
+    先にフォルダの名前を変える: 中のファイルをどこかが開いていると Windows ではここで失敗する（＝使っているので消さない）"""
+    if not _isTmpDicomDir(d, tmpRoot) or not os.path.isdir(d): return False
+    dead = d if d.endswith("_del") else d + "_del"
+    if dead != d:
+        try:
+            if os.path.isdir(dead): _rmtree(dead)
+            os.rename(d, dead)
+        except OSError: return False
+    _rmtree(dead)
+    return not os.path.exists(dead)
+
+
+def purgeTmpDicom(keep=None, tmpRoot=None, minAge=24 * 3600):
+    """前の回までに残った一時的な DICOM のデータベースを片付ける（前の版は、閉じても消していなかった。途中で落ちた時も残る）。
+    keep = 今使っているフォルダ。ほかの HUCViewS・Slicer が使っているものは消さない。戻り値: (消した数, 消した MB, 残した数)"""
+    import sys
+    root = tmpRoot or slicer.app.temporaryPath; n = left = 0; mb = 0.0
+    try: names = [e for e in os.listdir(root) if _TMPDB_RE.match(e) and os.path.isdir(os.path.join(root, e))]
+    except Exception: return 0, 0.0, 0
+    for e in names:
+        d = os.path.join(root, e)
+        try:
+            if keep and os.path.normcase(os.path.abspath(d)) == os.path.normcase(os.path.abspath(keep)): continue
+            if sys.platform != "win32" and not e.endswith("_del"):
+                # Windows 以外では、使っている途中のフォルダも名前を変えられてしまう → 持ち主（別の HUCViewS）が動いていないか、十分古いかを確かめる
+                pf = os.path.join(d, TMPDB_PID)
+                if os.path.exists(pf):
+                    try:
+                        pid = int((open(pf).read().strip() or "0"))
+                        if pid and pid != os.getpid(): os.kill(pid, 0); left += 1; continue    # 動いている
+                    except ProcessLookupError: pass
+                    except Exception: left += 1; continue
+                elif time.time() - os.path.getmtime(d) < minAge: left += 1; continue
+            size = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(d) for f in fs)
+            if _removeTmpDicomDir(d, root): n += 1; mb += size / 1e6
+            else: left += 1
+        except Exception as ex:
+            print("[HeartView] 一時的な DICOM の片付け:", ex); left += 1
+    return n, round(mb, 1), left
+
+
+def fixDicomSetting():
+    """Slicer の「DICOM の置き場所」の設定が、取り込み用の一時フォルダを指したままなら直す。
+    前の版は、取り込みの時に設定を一時フォルダに替えて、閉じる時に戻していなかった（同じ PC でふつうの Slicer を使うと、DICOM の一覧が空になる）。
+    元の場所は分からないので、設定を消して Slicer の既定の場所に戻す。戻り値: 直したか"""
+    key = slicer.dicomDatabaseDirectorySettingsKey; st = qt.QSettings(); cur = st.value(key)
+    if not _isTmpDicomDir(cur): return False
+    try:
+        db = slicer.dicomDatabase
+        if db is not None and db.isOpen and _isTmpDicomDir(os.path.dirname(db.databaseFilename)): db.closeDatabase()   # 起動の時に Slicer が開いた古い一時フォルダを放す（放さないと消せない）
+    except Exception as e: print("[HeartView] DICOM の置き場所:", e)
+    st.remove(key); print("[HeartView] DICOM の置き場所の設定が一時フォルダを指していたので、既定に戻しました")
+    return True
+
+
+def cleanupTmpDicom():
+    """アプリを終わる時: 今回の取り込みの一時フォルダを閉じて消し、前の回の残りも片付ける。何度呼んでもよい"""
+    try:
+        w = slicer.modules.heartview.widgetRepresentation().self()
+        w.logic._closeTmp()
+        r = purgeTmpDicom()
+        if r[0] or r[2]: print(f"[HeartView] 一時的な DICOM の片付け: {r[0]} 個（{r[1]} MB）を消しました" + (f"／{r[2]} 個は使用中のため残しました" if r[2] else ""))
+        return r
+    except Exception as e:
+        print("[HeartView] 一時的な DICOM の片付け:", e); return None
+
+
 def _isRemovable(folder):
     """CD / DVD / USB メモリなら True。Windows はドライブ種別、Mac は /Volumes の下、Linux は /media・/run/media の下"""
     import sys
@@ -723,6 +866,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
         self._tmp = None
+        self._tmpDir = None         # 取り込み用の一時的な DICOM のデータベースのフォルダ
         self.caseInfo = {}
         self.casePath = None        # 今の症例のファイル（開いたファイル・作った時に保存したファイル）
         self.savedSig = None        # そのファイルに保存した時点の workSignature()
@@ -763,16 +907,30 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
 
     # ---- 取り込み（一時データベース。PC 内のみ）
     def _closeTmp(self):
-        if self._tmp is not None:
-            try: self._tmp.__exit__(None, None, None)
+        """取り込み用の一時的な DICOM のデータベースを閉じて、フォルダごと消す（CD から写した画像と、患者の名前の入った索引）"""
+        tmp, d = self._tmp, getattr(self, "_tmpDir", None); self._tmp = None; self._tmpDir = None
+        if tmp is not None:
+            try: tmp.__exit__(None, None, None)
             except Exception as e: print("tmpdb:", e)
-            self._tmp = None
+        if d:
+            try:
+                if not _removeTmpDicomDir(d): print("[HeartView] 一時的な DICOM のフォルダを消せませんでした（次に終わる時にもう一度消します）")
+            except Exception as e: print("tmpdb:", e)
 
     def importFolder(self, folder):
         from DICOMLib import DICOMUtils
         self._closeTmp()
+        key = slicer.dicomDatabaseDirectorySettingsKey; st = qt.QSettings(); orig = st.value(key)
+        if _isTmpDicomDir(orig): orig = None                                  # 前の版が残した一時フォルダを「元の場所」と思わない
         self._tmp = DICOMUtils.TemporaryDICOMDatabase()
         db = self._tmp.__enter__()
+        try:
+            self._tmp.originalDatabaseDir = orig                              # 閉じる時に戻す場所（無ければ戻さない）
+            self._tmpDir = os.path.dirname(db.databaseFilename)
+            if orig: st.setValue(key, orig)                                   # 設定は、すぐ元に戻す（一時フォルダを指したままアプリが終わると、次に Slicer を開いた時の DICOM の置き場所が替わってしまう）
+            else: st.remove(key)
+            with open(os.path.join(self._tmpDir, TMPDB_PID), "w") as f: f.write(str(os.getpid()))
+        except Exception as e: print("tmpdb:", e)
         DICOMUtils.importDicom(folder, db, copyFiles=_isRemovable(folder))   # CD/USB だけ PC 内へコピー（PC 内のフォルダはそのまま読む）
         rows = []; pid = sdate = ""
         for p in db.patients():
@@ -800,7 +958,8 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
                         txt = (desc + " " + kernel).upper()
                         if any(k in txt for k in ("CTA", "CARDIAC", "HEART", "心")): score += 15
                         score += min(len(files), 400) / 40.0
-                    pid = pid or val("0010,0020"); sdate = sdate or val("0008,0020")
+                    rpid = val("0010,0020"); rdate = val("0008,0020")
+                    pid = pid or rpid; sdate = sdate or rdate
                     # 4D（心電図同期の多位相）: 同じ撮影・同じ範囲で、位相だけ違うシリーズをまとめる
                     def fnum(tag):
                         try: return float(val(tag))
@@ -814,7 +973,7 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
                     plab = f"{pct:.0f}%" if pct is not None else (f"位相 {int(tpi)}" if tpi is not None else (f"{trig:.0f} ms" if trig is not None else ""))
                     gkey = (st, val("0020,0052"), len(files), round(thick, 2), val("0028,0010"), val("0028,0011"), val("0028,0030"), val("0018,1100"), kernel) if (usable and phase is not None) else None
                     rows.append(dict(uid=se, desc=f"{num}: {desc}" if num else desc, n=len(files), thick=thick, contrast=contrast,
-                                     orient=orient, usable=usable, score=score, studyDate=val("0008,0020"), seriesNumber=num, rawDesc=desc,
+                                     orient=orient, usable=usable, score=score, studyDate=rdate, pid=rpid, seriesNumber=num, rawDesc=desc,
                                      gkey=gkey, phase=phase, phaseLab=plab))
         groups = {}
         for r in rows:
@@ -828,8 +987,17 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
                 if pcts: r["score"] -= abs(r["phase"] - 75.0) / 100.0             # 3D は拡張中期（75% 付近）で作る
         rows.sort(key=lambda r: -r["score"])
         if rows and rows[0]["usable"]: rows[0]["best"] = True
-        sd = f"{sdate[:4]}/{sdate[4:6]}/{sdate[6:8]}" if len(sdate) == 8 else sdate
-        info = f"患者ID: {pid or '?'}　検査日: {sd or '?'}　（{len(rows)} シリーズ）"
+        fd = lambda d: f"{d[:4]}/{d[4:6]}/{d[6:8]}" if len(d or "") == 8 else (d or "?")
+        pids = sorted({r["pid"] for r in rows if r.get("pid")}); dates = sorted({r["studyDate"] for r in rows if r.get("studyDate")})
+        if len(pids) > 1:                                                     # 患者が混ざったフォルダ: 前は最初の 1 人の ID だけを出していた（取り違えのもと）→ 行ごとに患者と検査日を出す
+            for r in rows: r["desc"] += f"〔ID {r.get('pid') or '?'}・{fd(r.get('studyDate'))}〕"
+            info = (f"⚠ 患者 {len(pids)} 人分の検査が入っています（ID: {'、'.join(pids[:3])}{' ほか' if len(pids) > 3 else ''}）。"
+                    f"各行の〔 〕で患者を確かめてから選んでください。（{len(rows)} シリーズ）")
+        elif len(dates) > 1:                                                  # 同じ患者の、別の日の検査が混ざっている（術前と術後など）
+            for r in rows: r["desc"] += f"〔{fd(r.get('studyDate'))}〕"
+            info = f"患者ID: {pid or '?'}　⚠ 検査日が {len(dates)} 日分あります（{fd(dates[0])}〜{fd(dates[-1])}）。各行の〔 〕で検査日を確かめてください。（{len(rows)} シリーズ）"
+        else:
+            info = f"患者ID: {pid or '?'}　検査日: {fd(sdate) if sdate else '?'}　（{len(rows)} シリーズ）"
         self.caseInfo = dict(pid=pid, studyDate=sdate)
         return rows, info
 

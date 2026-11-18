@@ -676,6 +676,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         card, c, _ = self._card(P, "見た目"); self._lookLay = c
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
         self.bgCombo = qt.QComboBox(); self.bgCombo.addItems(["黒", "濃いグレー", "白"]); f.addRow(Lb("背景", "muted"), self.bgCombo)
+        try: self.bgCombo.currentIndex = max(0, min(2, int(qt.QSettings().value("CardiacView/bg", 0) or 0)))   # 前に選んだ背景（欄と画面を合わせる）
+        except Exception: pass
         self.paletteCombo = qt.QComboBox(); self.paletteCombo.addItems(["リアル（深紅・金・薄紫）", "赤と青", "落ち着いた（前の色）"])
         self.paletteCombo.setToolTip("面と VR の色合い。分け方は同じで、色の濃さと光沢だけ変わる")
         self.paletteCombo.currentIndex = {"リアル": 0, "赤と青": 1}.get(CUR_PALETTE, 2); f.addRow(Lb("色合い", "muted"), self.paletteCombo)
@@ -1113,6 +1115,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             L._applyClipToModels(L.cutAxis is not None)
             if L.cutAxis is not None: L.setCut(L.cutAxis, getattr(L, "cutFrac", 0.5))
             L.setCapOpacity(self.capSlider.value / 100.0)
+        except Exception as e:                                               # 前は、失敗すると「壁を作り直しています…」のまま止まっていた
+            import traceback; traceback.print_exc(); self._status(f"エラー: 壁を作り直せませんでした（{e}）"); return
         finally:
             qt.QApplication.restoreOverrideCursor()
         self._status("壁の補完: " + ("ON（グレーが補った所）" if on else "OFF（CT 値だけの壁）"))
@@ -1701,6 +1705,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     # ---------------------------------------------------------------- layers
     def buildLayers(self, vol, specs, spacing, boneLayer, status=lambda m: None):
         t0 = time.time()
+        self.buildErrors = []                                                 # 作れなかった部品（前は print だけで、報告は「できました」のままだった）→ checkCase が報告に出す
+        def fail(what, e):
+            import traceback; traceback.print_exc(); print(f"{what}:", e); self.buildErrors.append((what, (str(e) or type(e).__name__)[:60]))
         slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
         for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode"): d.SetVisibility(False)
         for s in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
@@ -1770,7 +1777,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                     remaining[part] = 0
                     status(f"  {gname} 完了")
                 try: self._colorChambersLR()
-                except Exception as e: print("chambers LR:", e)
+                except Exception as e: fail("左右の色分け", e)
                 if remaining.sum() > 50:
                     gname, col = VESSEL_OTHER
                     model = self._surfaceFromBinary(remaining, work, gname, col, sp["smooth"])
@@ -1783,25 +1790,27 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 d = model.GetDisplayNode(); d.SetOpacity(0.18); d.SetColor(0.80, 0.72, 0.66); d.SetSpecular(0.05)
         if boneMask is not None:
             status("レイヤー「骨」・胸骨ワイヤーを生成中…")
-            self._buildBone(arr, work, spacing, segNode, boneMask, body)
+            try: self._buildBone(arr, work, spacing, segNode, boneMask, body)       # 前は、骨で失敗すると心臓壁・心筋まで全部が作られずに終わっていた
+            except Exception as e: fail("骨", e)
         if segNode is not None:
             try:
                 status("人工物（人工弁・ステントなど）と石灰化を探しています…")
                 self.buildImplantsCalc(arr, work, spacing, segNode, boneMask)
-            except Exception as e:
-                import traceback; traceback.print_exc(); print("implants/calc:", e)
+            except Exception as e: fail("人工物・石灰化", e)
         if segNode is not None:
+            ok = False
             try:
                 status("レイヤー「心臓壁」を生成中…")
                 self.visible["心臓壁"] = False
-                self.rebuildWall()
-                status("レイヤー「心筋」を生成中…")
-                self.buildMyocardium()
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                print("wall layer:", e)
+                self.rebuildWall(); ok = True
+            except Exception as e: fail("心臓壁", e)
+            if ok:
+                try:
+                    status("レイヤー「心筋」を生成中…")
+                    self.buildMyocardium()
+                except Exception as e: fail("心筋", e)
         self._updateBounds()
-        self.studioLighting(0, ssao=True)   # 環境光遮蔽で奥行きを出す（GPU 負荷は小さい）
+        self.studioLighting(self._bg(), ssao=True)   # 環境光遮蔽で奥行きを出す（GPU 負荷は小さい）。背景は選んだ色のまま
         self.setView("A", 30)
         status(f"完了（{time.time()-t0:.0f} 秒）")
 
@@ -2055,8 +2064,23 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         sp = max(vol.GetSpacing())                       # 一番粗い方向（たいていスライス厚）
         return float(np.clip(round(0.6 * sp, 1), 0.8, 1.5))   # 2mm→1.2, 0.5mm→0.8, 5mm→1.5
 
+    @staticmethod
+    def _aiFailText(e, tail, kind=""):
+        """AI（別プロセス）が失敗した時の、短い理由。前は「Command '[…PythonSlicer.exe…' returned non-zero exit status 1.」としか出ず、理由（ライセンス・メモリ・ネットワーク）が分からなかった。
+        tail = AI の出力の最後の方の行。分からない時は、最後の 1 行（無ければ元のエラー）"""
+        low = "\n".join(tail[-40:]).lower()
+        if kind != "total" and "license" in low: return "この AI はライセンスの登録が必要です（入口の「AI ライセンスを登録」から。無料）"
+        if any(k in low for k in ("out of memory", "memoryerror", "unable to allocate", "bad allocation", "bad_alloc", "not enough memory")):
+            return "メモリが足りません（ほかのアプリを閉じてから、もう一度作ってください）"
+        if any(k in low for k in ("connectionerror", "urlopen error", "max retries exceeded", "getaddrinfo failed", "name resolution", "connecttimeout", "proxyerror", "sslerror", "certificate verify failed")):
+            return "AI のデータを取り込めませんでした（初回だけネットワークが必要です。つながっているか確かめてください）"
+        last = next((l.strip() for l in reversed(tail) if l.strip()), "")
+        return (f"AI が途中で止まりました: {last[:140]}" if last else (str(e) or type(e).__name__)[:160])
+
     def _runTS(self, vol, kind, status):
-        import TotalSegmentator
+        try: import TotalSegmentator
+        except ImportError as e: raise RuntimeError("AI の拡張（TotalSegmentator）が入っていません。HUCViewS のインストーラーをもう一度実行してください") from e
+        tail = []                                                             # AI の出力の最後の方（失敗した時に理由を探す）
         tsl = TotalSegmentator.TotalSegmentatorLogic()
         tsl.logCallback = lambda t: slicer.app.processEvents()      # AI 計算中も画面（進捗表示）を止めない
         base = {"total": "1/4 臓器を自動認識中", "heartchambers": "2/4 心腔を自動認識中"}.get(kind, "AI で認識中")
@@ -2093,6 +2117,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                     continue
                 if line is None: break
                 if returnOutput: output += line
+                tail.append(line.rstrip()); del tail[:-40]
                 tsl.log(line.rstrip())
             proc.wait()
             if proc.returncode != 0 and not killed[0]: raise CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
@@ -2101,7 +2126,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         import importlib.util as _iu
         if _iu.find_spec("torch") is None or _iu.find_spec("totalsegmentator") is None:   # 新しく入れた PC では初回だけ AI の部品を入れる（読み込みはしない＝速い）
             status("初回だけ AI の部品（PyTorch・TotalSegmentator）を入れています。数分〜十数分かかります…"); slicer.app.processEvents()
-            tsl.setupPythonRequirements()
+            try: tsl.setupPythonRequirements()
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                raise RuntimeError("AI の部品を入れられませんでした（ネットワークにつながっているか確かめてください）: " + (str(e) or type(e).__name__)[:120]) from e
         seg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", f"{vol.GetName()} {kind}")
         inp = self._aiInput(vol, kind)
         seg.SetReferenceImageGeometryParameterFromVolumeNode(inp)
@@ -2111,8 +2139,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 tsl.process(inp, seg, quality="fast", task="total")
             else:
                 tsl.process(inp, seg, task="heartchambers_highres")
-        except Exception:
-            slicer.mrmlScene.RemoveNode(seg); raise
+        except Exception as e:
+            slicer.mrmlScene.RemoveNode(seg)
+            raise RuntimeError(self._aiFailText(e, tail, kind)) from e
         finally:
             if inp is not vol: slicer.mrmlScene.RemoveNode(inp)
         print(f"AI {kind}: {time.time() - t0:.0f} 秒（渡した CT {tuple(round(x, 2) for x in inp.GetSpacing()) if inp is not vol else '元のまま'}）")
@@ -2283,7 +2312,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             w.paintButton.blockSignals(True); w.paintButton.checked = False; w.paintButton.blockSignals(False)
         except Exception: pass
         self._updateBounds()
-        try: self.studioLighting(0, ssao=True)
+        try: self.studioLighting(self._bg(), ssao=True)
         except Exception: pass
         try: self.applyPalette(CUR_PALETTE, rebuildVR=False)               # 保存した症例も、今の色合いで
         except Exception as e: print("palette:", e)
@@ -2347,6 +2376,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             out.append("AI の心腔ラベルがありません（VR の色分け・心腔の表示が粗くなります）" + (f"。心腔の AI が失敗: {why[:120]}" if why else ""))
         err = getattr(self, "vrPrepError", None)
         if err: out.append(f"VR の準備に失敗しました: {err}")
+        be = getattr(self, "buildErrors", None)
+        if be: out.append("一部が作れませんでした: " + "・".join(f"{w}（{e}）" for w, e in be))
         for m in out: print("[CardiacView 点検]", m)
         return out
 
@@ -5608,13 +5639,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         self.shadeLevel = level if level in self.SHADE else "ふつう"
         try: qt.QSettings().setValue(self.SHADE_KEY, self.shadeLevel)
         except Exception: pass
-        self.studioLighting(getattr(self, "_bgIndex", 0), ssao=True); self._applyVRShade()
+        self.studioLighting(self._bg(), ssao=True); self._applyVRShade()
         msg = ""
         if measure and self.shadeLevel != "なし":
             ms = self._frameMs(4)
             if ms > 2.5 * self.PERF_TARGET_MS:                                 # 1 コマ 75 ms を超える（13 fps 未満）→ 1 段下げる
                 down = {"強め": "ふつう", "ふつう": "なし"}[self.shadeLevel]
-                self.shadeLevel = down; self.studioLighting(getattr(self, "_bgIndex", 0), ssao=True); self._applyVRShade()
+                self.shadeLevel = down; self.studioLighting(self._bg(), ssao=True); self._applyVRShade()
                 msg = f"この PC では重かったので「{down}」にしました（1 コマ {ms:.0f} ms）"
         self._view().forceRender(); return msg
 
@@ -5622,11 +5653,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         v = self._view(); vn = self._viewNode()
         vn.SetBoxVisible(False); vn.SetAxisLabelsVisible(False)
         self._noDepthPeeling()
-        self.setBackground(bgIndex)
+        self.setBackground(bgIndex, remember=False)
         try:
             ren = v.renderWindow().GetRenderers().GetFirstRenderer()
             ren.RemoveAllLights()
-            s = self._shade(); self._bgIndex = bgIndex
+            s = self._shade()
             lk = vtk.vtkLightKit(); lk.SetKeyLightIntensity(float(s.get("kI", 0.95)));   # 陰影をつけても全体の明るさは「なし」と同じ（実測で合わせた）
             lk.SetKeyLightWarmth(0.6); lk.SetFillLightWarmth(0.4)
             lk.SetKeyToFillRatio(s["k2f"]); lk.SetKeyToHeadRatio(s["k2h"]); lk.SetKeyToBackRatio(s.get("k2b", 4.0))      # 陰影の段階で、明るい面と暗い面の差を変える
@@ -5676,10 +5707,25 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             d = n.GetDisplayNode() if n else None
             if d is not None and k != "軟部組織": d.SetAmbient(a)
 
-    def setBackground(self, i):
+    BG_KEY = "CardiacView/bg"
+
+    def _bg(self):
+        """背景の色（0 = 黒, 1 = 濃いグレー, 2 = 白）。この症例で選んだもの → 無ければ前に選んだもの（PC ごとに覚える）"""
+        i = getattr(self, "_bgIndex", None)
+        if i is None:
+            try: i = int(qt.QSettings().value(self.BG_KEY, 0) or 0)
+            except Exception: i = 0
+        return i if i in (0, 1, 2) else 0
+
+    def setBackground(self, i, remember=True):
         vn = self._viewNode()
+        i = int(i) if int(i) in (0, 1, 2) else 0
         col = [(0, 0, 0), (0.16, 0.17, 0.19), (1, 1, 1)][i]
         vn.SetBackgroundColor(*col); vn.SetBackgroundColor2(*col)
+        self._bgIndex = i                                                    # 前はここで覚えていなかったので、陰影を変える・作り直す・症例を開くたびに黒へ戻っていた（欄は「白」のまま）
+        if remember:
+            try: qt.QSettings().setValue(self.BG_KEY, i)
+            except Exception: pass
 
     # ---------------------------------------------------------------- camera
     def _sceneCenter(self):
