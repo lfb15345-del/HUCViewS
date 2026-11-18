@@ -16,6 +16,15 @@ APP_SUBTITLE = "心臓3Dビューア"
 CASES_DIRNAME = "HeartView症例"
 
 
+def appVersion():
+    """この PC に入っている版（app\version.txt。「年月日-時分」）。読めなければ """""
+    try:
+        d = os.environ.get("HEARTVIEW_HOME") or ""
+        if not os.path.exists(os.path.join(d, "version.txt")): d = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return open(os.path.join(d, "version.txt"), encoding="ascii").read().strip()[:20]
+    except Exception: return ""
+
+
 def casesPath():
     """症例の保存先（作らない）"""
     return os.path.join(qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation), CASES_DIRNAME)
@@ -431,6 +440,10 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         # ---------------- ヘッダー
         h = qt.QHBoxLayout(); v.addLayout(h)
         h.addWidget(lab(APP_TITLE, "title")); h.addWidget(lab(APP_SUBTITLE, "muted")); h.addStretch(1)
+        ver = appVersion()
+        if ver:                                                              # どの版が入っているかを画面で確かめられるように（更新が届いたかどうかの確認用）
+            self.versionLabel = lab(f"版 {ver}", "muted"); self.versionLabel.setWordWrap(False)
+            self.versionLabel.setToolTip("この PC に入っている版（年月日-時分）。起動の時に、新しい版があれば自動で入れ替わります"); h.addWidget(self.versionLabel)
         v.addWidget(lab("研究・教育用。診断・治療方針は必ず元画像で確認してください。", "muted"))
 
         # ---------------- 1

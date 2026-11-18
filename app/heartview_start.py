@@ -11,12 +11,55 @@ def _readSource(root):
     return None
 
 
+def _shouldUpdate(new, cur):
+    """新しい版に入れ替えるか。同じなら入れ替えない。どちらも「年月日-時分」の形で、相手のほうが古い時も入れ替えない
+    （前は「違えば入れ替える」だったので、古い版が返ってきた時に古い版へ戻ることがあった）"""
+    import re
+    if not new or new == cur: return False
+    ok = lambda v: bool(re.match(r"^\d{8}-\d{4}$", v or ""))
+    if ok(new) and ok(cur) and new < cur: return False
+    return True
+
+
+def _copyApp(srcApp, HV):
+    """app の中身を新しい版に入れ替える。
+    1) まず全部を「<名前>.new」として写す（ここで失敗したら .new を消してやめる = 今の版は無傷のまま）
+    2) 入れ替える。version.txt は最後（前は順番が決まっておらず、途中で止まると「更新済み」と思い込んで、新旧が混ざったまま直らないことがあった）"""
+    import shutil
+    rels = []
+    for r, ds, fs in os.walk(srcApp):
+        ds[:] = [d for d in ds if d != "__pycache__"]
+        rels += [os.path.relpath(os.path.join(r, f), srcApp) for f in fs if not f.endswith((".pyc", ".new"))]
+    rels.sort(key=lambda q: (q.replace("\\", "/") == "version.txt", q))
+    done = []
+    try:
+        for rel in rels:
+            dst = os.path.join(HV, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(os.path.join(srcApp, rel), dst + ".new"); done.append(dst + ".new")
+    except Exception:
+        for q in done:
+            try: os.remove(q)
+            except Exception: pass
+        raise
+    for rel in rels: os.replace(os.path.join(HV, rel) + ".new", os.path.join(HV, rel))
+
+
+def _slicerAtLeast(minv):
+    """この Slicer が、その版の求める Slicer（例 "5.8"）以上か。分からない時は True"""
+    try:
+        import slicer
+        want = tuple(int(x) for x in str(minv).strip().split(".")[:2])
+        return (int(slicer.app.majorVersion), int(slicer.app.minorVersion)) >= want
+    except Exception:
+        return True
+
+
 def _autoUpdate(HV):
     """起動時の自動更新。
     - update_source.txt が https:// なら GitHub Releases の latest.json を見て、新しければ app.zip を取ってきて入れ替える（Windows / Mac / Linux 共通）
     - NAS のパスなら、版が新しければ app フォルダをコピー（Windows は起動前に update.ps1 でも同じことをしている）
     届かなければ何もしない（今の版で起動）"""
-    import shutil
     root = os.path.dirname(HV)
     src = _readSource(root)
     if not src: return
@@ -32,9 +75,9 @@ def _autoUpdate(HV):
             nv = os.path.join(src, "app", "version.txt")
             if not os.path.exists(nv): return
             new = open(nv, encoding="ascii").read().strip()
-            if new == cur: return
+            if not _shouldUpdate(new, cur): return
             print(f"[HUCViewS] 更新します {cur} → {new}（{src}）")
-            shutil.copytree(os.path.join(src, "app"), HV, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            _copyApp(os.path.join(src, "app"), HV)
     except Exception as e:
         print("[HUCViewS] 更新できませんでした（今の版で起動します）:", e)
 
@@ -75,20 +118,24 @@ def _updateFromWeb(HV, manifestUrl, cur):
     import json, hashlib, zipfile, io, shutil, tempfile
     man = json.loads(_fetch(_resolveManifest(manifestUrl)).decode("utf-8"))
     new = str(man.get("version", "")).strip()
-    if not new or new == cur: return
+    if not _shouldUpdate(new, cur): return
+    if man.get("min_slicer") and not _slicerAtLeast(man["min_slicer"]):
+        print(f"[HUCViewS] 新しい版 {new} は Slicer {man['min_slicer']} 以上が必要です。この Slicer では更新しません（インストーラーを実行し直してください）"); return
     print(f"[HUCViewS] 新しい版があります {cur or '(なし)'} → {new}。ダウンロード中…")
     data = _fetch(man["app_zip"], timeout=60)
     if man.get("sha256") and hashlib.sha256(data).hexdigest() != man["sha256"].lower():
         raise RuntimeError("ダウンロードしたファイルが壊れています（sha256 不一致）")
     tmp = tempfile.mkdtemp(prefix="hucviews_upd_")
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for n in z.namelist():                                      # zip の外に書き出す名前は拒否（安全のため）
-            if n.startswith("/") or ".." in n.replace("\\", "/").split("/"): raise RuntimeError("zip の中身が不正です")
-        z.extractall(tmp)
-    srcApp = os.path.join(tmp, "app") if os.path.isdir(os.path.join(tmp, "app")) else tmp
-    if not os.path.exists(os.path.join(srcApp, "heartview_start.py")): raise RuntimeError("zip に app がありません")
-    shutil.copytree(srcApp, HV, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for n in z.namelist():                                  # zip の外に書き出す名前は拒否（安全のため）
+                if n.startswith("/") or ".." in n.replace("\\", "/").split("/"): raise RuntimeError("zip の中身が不正です")
+            z.extractall(tmp)
+        srcApp = os.path.join(tmp, "app") if os.path.isdir(os.path.join(tmp, "app")) else tmp
+        if not os.path.exists(os.path.join(srcApp, "heartview_start.py")): raise RuntimeError("zip に app がありません")
+        _copyApp(srcApp, HV)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)                      # 失敗した時も、取ってきたものを一時フォルダに残さない
     print(f"[HUCViewS] {new} に更新しました")
 
 

@@ -19,7 +19,7 @@ function ReadVer($p) { if (Test-Path $p) { (Get-Content $p -Raw).Trim() } else {
 # 1) 丸ごと更新（Slicer や AI データが変わったとき）
 $nv = ReadVer (Join-Path $full 'full_version.txt'); $cv = ReadVer (Join-Path $root 'full_version.txt')
 if ($nv -and $nv -ne $cv) {
-  $running = Get-Process SlicerApp-real -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root*" }
+  $running = Get-Process SlicerApp-real -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root\*" }
   if ($running) { Log "ビューアが起動中なので丸ごと更新は次回に回します（$cv → $nv）" }
   else {
     Log "丸ごと更新します $cv → $nv（数分かかります）"
@@ -30,11 +30,23 @@ if ($nv -and $nv -ne $cv) {
   }
 }
 # 2) アプリ部分だけの更新（普段の改良はこちら）
+#    ・version.txt は最後に写す。前は途中で写っていたので、写している途中で止まる（NAS が切れる・電源が落ちる）と「更新済み」と思い込み、新旧のファイルが混ざったまま直らなかった
+#    ・NAS の版がこの PC より古い時は入れ替えない（古い版へ戻さない）
+#    ・ビューアが動いている間は入れ替えない（動いている途中でファイルが入れ替わると、後から読み込む部品だけ新しい版になって食い違う）。次の起動の時に更新する
 $na = ReadVer (Join-Path $nas 'app\version.txt'); $ca = ReadVer (Join-Path $root 'app\version.txt')
+$fmt = '^\d{8}-\d{4}$'
 if ($na -and $na -ne $ca) {
-  Log "アプリを更新します $ca → $na"
-  robocopy (Join-Path $nas 'app') (Join-Path $root 'app') /MIR /R:1 /W:1 /NFL /NDL /NP /NJH /XD __pycache__ | Out-Null
-  if ($LASTEXITCODE -lt 8) { Log "アプリ更新 完了" } else { Log "アプリ更新に失敗（robocopy $LASTEXITCODE）" }
-  foreach ($f in @('README_はじめに.txt')) { $p = Join-Path $nas $f; if (Test-Path $p) { Copy-Item $p (Join-Path $root $f) -Force } }
+  $runApp = Get-Process SlicerApp-real -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root\*" }
+  if (($na -match $fmt) -and ($ca -match $fmt) -and ($na -lt $ca)) { Log "NAS の版（$na）がこの PC の版（$ca）より古いので、更新しません" }
+  elseif ($runApp) { Log "ビューアが起動中なので、アプリの更新は次回に回します（$ca → $na）" }
+  else {
+    Log "アプリを更新します $ca → $na"
+    robocopy (Join-Path $nas 'app') (Join-Path $root 'app') /MIR /R:1 /W:1 /NFL /NDL /NP /NJH /XD __pycache__ /XF version.txt | Out-Null
+    if ($LASTEXITCODE -lt 8) {
+      Copy-Item (Join-Path $nas 'app\version.txt') (Join-Path $root 'app\version.txt') -Force -ErrorAction SilentlyContinue
+      if ($?) { Log "アプリ更新 完了" } else { Log "アプリ更新: 版の印を写せませんでした。次回また試します" }
+    } else { Log "アプリ更新に失敗（robocopy $LASTEXITCODE）。次回また試します" }
+    foreach ($f in @('README_はじめに.txt')) { $p = Join-Path $nas $f; if (Test-Path $p) { Copy-Item $p (Join-Path $root $f) -Force } }
+  }
 }
 exit 0
