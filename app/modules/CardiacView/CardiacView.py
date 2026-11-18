@@ -411,6 +411,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.volumeSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
         self.volumeSelector.addEnabled = False; self.volumeSelector.removeEnabled = False
         self.volumeSelector.noneEnabled = False; self.volumeSelector.showHidden = False
+        self.volumeSelector.showChildNodeTypes = False                        # ラベル・VR 用の画像（別の種類の画像）は CT の欄に出さない
         self.volumeSelector.setMRMLScene(slicer.mrmlScene)
         self.volumeSelector.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed); self.volumeSelector.setMinimumWidth(80)
         r.addWidget(self.volumeSelector, 1)
@@ -977,7 +978,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def _onLayerCheck(self, name, on):
         L = self.logic; L.setLayerVisible(name, on)
         if getattr(L, "on4D", False) and on and not any(k in L.STATIC_4D for k in L._namesFor(name)):
-            self._status(f"4D 中は「{name}」の面は出しません（動く心臓と重なるため）。「面の 3D に戻る」で表示されます。骨・軟部組織・人工物は 4D でも一緒に出せます。")
+            self._status(f"4D 中は「{name}」の面は出しません（動く心臓と重なるため）。「4D を終了」で表示されます。骨・軟部組織・人工物は 4D でも一緒に出せます。")
 
     def _onPlay4D(self, on):
         L = self.logic
@@ -1004,7 +1005,8 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
 
     def _end4D(self):
         if self.play4DButton.checked: self.play4DButton.checked = False
-        self.logic.show4D(False); self._label4D(); self._status("面の 3D に戻しました")
+        self.logic.show4D(False); self._label4D()
+        self._status("4D を終了しました（" + ("色分け VR" if getattr(self.logic, "vrOn", False) else "面") + " の表示に戻りました）")
 
     # ---------------------------------------------------------------- UI 部品（AortaSizing と同じ見た目）
     def _card(self, parent_layout, title=None, sub=None):
@@ -1089,7 +1091,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def _onVR(self, mode):
         btn, other = (self.vrTissueButton, self.vrBloodButton) if mode == "tissue" else (self.vrBloodButton, self.vrTissueButton)
         on = btn.checked
-        if on and getattr(self.logic, "on4D", False): self._end4D()
+        if getattr(self.logic, "on4D", False): self._end4D()                 # 前は「VR を出す」時だけ 4D を終えていた → 4D の途中で VR を消すと、動く VR の上に面が重なり、4D を終えると消したはずの VR が戻った
         other.blockSignals(True); other.checked = False; other.blockSignals(False)
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
@@ -2254,6 +2256,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e:
             import traceback; traceback.print_exc()
             self.vrPrepError = str(e); print("VR 準備:", e)
+        self._hideInternalVolumes()
         rep = self.qualityReport(vol, c, time.time() - t0)
         issues = self.checkCase()
         if issues: rep += "\n⚠ 点検: " + "／".join(issues)
@@ -2262,6 +2265,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     def adoptScene(self):
         """保存した症例（.mrb）を開いたあと、シーン中の CV モデルを引き継ぐ"""
         import json
+        self._hideInternalVolumes()                                          # 前の版で保存した症例でも、内部用の画像を CT の欄に出さない
         self.layerModels = {}; self.visible = {}
         for n in slicer.util.getNodesByClass("vtkMRMLModelNode"):
             nm = n.GetName()
@@ -2356,6 +2360,19 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         fit = [v for v in cands if same(v)]
         if fit: return min(fit, key=lambda v: min(v.GetSpacing())), "作業用の画像と同じ範囲"
         return None, f"元の CT「{name}」がシーンにない"
+
+    def _hideInternalVolumes(self):
+        """内部用の画像（作業用・VR 用・4D の位相・一時的なもの）を、CT の欄などの「選ぶ欄」に出さない。
+        前は CT の欄に並んでいて、選んで作ると違う画像から 3D を作ってしまった。戻り値: 隠した数"""
+        n = 0
+        try:
+            for v in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+                nm = v.GetName() or ""; inner = nm.startswith(("cv_", "CV "))
+                if not inner and self._isWorkVolume(v):                       # 作業用の画像は、元の CT がある時だけ隠す（元の CT が無い古い症例では、これを選んで作り直せるように残す）
+                    src = self._findSourceFor(v)[0]; inner = src is not None and src is not v
+                if inner and not v.GetHideFromEditors(): v.SetHideFromEditors(True); n += 1
+        except Exception as e: print("hide internal volumes:", e)
+        return n
 
     def resolveSource(self, vol):
         """CT の欄で作業用の画像が選ばれていたら元の CT に読み替える。(node, 説明)"""
@@ -4295,6 +4312,19 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             ca.GetTextProperty().SetColor(1, 0.9, 0.5); v.scheduleRender()
         except Exception: pass
 
+    VR_KEEP = ("パッチ",)                                                  # VR の中でも面で出すもの（VR は CT 値で透けるので、薄い布が見えなくなる）
+
+    def _applyLayerVis(self):
+        """面の出し方を「今の層の選び方」（self.visible）と VR の状態に合わせる。VR の表示中は VR_KEEP だけを出す。
+        前は VR を消した時に「VR を出した時の控え」に戻していたので、VR の途中で層のチェックを変えると、画面とチェックが食い違った"""
+        vr = bool(getattr(self, "vrOn", False))
+        for k, n in self.layerModels.items():
+            if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(self.visible.get(k, False)) and (not vr or k in self.VR_KEEP))
+        if vr:
+            cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
+            if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
+        else: self.updateMyoCap()
+
     def showVR(self, on, mode=None):
         first = on and getattr(self, "vrDisplay", None) is None
         if first:                                                             # 初めての VR で Slicer がカメラを戻してしまうので、今の向き・大きさを保つ
@@ -4312,26 +4342,16 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if mode is not None and mode != getattr(self, "vrMode", None):
             self.vrMode = mode; self.vrWin = None; self.setVRWindow()
         self.vrOn = bool(on)
-        if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(self.vrOn)
-        if self.vrOn:
-            self._vrSaved = {k: self.visible.get(k, False) for k in self.layerModels}
-            keep = ("パッチ",)                                                # パッチは VR の中でも面で出す（VR は CT 値で透けるので、薄い布が見えなくなる）
-            for k, n in self.layerModels.items():
-                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(k in keep and self._vrSaved.get(k)))
-            cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
-            if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
-        else:
-            for k, vis in getattr(self, "_vrSaved", {}).items():
-                n = self.layerModels.get(k)
-                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(vis)
-            self.updateMyoCap()
+        d4 = bool(getattr(self, "on4D", False))                              # 4D の途中は、動く VR が画面を持つ。ここでは「VR を出したいか」だけ覚えて、4D を終えた時（show4D）に合わせる
+        if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(self.vrOn and not d4)
+        if not d4: self._applyLayerVis()
         try:
             ren = self._view().renderWindow().GetRenderers().GetFirstRenderer(); vs = ren.GetVolumes(); vs.InitTraversal()
             for _ in range(vs.GetNumberOfItems()): vs.GetNextVolume().GetMapper().SetUseJittering(True)   # OFF だと木目状の細かい線が出る
         except Exception: pass
         try: self._applyVRShade()
         except Exception as e: print("VR shade:", e)
-        if on and (first or getattr(self, "vrStillQ", None) is None):
+        if on and not d4 and (first or getattr(self, "vrStillQ", None) is None):
             try: self._tuneVR()
             except Exception as e: print("tuneVR:", e)
         self.installMouse(); self._installPerfMon(); self._vrLabel(); self._view().forceRender()
@@ -5217,6 +5237,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if br is None or not br.IsA("vtkMRMLSequenceBrowserNode"):
             self.br4D = self.seq4D = self.proxy4D = self.vr4D = None; return False
         self.br4D = br; self.seq4D = br.GetMasterSequenceNode(); self.proxy4D = br.GetProxyNode(self.seq4D)
+        self._hideInternalVolumes()
         self.labels4D = (self.seq4D.GetAttribute("CV.4D.labels") or "").split("|")
         vrl = slicer.modules.volumerendering.logic()
         dn = vrl.GetFirstVolumeRenderingDisplayNode(self.proxy4D)
@@ -5334,14 +5355,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self.play4D(False)
             st = getattr(self, "_st4D", None) or {}
             if getattr(self, "vr4D", None) is not None: self.vr4D.SetVisibility(False)
-            for k, n in self.layerModels.items():                            # 面は「見せたい状態」（self.visible）に戻す
-                if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(self.visible.get(k, False)))
-            if st.get("vr") and getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(True)
+            self.on4D = False
+            # 面と VR は「今の状態」に合わせる。前は、面をすべて戻した上で 4D の前の VR も出していたので、VR を出したまま 4D を終えると面と VR が重なった。
+            # また 4D の前の VR の状態を控えから戻していたので、4D の途中で VR を消しても、終えた時に VR が戻った
+            if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(bool(getattr(self, "vrOn", False)))
+            self._applyLayerVis()
             for nm, vid in st.get("bg", {}).items():
                 w = lm.sliceWidget(nm)
                 if w is not None: w.sliceLogic().GetSliceCompositeNode().SetBackgroundVolumeID(vid)
-            self.on4D = False
-            try: self.updateMyoCap(); self._vrLabel()
+            try: self._vrLabel()
             except Exception: pass
         try: self._clipSync()
         except Exception: pass
