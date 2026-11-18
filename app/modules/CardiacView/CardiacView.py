@@ -358,6 +358,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = CardiacViewLogic()
+        qt.QTimer.singleShot(0, lambda: self.logic._noDepthPeeling())          # 起動直後から深さの剥離を OFF に保つ（AMD で固まる）
         self.layerRows = []
         app = getattr(slicer, "heartviewAppMode", False)
         B, Lb = self._btn, self._lab
@@ -1125,6 +1126,12 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def onQuick(self):
         vol = self.volumeSelector.currentNode()
         if not vol: self._status("CT を選んでください"); return
+        try:
+            vol, note = self.logic.resolveSource(vol)
+            if note:
+                print("[CardiacView 点検]", note)
+                if not self.logic._isWorkVolume(vol): self.volumeSelector.setCurrentNode(vol)
+        except Exception as e: print("[CardiacView 点検] 元の CT の読み替えに失敗:", e)
         try:
             qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
             specs = self._layerSpecs()
@@ -1986,7 +1993,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
     DEFAULT_CAL = dict(wall_lo=-20.0, wall_hi=175.0, blood_lo=180.0, blood_hi=900.0)
 
     def _cal(self):
-        c = dict(self.DEFAULT_CAL); c.update(getattr(self, "calib", {}) or {}); return c
+        # 測れなかった値（None）は入れない → 使う側の既定値が効く（心腔ラベルが無いと rv=None が残り、VR の準備が float(None) で落ちていた）
+        c = dict(self.DEFAULT_CAL); c.update({k: v for k, v in (getattr(self, "calib", {}) or {}).items() if v is not None}); return c
 
     def loadDicomFolder(self, folder):
         from DICOMLib import DICOMUtils
@@ -2142,8 +2150,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self._runTS(vol, "total", status)
         if self._segFor(vol, "heartchambers") is None:
             status("2/4 心腔を自動認識中（AI）…"); slicer.app.processEvents()
+            self.hcError = None
             try: self._runTS(vol, "heartchambers", status)
-            except Exception as e: print("heartchambers:", e)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.hcError = str(e) or type(e).__name__; print("heartchambers:", e)
         spacing = self.autoSpacing(vol); self.lastSpacing = spacing
         status("3/4 造影の具合を測って閾値を調整中…"); slicer.app.processEvents()
         work = self._resample(vol, spacing); self.workVolume = work
@@ -2163,11 +2174,17 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try:                                                                  # VR もここで 1 回だけ作っておく（保存されて、開いた時に VR がすぐ出る）
             status("VR を準備中…"); slicer.app.processEvents()
             c0 = self._camera(); cst = (c0.GetPosition(), c0.GetFocalPoint(), c0.GetViewUp(), c0.GetParallelScale())
+            self.vrPrepError = None
             self.setupVR(status)
             if self.vrDisplay is not None: self.vrDisplay.SetVisibility(False)
             c0.SetPosition(*cst[0]); c0.SetFocalPoint(*cst[1]); c0.SetViewUp(*cst[2]); c0.SetParallelScale(cst[3])
-        except Exception as e: print("VR 準備:", e)
-        return self.qualityReport(vol, c, time.time() - t0)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.vrPrepError = str(e); print("VR 準備:", e)
+        rep = self.qualityReport(vol, c, time.time() - t0)
+        issues = self.checkCase()
+        if issues: rep += "\n⚠ 点検: " + "／".join(issues)
+        return rep
 
     def adoptScene(self):
         """保存した症例（.mrb）を開いたあと、シーン中の CV モデルを引き継ぐ"""
@@ -2181,14 +2198,19 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             d = n.GetDisplayNode(); self.visible[key] = bool(d.GetVisibility()) if d else False
         if "心筋" in self.layerModels: self.visible["心筋"] = True
         self.workVolume = None; self.sourceVolume = None
-        for v in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
-            if v.GetAttribute("CardiacView.calib") is not None or "_cv" in v.GetName():
-                self.workVolume = v
-                try: self.calib = json.loads(v.GetAttribute("CardiacView.calib") or "{}")
-                except Exception: self.calib = {}
-                src = v.GetAttribute("CardiacView.source") or v.GetName().split("_cv")[0]
-                self.sourceVolume = slicer.mrmlScene.GetFirstNodeByName(src)
-                break
+        vols = [v for v in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                if not v.IsA("vtkMRMLLabelMapVolumeNode") and not v.IsA("vtkMRMLVectorVolumeNode")]   # VR（CV VR）・ラベルは作業用の画像ではない
+        work = next((v for v in vols if v.GetAttribute("CardiacView.calib") is not None), None) \
+            or next((v for v in vols if "_cv" in v.GetName()), None)
+        if work is not None:
+            self.workVolume = work
+            try: self.calib = json.loads(work.GetAttribute("CardiacView.calib") or "{}")
+            except Exception: self.calib = {}
+            try: self.sourceVolume, how = self._findSourceFor(work)
+            except Exception as e:                                             # 探し方で失敗しても、症例は前の版と同じように開く
+                import traceback; traceback.print_exc()
+                self.sourceVolume = slicer.mrmlScene.GetFirstNodeByName(work.GetAttribute("CardiacView.source") or work.GetName().split("_cv")[0]); how = f"名前（探し直しに失敗: {e}）"
+            print(f"[CardiacView 点検] 作業用の画像: {work.GetName()} → 元の CT: {self.sourceVolume.GetName() if self.sourceVolume else 'なし'}（{how}）")
         try: self.lastSpacing = float(min(self.workVolume.GetSpacing())) if self.workVolume else 1.2
         except Exception: self.lastSpacing = 1.2
         self.clip = slicer.mrmlScene.GetFirstNodeByName("CV clip")
@@ -2221,6 +2243,67 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: self.applyPalette(CUR_PALETTE, rebuildVR=False)               # 保存した症例も、今の色合いで
         except Exception as e: print("palette:", e)
         return len(self.layerModels)
+
+    _WORK_RE = re.compile(r"_cv\d+(?:\.\d+)?mm(?:_\d+)?$")      # 作業用の画像の名前（_resample が付ける: <元の名前>_cv0.8mm）
+
+    def _isWorkVolume(self, v):
+        """CardiacView が作り直した作業用の画像（<元の名前>_cv<格子>mm）か。
+        0.8 mm 等方に近い CT は作り直さない（_resample が元の CT をそのまま返す）ので、元の CT 自身に印（calib）が付く。それは元の CT として扱う
+        （印だけで作業用とみなすと「元の CT が見つからない」「作業用の画像が使われています」と誤って出る）"""
+        return v is not None and bool(self._WORK_RE.search(v.GetName() or ""))
+
+    def _findSourceFor(self, work):
+        """作業用の画像から元の CT を探す。(node, 見つけ方)。
+        0) 作り直していない CT は自分自身　1) 保存してある元の名前　2) AI ラベル（全身・心腔）が作られた元の CT で、範囲が同じもの
+        3) 作業用の画像と同じ範囲の CT。範囲の違う CT（術前 CT など）は取らない（違う CT で VR を作るより、作業用の画像で作る方が安全）
+        （症例を開いた後に元の CT が名前で見つからず、VR が「先に 3D を自動で作る」で止まった。2026-11-18）"""
+        if work is None: return None, "作業用の画像なし"
+        wname = work.GetName() or ""
+        if not self._WORK_RE.search(wname):                                  # 作り直していない CT（0.8 mm 等方に近い）: 元の CT 自身が作業用を兼ねている
+            return (work, "元の CT をそのまま使った症例") if work.GetImageData() is not None else (None, "画像が空")
+        def usable(v):
+            return (v is not None and v is not work and v.IsA("vtkMRMLScalarVolumeNode") and not v.IsA("vtkMRMLLabelMapVolumeNode")
+                    and not v.IsA("vtkMRMLVectorVolumeNode") and not self._isWorkVolume(v) and v.GetImageData() is not None)
+        vols = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+        name = work.GetAttribute("CardiacView.source") or self._WORK_RE.sub("", wname)
+        for v in vols:
+            if v.GetName() == name and usable(v): return v, "名前"
+        wb = [0.0] * 6; work.GetRASBounds(wb)
+        def same(v):                                                         # 作業用の画像は元の CT を格子だけ変えたもの → 範囲はほぼ同じ（術前 CT など別の CT を取らない）
+            b = [0.0] * 6; v.GetRASBounds(b)
+            return max(abs(b[i] - wb[i]) for i in range(6)) <= 5.0
+        refs = []
+        for n in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+            r = n.GetNodeReference("referenceImageGeometryRef")
+            if usable(r) and n.GetSegmentation().GetNumberOfSegments() >= 5 and r not in refs: refs.append(r)
+        for r in refs:
+            if same(r): return r, "AI ラベルの元の画像"
+        cands = [v for v in vols if usable(v) and not (v.GetName() or "").startswith(("CV ", "cv_", "HV "))]
+        fit = [v for v in cands if same(v)]
+        if fit: return min(fit, key=lambda v: min(v.GetSpacing())), "作業用の画像と同じ範囲"
+        return None, f"元の CT「{name}」がシーンにない"
+
+    def resolveSource(self, vol):
+        """CT の欄で作業用の画像が選ばれていたら元の CT に読み替える。(node, 説明)"""
+        if not self._isWorkVolume(vol): return vol, ""
+        src, how = self._findSourceFor(vol)
+        if src is None: return vol, f"作業用の画像「{vol.GetName()}」が選ばれていますが、元の CT が見つかりません（{how}）"
+        return src, f"作業用の画像「{vol.GetName()}」の代わりに元の CT「{src.GetName()}」を使います（{how}）"
+
+    def checkCase(self):
+        """症例を開いた後・3D を作った後の点検。足りないもの・おかしいものの文のリスト（空なら問題なし）"""
+        out = []
+        src = getattr(self, "sourceVolume", None)
+        if src is None: out.append("元の CT が見つかりません（VR・作り直しができません）")
+        elif self._isWorkVolume(src): out.append(f"元の CT の代わりに作業用の画像「{src.GetName()}」が使われています")
+        if self._findSegmentation() is None: out.append("AI の全身ラベルがありません（VR が作れません）")
+        if self._findChambers() is None:
+            why = getattr(self, "hcError", None)
+            out.append("AI の心腔ラベルがありません（VR の色分け・心腔の表示が粗くなります）" + (f"。心腔の AI が失敗: {why[:120]}" if why else ""))
+        err = getattr(self, "vrPrepError", None)
+        if err: out.append(f"VR の準備に失敗しました: {err}")
+        for m in out: print("[CardiacView 点検]", m)
+        return out
 
     def _resample(self, vol, spacing):
         cur = vol.GetSpacing()
@@ -2269,6 +2352,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if all(abs(sp[i] - cur[i]) < 0.02 for i in range(3)): return vol
         return self._resliceTo(vol, sp, f"cv_ai_{kind}", cubic=False)
 
+    TOTAL_MIN_SEGS = 5      # 名前で分からない全身ラベルとみなす最小の区域の数
+
     def _segFor(self, vol, kind):
         """vol に対応するセグメンテーション。kind: "total" / "heartchambers" """
         if vol is None: return None
@@ -2278,19 +2363,28 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             sg = n.GetSegmentation()
             names = [sg.GetNthSegment(i).GetName().lower() for i in range(sg.GetNumberOfSegments())]
             isHC = any("left ventricle" in x for x in names)
-            ok = isHC if kind == "heartchambers" else (len(names) > 20 and not isHC)
-            if not ok: continue
+            if not names: continue
+            if kind == "total" and n.GetName() in want: return n               # この CT 用に作った全身ラベル（名前で分かる）は、中身（区域の数など）によらず使う
+            if isHC != (kind == "heartchambers"): continue
             if n.GetName() in want: return n
+            if kind == "total" and len(names) < self.TOTAL_MIN_SEGS: continue  # 名前で分からない時だけ数で見る（視野の狭い心臓 CT は全身ラベルが 20 個以下になりうる → 前は見つからず VR が作れなかった）
             r = n.GetNodeReference("referenceImageGeometryRef")
             if r is not None and r.GetID() == vol.GetID(): cands.append(n)
-        return cands[0] if cands else None
+        return max(cands, key=lambda n: n.GetSegmentation().GetNumberOfSegments()) if cands else None
 
     def _findSegmentation(self):
         src = getattr(self, "sourceVolume", None)
-        if src is not None: return self._segFor(src, "total")
-        for n in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
-            if n.GetSegmentation().GetNumberOfSegments() > 20: return n
-        return None
+        if src is not None:
+            n = self._segFor(src, "total")
+            if n is not None: return n
+        best = None
+        for n in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):          # 心腔ラベルではない AI ラベルのうち、区域が一番多いもの
+            sg = n.GetSegmentation(); k = sg.GetNumberOfSegments()
+            named = n.GetName().endswith((" total", " segmentation"))
+            if not named and any("left ventricle" in sg.GetNthSegment(i).GetName().lower() for i in range(k)): continue
+            if (named and k > 0) or k >= self.TOTAL_MIN_SEGS:
+                if best is None or k > best.GetSegmentation().GetNumberOfSegments(): best = n
+        return best
 
     def _segmentMaskArray(self, segNode, refVol, keywords):
         sg = segNode.GetSegmentation()
@@ -2664,8 +2758,10 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     def _findChambers(self):
         src = getattr(self, "sourceVolume", None)
-        if src is not None: return self._segFor(src, "heartchambers")
-        for n in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        if src is not None:
+            n = self._segFor(src, "heartchambers")
+            if n is not None: return n
+        for n in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):          # 元の CT から見つからない時も、シーンの心腔ラベルを使う
             sg = n.GetSegmentation()
             if any("left ventricle" in sg.GetNthSegment(i).GetName().lower() for i in range(sg.GetNumberOfSegments())):
                 return n
@@ -3227,8 +3323,16 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         import SimpleITK as sitk
         from scipy import ndimage
         t0 = time.time()
-        post = getattr(self, "sourceVolume", None); hcPost = self._findChambers()
-        if post is None or hcPost is None: raise RuntimeError("先に「3D を自動で作る」を行ってください（心腔のラベルが要ります）")
+        post = getattr(self, "sourceVolume", None)
+        if post is None and getattr(self, "workVolume", None) is not None:
+            try:
+                post, how = self._findSourceFor(self.workVolume)
+                if post is not None: self.sourceVolume = post; print(f"[CardiacView 点検] パッチ: 元の CT を探し直しました: {post.GetName()}（{how}）")
+            except Exception as e: print("[CardiacView 点検] パッチ: 元の CT の探し直しに失敗:", e)
+        hcPost = self._findChambers()
+        if post is None or hcPost is None:
+            miss = (["元の CT"] if post is None else []) + (["AI の心腔ラベル"] if hcPost is None else [])
+            raise RuntimeError(f"パッチを探すのに必要な {'・'.join(miss)} が見つかりません。上の青いボタンで 3D を作り直してください")
         status("パッチ: 術後の CT で薄い仕切りを探しています…")
         P = self._thinPartition(post, hcPost, w=self.PATCH_THIN_MM)
         thin = P["thin"]; Mp = P["M"]; vox = 0.45 ** 3
@@ -3678,8 +3782,18 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         from scipy import ndimage
         self._syncVRPalette()
         src = getattr(self, "sourceVolume", None)
+        if src is None or self._isWorkVolume(src):                       # 症例を開いた後に元の CT が結び付いていない → 探し直す
+            w = getattr(self, "workVolume", None) or (src if self._isWorkVolume(src) else None)
+            try: found, how = self._findSourceFor(w) if w is not None else (None, "作業用の画像もない")
+            except Exception as e: found, how = None, f"探し直しに失敗: {e}"
+            if found is not None:
+                self.sourceVolume = src = found; print(f"[CardiacView 点検] VR: 元の CT を探し直しました: {src.GetName()}（{how}）")
+            elif w is not None:
+                src = w; print(f"[CardiacView 点検] VR: 元の CT が無いので作業用の画像「{w.GetName()}」で VR を作ります（{how}）")
         seg = self._findSegmentation(); hc = self._findChambers()
-        if src is None or seg is None: raise RuntimeError("先に「3D を自動で作る」を行ってください")
+        if src is None or seg is None:
+            miss = (["元の CT"] if src is None else []) + (["AI の全身ラベル"] if seg is None else [])
+            raise RuntimeError(f"VR に必要な {'・'.join(miss)} が見つかりません。上の青いボタンで 3D を作り直してください（症例ファイルに入っていない可能性があります）")
         status("VR を準備中（心臓まわりの切り出し・色分け）…")
         vkeys = ("atrial appendage", "aorta", "pulmonary vein", "vena cava", "pulmonary artery", "brachiocephalic trunk")
         region = self._segmentMaskArray(seg, src, vkeys)
@@ -5432,6 +5546,24 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             print("lighting:", e)
         v.forceRender()
 
+    def _installNoPeelGuard(self):
+        """深さの剥離は、シーンを空にした・読み込んだ後も含めていつも OFF に保つ（Slicer の既定は ON。AMD の GPU で描画が終わらなくなる）。
+        3D の view node が変わるたびに見張る（アプリ全体で 1 つ）"""
+        try:
+            vn = self._viewNode()
+            reg = getattr(slicer, "_cvNoPeel", None)
+            if reg and reg.get("vn") is vn: return
+            if reg:
+                try: reg["vn"].RemoveObserver(reg["tag"])
+                except Exception: pass
+            def cb(caller=None, ev=None):
+                try:
+                    if caller.GetUseDepthPeeling(): caller.SetUseDepthPeeling(False)
+                except Exception: pass
+            tag = vn.AddObserver(vtk.vtkCommand.ModifiedEvent, cb)
+            slicer._cvNoPeel = dict(vn=vn, tag=tag); cb(vn)
+        except Exception as e: print("no-peel guard:", e)
+
     def _noDepthPeeling(self):
         """半透明は「深さの剥離」を使わず、1 回で描く方式（OIT）にする。
         剥離は GPU によって（AMD Radeon など）症例しだいで描画が終わらなくなる（MAC 重症 AS の症例で固まった）。
@@ -5442,6 +5574,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             ren = self._view().renderWindow().GetRenderers().GetFirstRenderer()
             if ren.GetUseDepthPeeling(): ren.SetUseDepthPeeling(False)
         except Exception as e: print("depth peeling:", e)
+        self._installNoPeelGuard()
 
     def _applySurfAmbient(self, s=None):
         a = float((s or self._shade()).get("samb", 0.15))

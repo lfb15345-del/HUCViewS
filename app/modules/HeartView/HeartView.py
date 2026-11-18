@@ -836,6 +836,10 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         self.resetCardiacView(cv)
         cv.logic.adoptScene()
         if cv.logic.sourceVolume is not None: cv.volumeSelector.setCurrentNode(cv.logic.sourceVolume)
+        try:                                                                   # 開いた症例の点検（元の CT・AI ラベルが結び付いているか）。足りなければ画面に出す
+            issues = cv.logic.checkCase()
+            if issues: qt.QTimer.singleShot(800, lambda m="⚠ 症例の点検: " + "／".join(issues): cv._status(m))
+        except Exception as e: print("[HeartView] 症例の点検:", e)
         cv.logic.setCapOpacity(cv.capSlider.value / 100.0)
         cv.onFourChamber() if cv.logic._findChambers() is not None else cv.onVSD()
         qt.QTimer.singleShot(400, lambda: (cv.logic._fitParallel(recenter=True), cv.logic._viewSizeWatch(), cv.logic._view().scheduleRender()))   # 画面の大きさに合わせて全体を収める
