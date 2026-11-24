@@ -1126,7 +1126,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def _onFillToggled(self, on):
         L = self.logic
         if L.layerModels.get("心臓壁") is None: return
-        L.wallFill = bool(on)
+        L.wallFill = bool(on); self._toSurfaces()                             # 作り直した壁を見せる（VR・4D の途中だと隠れたまま）
         self._status("壁を作り直しています…（約5秒）"); slicer.app.processEvents()
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
@@ -1264,7 +1264,9 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.prePatchCombo.currentIndex = idx; self.prePatchCombo.blockSignals(False)
 
     def _onAutoPatch(self):
-        L = self.logic; self._fillPreCombo(); i = self.prePatchCombo.currentIndex
+        L = self.logic
+        if getattr(L, "on4D", False): self._end4D()                          # 4D の途中は、出したパッチが動く心臓に隠れて見えない
+        self._fillPreCombo(); i = self.prePatchCombo.currentIndex
         pre = self._preVols[i] if 0 <= i < len(self._preVols) else None
         if self.patchRemoveButton.checked: self.patchRemoveButton.checked = False
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
@@ -1281,6 +1283,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
     def _onPatchRemove(self, on):
         if not on: self._patchPickEnd(); return
         L = self.logic
+        if getattr(L, "on4D", False): self._end4D()                          # 4D の途中はパッチが隠れていてクリックできない
         if L.layerModels.get(L.PATCH_KEY) is None: self._status("パッチがありません"); self.patchRemoveButton.checked = False; return
         n = slicer.mrmlScene.GetFirstNodeByName("cv_patch_pick")
         if n is None: n = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "cv_patch_pick")
@@ -1330,6 +1333,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self._status("パッチを正面に向けて、手前を切りました。ホイールで切る位置。「この断面で固定」を外すと元の切り方へ")
 
     def _onRedoMetal(self):
+        self._toSurfaces()                                                    # 作り直した面を見せる（VR・4D の途中だと隠れたままで、変わったか分からなかった）
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             msg = self.logic.redoMetal(self._status)
@@ -1962,7 +1966,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             n = self.layerModels.get(k)
             if n is None or n.GetDisplayNode() is None: continue
             on = boneVis if k == "骨" else True
-            self.visible[k] = on; n.GetDisplayNode().SetVisibility(on)
+            self.visible[k] = on; n.GetDisplayNode().SetVisibility(self._layerShown(k))   # VR・4D の途中は VR の上に出さない
         self._updateBounds()
         if self.cutAxis is not None: self._applyClipToModels(True)
         try: self.updateInset()
@@ -2359,6 +2363,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if "心筋" in self.layerModels: self.visible["心筋"] = True
         self.workVolume = None; self.sourceVolume = None
         self._patchRemoved = []                                              # 前に開いていた症例の「外したパッチ」の記録を持ち越さない
+        self._wallSynth = None; self._wallEvidence = None; self._wallFor = None; self._vrExtra = set()   # 前の症例の「補った壁」の配列・VR の途中で出した層も持ち越さない
+        try:
+            k = self._purgeExportColors()
+            if k: print(f"[CardiacView] 使われていない色表を {k} 個外しました（前の版のラベル書き出しの残り）")
+        except Exception as e: print("色表の片付け:", e)
         vols = [v for v in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
                 if not v.IsA("vtkMRMLLabelMapVolumeNode") and not v.IsA("vtkMRMLVectorVolumeNode")]   # VR（CV VR）・ラベルは作業用の画像ではない
         work = next((v for v in vols if v.GetAttribute("CardiacView.calib") is not None), None) \
@@ -2571,11 +2580,40 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             nm = sg.GetSegment(sid).GetName().lower().replace("_", " ")
             if any(t.replace("_", " ") in nm for t in keywords): sel.InsertNextValue(sid)
         if sel.GetNumberOfValues() == 0: return None
-        lab = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "cv_tmpLabel")
-        slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(segNode, sel, lab, refVol)
-        mask = slicer.util.arrayFromVolume(lab) > 0
-        slicer.mrmlScene.RemoveNode(lab)
-        return mask
+        return self._exportMask(segNode, sel, refVol, "cv_tmpLabel")
+
+    @staticmethod
+    def _exportMask(segNode, sel, refVol, name):
+        """選んだ区域（sel）を refVol の格子のマスク（bool の配列）にする。
+        書き出しは色表ノードを 1 つ作り、ラベルの画像を消しても色表はシーンに残っていた（1 回の 3D 作りで約 30 個。症例に保存されていた）→ ここで消す"""
+        before = {n.GetID() for n in slicer.util.getNodesByClass("vtkMRMLColorTableNode")}
+        lab = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", name)
+        try:
+            slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(segNode, sel, lab, refVol)
+            return slicer.util.arrayFromVolume(lab) > 0
+        finally:
+            slicer.mrmlScene.RemoveNode(lab)
+            for n in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
+                if n.GetID() not in before and n.GetSingletonTag() is None: slicer.mrmlScene.RemoveNode(n)
+
+    _EXPORT_CT_RE = re.compile(r"_ColorTable(_\d+)?$")
+
+    def _purgeExportColors(self):
+        """前の版で作った症例に残っている、ラベルの書き出しの色表（どこからも使われていないもの）をシーンから外す。戻り値: 外した数"""
+        used = set()
+        for i in range(slicer.mrmlScene.GetNumberOfNodes()):
+            n = slicer.mrmlScene.GetNthNode(i)
+            if n.IsA("vtkMRMLDisplayNode") and n.GetColorNodeID(): used.add(n.GetColorNodeID())
+            for r in range(n.GetNumberOfNodeReferenceRoles()):
+                role = n.GetNthNodeReferenceRole(r)
+                for j in range(n.GetNumberOfNodeReferences(role)):
+                    rid = n.GetNthNodeReferenceID(role, j)
+                    if rid: used.add(rid)
+        k = 0
+        for n in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
+            if n.GetSingletonTag() is None and n.GetID() not in used and self._EXPORT_CT_RE.search(n.GetName() or ""):
+                slicer.mrmlScene.RemoveNode(n); k += 1
+        return k
 
     def _boneMaskArray(self, segNode, refVol):
         sg = segNode.GetSegmentation()
@@ -2585,11 +2623,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             sid = ids.GetValue(k)
             if any(t in sg.GetSegment(sid).GetName().lower() for t in BONE_KEYWORDS): sel.InsertNextValue(sid)
         if sel.GetNumberOfValues() == 0: return None
-        lab = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "cv_boneLabel")
-        slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(segNode, sel, lab, refVol)
-        mask = slicer.util.arrayFromVolume(lab) > 0
-        slicer.mrmlScene.RemoveNode(lab)
-        return mask
+        return self._exportMask(segNode, sel, refVol, "cv_boneLabel")
 
     def _bodyMask(self, arr):
         """体の外（寝台・マット・ノイズ）を落とすマスク: -500HU 以上の最大連結成分をスライスごとに穴埋め"""
@@ -2875,7 +2909,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         # 薄い壁（左房・右房・大血管 1〜2mm）は部分容積で CT 値帯から外れ、穴になる。
         #   血液側: 造影血液と平均されて >175HU、脂肪側: 脂肪と平均されて <-20HU。
         # → 内腔ラベルの外側に必ず 2 ボクセル（約2.4mm）の殻を足して、壁を閉じる。
-        lumen = self._segmentMaskArray(segNode, work, ("atrial appendage", "aorta", "pulmonary vein", "vena cava", "brachiocephalic trunk", "pulmonary artery"))
+        lumen = hvv                                                            # 上で取った全身ラベルの大血管と同じもの（同じ書き出しを 2 回しない。hvv は書き換えていない）
         lumen = np.zeros_like(wall) if lumen is None else lumen.astype(bool)   # "heart"（心臓全体）は内腔ではないので入れない
         if cav is not None: lumen |= cav
         # AI の全身ラベルは 3mm 格子で作られていてカクカク → ラベル由来の内腔は強めに（約1.8mm）ならす
@@ -2891,6 +2925,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         print(f"壁: CT値帯 {int(wall.sum())} + 内腔の殻 {int((shell & ~wall).sum())} ボクセル")
         self._wallEvidence = wall.copy()            # CT 値で裏付けのある壁
         self._wallSynth = shell & ~wall             # 補った壁
+        self._wallFor = self._wallKey(work)          # どの CT の配列か（colorWallEpiEndo が、別の症例の配列を大きさが同じというだけで使わないように）
         if getattr(self, "wallFill", True):
             wall |= shell
         wall = self._cleanBinary(wall.astype(np.uint8), sp, minVox=200)
@@ -2898,7 +2933,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         vis = self.visible.get("心臓壁", True)
         if old: slicer.mrmlScene.RemoveNode(old)
         m = self._surfaceFromBinary(wall, work, "心臓壁", EPI_COLOR, 1)
-        self.layerModels["心臓壁"] = m; self.visible["心臓壁"] = vis; m.GetDisplayNode().SetVisibility(vis)
+        self.layerModels["心臓壁"] = m; self.visible["心臓壁"] = vis
+        m.GetDisplayNode().SetVisibility(self._layerShown("心臓壁"))         # VR・4D の途中に作り直した時は、面を VR の上に出さない（前は出た）
         self.colorWallEpiEndo()
         return True
 
@@ -3000,8 +3036,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         val[cls == 1] = 1/3                                 # 1/3 = 左心系（または判定不能の内膜）
         val[cls == 2] = 2/3                                 # 2/3 = 右心系
         # 補った壁（CT 値の裏付けなし）: 面の内側（組織側）を覗いて、補完マスクにしかない所
-        syn = getattr(self, "_wallSynth", None); ev = getattr(self, "_wallEvidence", None)
-        if getattr(self, "wallFill", True) and syn is not None and ev is not None and syn.shape == arr.shape:
+        syn = getattr(self, "_wallSynth", None); ev = getattr(self, "_wallEvidence", None); isSyn = None
+        fill = getattr(self, "wallFill", True)
+        if fill and syn is not None and ev is not None and syn.shape == arr.shape and getattr(self, "_wallFor", None) == self._wallKey(vol):
             sh = np.zeros(len(P)); eh = np.zeros(len(P))
             for dmm in (0.6, 1.2, 1.8):
                 H = np.c_[P - N * dmm, np.ones(len(P))] @ A.T
@@ -3026,6 +3063,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
                 print("syn smooth:", ex); isSyn = raw > 0.5
             if getattr(self, "showSynth", True): val[isSyn] = 1.0   # 1.0 = 補った壁（グレー）。隠すときは内外の色のまま
             print(f"補った壁の頂点: {isSyn.mean()*100:.1f}%")
+        elif fill:                                              # 補った所の元の配列が無い（保存した症例を開いた後）: 面に残した印を使う
+            ks = pd.GetPointData().GetArray("WallSynth"); kc = pd.GetPointData().GetArray("WallClass")   # （前は、開き直した後に「補った壁を見せる」を切り替えると、グレーの印が消えて戻らなかった）
+            if ks is not None and ks.GetNumberOfTuples() == len(P): isSyn = vtk_to_numpy(ks) > 0
+            elif kc is not None and kc.GetNumberOfTuples() == len(P): isSyn = vtk_to_numpy(kc) > 0.9      # 前の版で保存した症例（グレーを見せて保存した時だけ分かる）
+            if isSyn is not None and getattr(self, "showSynth", True): val[isSyn] = 1.0
+        if isSyn is not None:                                   # 印そのものも面に持たせる（面と一緒に保存される）
+            sa = numpy_to_vtk(np.asarray(isSyn).astype(np.uint8), deep=True); sa.SetName("WallSynth"); pd.GetPointData().AddArray(sa)
         va = numpy_to_vtk(val, deep=True); va.SetName("WallClass")
         pd.GetPointData().AddArray(va)
         old = slicer.mrmlScene.GetFirstNodeByName("CV EpiEndo")
@@ -3042,22 +3086,30 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         m.Modified()
         return hcNode is not None
 
+    @staticmethod
+    def _wallKey(vol):
+        """壁の配列（_wallSynth など）がどの CT のものかのしるし"""
+        try: return (vol.GetID(), vol.GetName(), tuple(round(float(x), 3) for x in vol.GetOrigin()), tuple(vol.GetImageData().GetDimensions()))
+        except Exception: return None
+
     STATIC_4D = ("骨", "軟部組織", "人工物", "胸骨ワイヤー")                                 # 4D でも一緒に出せる面（心臓と一緒に動かないもの）
 
     def setLayerVisible(self, name, vis):
-        if getattr(self, "on4D", False):                                    # 4D 表示中: 動かない骨・軟部組織・人工物だけ面を出す（心臓・血管の面は動く VR と重なるので戻った時に）
-            for k in self._namesFor(name):
-                self.visible[k] = bool(vis)
-                n = self.layerModels.get(k)
-                if k in self.STATIC_4D and n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(vis))
+        """層のチェック。4D の途中は、動かない骨・軟部組織・人工物だけ面を出す（心臓・血管の面は動く VR と重なるので、4D を終えた時に）。
+        VR の途中にチェックを入れた層は、VR の上にも出す（前は出した後、VR の色を切り替えると黙って消えた）"""
+        d4 = bool(getattr(self, "on4D", False)); ex = self.__dict__.setdefault("_vrExtra", set())
+        for k in self._namesFor(name):
+            self.visible[k] = bool(vis)
+            if getattr(self, "vrOn", False):                                  # 4D の途中でも、VR に戻った時に出す
+                if vis: ex.add(k)
+                else: ex.discard(k)
+            n = self.layerModels.get(k)
+            if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(self._layerShown(k))
+        if d4:
             try: self._clipSync()
             except Exception: pass
             self._view().scheduleRender()
             return
-        for k in self._namesFor(name):
-            self.visible[k] = bool(vis)
-            src = self.layerModels.get(k)
-            if src and src.GetDisplayNode(): src.GetDisplayNode().SetVisibility(vis)
         if name == "心筋":
             self.updateMyoCap()
 
@@ -3096,7 +3148,16 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if rebuildVR and getattr(self, "vrOn", False) and getattr(self, "vrDisplay", None) is not None:
             try:
                 self.vrDisplay.SetVisibility(False); self.vrDisplay = None; self.showVR(True, getattr(self, "vrMode", None))
-            except Exception as e: print("palette VR:", e)
+            except Exception as e:                                            # 前は print だけで、VR も面も映らない画面になった → 面の表示に戻して知らせる
+                import traceback; traceback.print_exc()
+                try: self.showVR(False)
+                except Exception as e2: print("palette VR → 面:", e2)
+                try:
+                    w = slicer.modules.cardiacview.widgetRepresentation().self()
+                    if w.logic is self:
+                        for b in (w.vrTissueButton, w.vrBloodButton): b.blockSignals(True); b.setChecked(False); b.blockSignals(False)
+                        w._status(f"色合いは変えましたが、VR を作り直せませんでした（{e}）。面の表示に戻しました")
+                except Exception as e2: print("palette VR → 画面:", e2)
         else:
             if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False):
                 self.vrDisplay = None                                         # 次に VR を出す時に新しい色で作る
@@ -3605,7 +3666,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             import traceback; traceback.print_exc(); warn += f"\n⚠ 1 枚の面にできなかったので、範囲のまま出しています（{e}）"
         d = node.GetDisplayNode()
         if d is not None:
-            d.SetVisibility(True); d.SetColor(*PATCH_COLOR); d.SetSpecular(0.12); d.SetPower(10)
+            d.SetVisibility(self._layerShown(self.PATCH_KEY)); d.SetColor(*PATCH_COLOR); d.SetSpecular(0.12); d.SetPower(10)
         if self.cutAxis is not None: self._applyClipToModels(True)
         if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False): self.vrDisplay = None      # 次の VR でパッチの色を塗り直す
         self._patchRemoved = []
@@ -4425,12 +4486,20 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     VR_KEEP = ("パッチ",)                                                  # VR の中でも面で出すもの（VR は CT 値で透けるので、薄い布が見えなくなる）
 
+    def _layerShown(self, k):
+        """層 k の面を今の画面に出すか。self.visible（層のチェック）と VR・4D の状態から決める（面をどこで作り直しても同じ決まりで出す）。
+        4D の途中は動かない面（STATIC_4D）だけ。VR の途中は VR_KEEP と、VR の途中で先生がチェックを入れた層（_vrExtra）だけ（VR が面に隠れないように）"""
+        if not self.visible.get(k, False): return False
+        if getattr(self, "on4D", False): return k in self.STATIC_4D
+        if getattr(self, "vrOn", False): return k in self.VR_KEEP or k in (getattr(self, "_vrExtra", None) or ())
+        return True
+
     def _applyLayerVis(self):
-        """面の出し方を「今の層の選び方」（self.visible）と VR の状態に合わせる。VR の表示中は VR_KEEP だけを出す。
+        """面の出し方を「今の層の選び方」（self.visible）と VR の状態に合わせる（_layerShown）。
         前は VR を消した時に「VR を出した時の控え」に戻していたので、VR の途中で層のチェックを変えると、画面とチェックが食い違った"""
         vr = bool(getattr(self, "vrOn", False))
         for k, n in self.layerModels.items():
-            if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(bool(self.visible.get(k, False)) and (not vr or k in self.VR_KEEP))
+            if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(self._layerShown(k))
         if vr:
             cap = slicer.mrmlScene.GetFirstNodeByName("CV 心筋断面")
             if cap and cap.GetDisplayNode(): cap.GetDisplayNode().SetVisibility(False)
@@ -4452,6 +4521,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             _back(); qt.QTimer.singleShot(0, _back); qt.QTimer.singleShot(150, _back)
         if mode is not None and mode != getattr(self, "vrMode", None):
             self.vrMode = mode; self.vrWin = None; self.setVRWindow()
+        if not (on and getattr(self, "vrOn", False)): self._vrExtra = set()   # VR を消す時・新しく出す時は「VR の途中で出した層」を忘れる（VR の色の切り替えでは覚えたまま）
         self.vrOn = bool(on)
         d4 = bool(getattr(self, "on4D", False))                              # 4D の途中は、動く VR が画面を持つ。ここでは「VR を出したいか」だけ覚えて、4D を終えた時（show4D）に合わせる
         if getattr(self, "vrDisplay", None) is not None: self.vrDisplay.SetVisibility(self.vrOn and not d4)
