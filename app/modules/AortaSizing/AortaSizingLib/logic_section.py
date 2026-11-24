@@ -68,11 +68,14 @@ class SectionMixin:
     RAY_DR = 0.15
 
     def _ensureArrF(self):
-        if getattr(self, "arrF", None) is None:
+        """元の CT の 3 次スプラインの係数（断面の縁・伸ばした画像・画像の書き出しで使う）と、体の座標 → 格子の行列。今の CT（self.vol）について 1 回だけ作る。
+        前は行列を 1 度作ると作り直さず、別の症例を開いた後も前の症例の行列で CT を読んでいた（断面の縁・径がずれる）。
+        また CT の float32 の写し（4 バイト/画素）と float64 の係数（8 バイト/画素）を持っていた（1 mm・600 枚の CT で約 1.9 GB）→ 写しは持たず、係数は float32（約 0.6 GB）"""
+        if getattr(self, "arrF", None) is None or getattr(self, "_arrFor", None) is not self.vol:
             from scipy import ndimage
-            self.arr = slicer.util.arrayFromVolume(self.vol).astype(np.float32)
-            self.arrF = ndimage.spline_filter(self.arr, order=3, mode="nearest")
-        if getattr(self, "_rasToIjk", None) is None: self._rasToIjk = np.linalg.inv(self._ijk2ras())
+            self.arr = slicer.util.arrayFromVolume(self.vol)                    # 写さない（しきい値の比べにだけ使う）
+            self.arrF = ndimage.spline_filter(self.arr, order=3, mode="nearest", output=np.float32)
+            self._rasToIjk = np.linalg.inv(self._ijk2ras()); self._arrFor = self.vol
 
     @staticmethod
     def _polar(xy, c, th):

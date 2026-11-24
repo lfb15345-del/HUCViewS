@@ -43,8 +43,8 @@ class CoreMixin:
             if best is not None: seg, vol = best[1], best[2]
         if vol is None or seg is None:
             raise RuntimeError("CT と臓器ラベル（TotalSegmentator）が見つかりません。先に入口で「3D を作る」を行ってください。")
-        if vol is not getattr(self, "vol", None):                          # 別の症例に変わった: 前の症例の CT（伸ばした画像の元）・断面の計算を捨てる
-            self.arr = None; self.arrF = None; self.cache = {}; self._built = {}
+        if getattr(self, "vol", None) is not None and vol is not self.vol:   # 別の CT に変わった: 前の CT の計算をすべて捨てる（前は断面の計算だけで、計画・真腔・術後・印・「1つ戻す」が残った）
+            self.resetCase()
         self.vol, self.seg = vol, seg
         try:
             cv = slicer.modules.cardiacview.widgetRepresentation().self().logic; self.thr = float(cv._cal().get("blood_lo", 180.0))
@@ -59,6 +59,22 @@ class CoreMixin:
                 a = slicer.util.arrayFromSegmentBinaryLabelmap(self.seg, sid, self.vol) > 0
                 out = a if out is None else (out | a)
         return out
+
+    KEEP_NEW_CASE = ("mode", "fixStep", "precise", "orangeOff", "_tvMode")   # 画面の選び（症例が変わっても残す）
+
+    def resetCase(self):
+        """別の症例を開いた後: 前の症例の計算（中心線・断面・印・計測・計画・真腔・術後の位置合わせ・「1つ戻す」の記録など）をすべて捨てる。
+        画面とつながっている所（on… の呼び先）と、画面の選びの設定は残す"""
+        self._cvState = None                                                  # 心臓の画面の表示は戻さない（前の症例の状態なので）
+        try: self.suspend()                                                   # マウス操作の横取り・タイマー・断面の上の線を外す
+        except Exception as e: print("resetCase suspend:", e)
+        for t in ("_timer", "_lcTimer", "_settleTimer", "_prefetchTimer"):
+            try: getattr(self, t).stop()
+            except Exception: pass
+        keep = {k: v for k, v in self.__dict__.items() if k.startswith("on") or k in self.KEEP_NEW_CASE}
+        self.__dict__.clear()
+        CoreMixin.__init__(self)
+        self.__dict__.update(keep)
 
     def _ijk2ras(self):
         m = vtk.vtkMatrix4x4(); self.vol.GetIJKToRASMatrix(m)
@@ -365,10 +381,7 @@ class CoreMixin:
         c.EndModify(wasMod)
 
     def _straighten(self, name):
-        from scipy import ndimage
-        if self.arr is None:
-            self.arr = slicer.util.arrayFromVolume(self.vol).astype(np.float32)
-            self.arrF = ndimage.spline_filter(self.arr, order=3, mode="nearest")      # 3次スプラインの前処理（1回だけ）
+        self._ensureArrF()                                                    # 3次スプラインの前処理（今の CT について 1 回だけ）
         out = self._straightArr(self.P, self.N, self.B)
         return self._straightNode(name, out)
 

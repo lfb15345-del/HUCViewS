@@ -150,7 +150,7 @@ class LengthMixin:
         if self.P is None: return "中心線がありません"
         s0 = self.curS; lines = [f"ネック計測（{self.rel(s0):+.1f} mm から遠位へ）", "  位置    外周 Dmax / Dmin / Deq      内腔 Dmax / Dmin / Deq"]
         for d in (0, 5, 10, 15):
-            o = self.metricsAt(s0 + d); l = self._metK(self._k(s0 + d), "lumen")
+            o = self._metK(self._k(s0 + d), "outer"); l = self._metK(self._k(s0 + d), "lumen")   # 外周の列は外周（前は今の表示の向き。内腔を表示中だと両方とも内腔の値だった）
             so = f"{o['dmax']:.1f} / {o['dmin']:.1f} / {o['deq']:.1f}" if o else "—"
             sl = f"{l['dmax']:.1f} / {l['dmin']:.1f} / {l['deq']:.1f}" if l else "—"
             lines.append(f"  +{d:2d} mm   {so:22s} {sl}")

@@ -114,6 +114,8 @@ class ViewMixin:
             cv._clearCuts()
             for k, m in cv.layerModels.items():
                 if m is not None and m.GetDisplayNode() is not None: m.GetDisplayNode().SetVisibility(False)
+            for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode"):   # 心臓の画面の VR も隠す（前は大動脈の 3D の上に残った。戻る時に _restoreCV で戻す）
+                if d.GetVisibility(): d.SetVisibility(False)
         except Exception: pass
         v3 = slicer.app.layoutManager().threeDWidget(0).threeDView()
         vn = slicer.app.layoutManager().threeDWidget(0).mrmlViewNode()
@@ -476,7 +478,9 @@ class ViewMixin:
                 cam=(cam.GetPosition(), cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelProjection(), cam.GetParallelScale(), cam.GetViewAngle()),
                 bg=(vn.GetBackgroundColor(), vn.GetBackgroundColor2()), ssao=ren.GetUseSSAO(),
                 cut=(getattr(cv, "cutAxis", None), getattr(cv, "cutFrac", 0.5), getattr(cv, "_lockN", None)),
-                sliceVis={nm: lm.sliceWidget(nm).mrmlSliceNode().GetSliceVisible() for nm in ("Red", "Yellow", "Green") if lm.sliceWidget(nm) is not None})
+                sliceVis={nm: lm.sliceWidget(nm).mrmlSliceNode().GetSliceVisible() for nm in ("Red", "Yellow", "Green") if lm.sliceWidget(nm) is not None},
+                vr=[(d, bool(d.GetVisibility())) for d in slicer.util.getNodesByClass("vtkMRMLVolumeRenderingDisplayNode")],   # 心臓の画面の VR（大動脈の 3D の上に残らないように隠して、戻る時に戻す）
+                vrExtra=set(getattr(cv, "_vrExtra", None) or ()))
         except Exception as e: print("saveCV:", e); self._cvState = None
 
     def _restoreCV(self):
@@ -505,6 +509,9 @@ class ViewMixin:
             if axis is not None:
                 if axis == "LOCK" and lockN is not None: cv._lockN = lockN
                 cv.setCut(axis, frac)
+            for d, on in st.get("vr", []):
+                if slicer.mrmlScene.IsNodePresent(d) and bool(d.GetVisibility()) != on: d.SetVisibility(on)
+            cv._vrExtra = set(st.get("vrExtra", ()))                           # VR の途中で先生が出した層の覚え（上の setLayerVisible では変えない）
             lm.threeDWidget(0).threeDView().scheduleRender()
         except Exception as e: print("restoreCV:", e)
 

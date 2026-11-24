@@ -76,6 +76,11 @@ class WidgetBaseMixin:
     def _autoStart(self):
         """開いたら、中心線がまだ無ければ自動で作って計測の画面にする（ボタンを探さなくてよい）"""
         L = self.logic
+        if getattr(L, "vol", None) is not None and not slicer.mrmlScene.IsNodePresent(L.vol):   # 前の症例の CT がシーンに無い = 別の症例を開いた
+            L.resetCase(); self._autoTried = None                             # 前は前の症例の中心線が残っていて、自動で作らなかった
+            for f in (self.refreshLists, self.refreshReadout, self._syncPathButtons, lambda: self.showStep(0)):
+                try: f()
+                except Exception as e: print("new case UI:", e)
         try:
             if slicer.util.selectedModule() != "AortaSizing" or L.P is not None: return
         except Exception: return

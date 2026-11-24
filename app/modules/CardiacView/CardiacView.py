@@ -993,7 +993,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         except Exception: pass
 
     def _onLayerCheck(self, name, on):
-        L = self.logic; L.setLayerVisible(name, on)
+        L = self.logic; L.setLayerVisible(name, on, user=True)
         if getattr(L, "on4D", False) and on and not any(k in L.STATIC_4D for k in L._namesFor(name)):
             self._status(f"4D 中は「{name}」の面は出しません（動く心臓と重なるため）。「4D を終了」で表示されます。骨・軟部組織・人工物は 4D でも一緒に出せます。")
 
@@ -3094,15 +3094,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     STATIC_4D = ("骨", "軟部組織", "人工物", "胸骨ワイヤー")                                 # 4D でも一緒に出せる面（心臓と一緒に動かないもの）
 
-    def setLayerVisible(self, name, vis):
+    def setLayerVisible(self, name, vis, user=False):
         """層のチェック。4D の途中は、動かない骨・軟部組織・人工物だけ面を出す（心臓・血管の面は動く VR と重なるので、4D を終えた時に）。
-        VR の途中にチェックを入れた層は、VR の上にも出す（前は出した後、VR の色を切り替えると黙って消えた）"""
+        user=True（先生がチェックを押した）: VR の途中なら VR の上にも出す（前は出した後、VR の色を切り替えると黙って消えた）。
+        プログラムから呼ぶ時（大動脈サイジングから戻る時など）は、VR の上に出す層を増やさない"""
         d4 = bool(getattr(self, "on4D", False)); ex = self.__dict__.setdefault("_vrExtra", set())
         for k in self._namesFor(name):
             self.visible[k] = bool(vis)
-            if getattr(self, "vrOn", False):                                  # 4D の途中でも、VR に戻った時に出す
-                if vis: ex.add(k)
-                else: ex.discard(k)
+            if not vis: ex.discard(k)
+            elif user and getattr(self, "vrOn", False): ex.add(k)             # 4D の途中でも、VR に戻った時に出す
             n = self.layerModels.get(k)
             if n and n.GetDisplayNode(): n.GetDisplayNode().SetVisibility(self._layerShown(k))
         if d4:
