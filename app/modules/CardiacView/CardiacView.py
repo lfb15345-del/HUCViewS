@@ -753,6 +753,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.vsdButton.connect("clicked()", self.onVSD)
         self.patchLButton.connect("clicked()", lambda: self._onPatchSide("L")); self.patchRButton.connect("clicked()", lambda: self._onPatchSide("R"))
         self.preRefreshButton.connect("clicked()", self._fillPreCombo); self.autoPatchButton.connect("clicked()", self._onAutoPatch)
+        self.prePatchCombo.connect("currentIndexChanged(int)", self._onPreCombo)   # 「なし」を選んだら、押すたびに術前 CT へ戻さない（前は戻っていた）
         self.patchRemoveButton.connect("toggled(bool)", self._onPatchRemove)
         self.patchRemoveUndoButton.connect("clicked()", lambda: self._status("1 つ戻しました" if self.logic.patchRemoveUndo() else "戻すものがありません"))
         self._preVols = [None]; self._fillPreCombo()
@@ -1245,8 +1246,13 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         else:
             self._status(L.paintEnd())
 
+    def _onPreCombo(self, i):
+        self._preChosen = True                                                # 先生が選んだ（一覧を作り直す時は信号を止めているので、ここに来るのは手で選んだ時だけ）
+
     def _fillPreCombo(self):
         L = self.logic; cur = self._preVols[self.prePatchCombo.currentIndex] if 0 <= self.prePatchCombo.currentIndex < len(self._preVols) else None
+        src = getattr(L, "sourceVolume", None)
+        if getattr(self, "_preFor", None) is not src: self._preChosen = False; self._preFor = src       # 別の症例になったら、選び直し
         self.prePatchCombo.blockSignals(True); self.prePatchCombo.clear(); self.prePatchCombo.addItem("なし（術後だけで探す）"); self._preVols = [None]
         skip = {getattr(L, "sourceVolume", None), getattr(L, "workVolume", None)}
         for v in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
@@ -1254,7 +1260,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
             nm = v.GetName()
             if nm.startswith(("CV ", "cv_")) or "_cv" in nm: continue
             self.prePatchCombo.addItem(nm); self._preVols.append(v)
-        idx = self._preVols.index(cur) if (cur is not None and cur in self._preVols) else next((i for i, v in enumerate(self._preVols) if v is not None and ("術前" in v.GetName() or "pre" in v.GetName().lower())), 0)
+        idx = self._preVols.index(cur) if (cur is not None and cur in self._preVols) else 0 if (cur is None and getattr(self, "_preChosen", False)) else next((i for i, v in enumerate(self._preVols) if v is not None and ("術前" in v.GetName() or "pre" in v.GetName().lower())), 0)
         self.prePatchCombo.currentIndex = idx; self.prePatchCombo.blockSignals(False)
 
     def _onAutoPatch(self):
@@ -2109,13 +2115,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e: return "不明", (str(e) or type(e).__name__)[:60]
         return "CPU", None
 
-    def _runTS(self, vol, kind, status):
+    def _runTS(self, vol, kind, status, label=None):
         try: import TotalSegmentator
         except ImportError as e: raise RuntimeError("AI の拡張（TotalSegmentator）が入っていません。HUCViewS のインストーラーをもう一度実行してください") from e
         tail = []                                                             # AI の出力の最後の方（失敗した時に理由を探す）
         tsl = TotalSegmentator.TotalSegmentatorLogic()
         tsl.logCallback = lambda t: slicer.app.processEvents()      # AI 計算中も画面（進捗表示）を止めない
-        base = {"total": "1/4 臓器を自動認識中", "heartchambers": "2/4 心腔を自動認識中"}.get(kind, "AI で認識中")
+        base = label or {"total": "1/4 臓器を自動認識中", "heartchambers": "2/4 心腔を自動認識中"}.get(kind, "AI で認識中")   # パッチの術前 CT の時は「2/4」を出さない
         tStart = time.time(); last = [0.0]
 
         def _logNonBlocking(proc, returnOutput=False):
@@ -3345,9 +3351,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         dims = np.array(src.GetImageData().GetDimensions()); sp = np.array(src.GetSpacing())
         mg = np.ceil(10.0 / sp).astype(int)
         lo = np.maximum(np.floor(ijk.min(0)).astype(int) - mg, 0); hi = np.minimum(np.ceil(ijk.max(0)).astype(int) + mg, dims - 1)
-        hu = slicer.util.arrayFromVolume(src)[lo[2]:hi[2] + 1:step, lo[1]:hi[1] + 1:step, lo[0]:hi[0] + 1:step].astype(np.float32)
+        st = np.where(sp * step <= 1.3, step, 1).astype(int)                 # 間引きは向きごと（x, y, z）。間引くと 1.3 mm より粗くなる向き（厚いスライス）は間引かない
+        # （前は全部の向きを 2 つおきにしていて、厚いスライスの CT では左右の血液の真ん中の面が粗くなり、1 枚にできないことがあった。0.65 mm 以下の CT は前と同じ）
+        hu = slicer.util.arrayFromVolume(src)[lo[2]:hi[2] + 1:st[2], lo[1]:hi[1] + 1:st[1], lo[0]:hi[0] + 1:st[0]].astype(np.float32)
         nz, ny, nx = hu.shape
-        G = A @ np.array([[step, 0, 0, lo[0]], [0, step, 0, lo[1]], [0, 0, step, lo[2]], [0, 0, 0, 1.0]])
+        G = A @ np.array([[st[0], 0, 0, lo[0]], [0, st[1], 0, lo[1]], [0, 0, st[2], lo[2]], [0, 0, 0, 1.0]])
         spc = np.array([np.linalg.norm(G[:3, 2]), np.linalg.norm(G[:3, 1]), np.linalg.norm(G[:3, 0])])   # (z, y, x) mm
         def vm(X):
             m = vtk.vtkMatrix4x4()
@@ -3426,12 +3434,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         lv0 = self._segmentMaskArray(hc, vol, ("left ventricle",)); rv0 = self._segmentMaskArray(hc, vol, ("right ventricle",)); my0 = self._segmentMaskArray(hc, vol, ("myocardium",))
         if lv0 is None or rv0 is None or my0 is None or not lv0.any() or not rv0.any():
             raise RuntimeError("心腔のラベル（左室・右室・心筋）がありません")
-        bb = self._bbox(lv0 | rv0, 12); f = sp0 / res
+        bb = self._bbox(lv0 | rv0, 12); f = sp0 / res; n0 = np.array(a0[bb].shape, float)
         A = ndimage.zoom(a0[bb].astype(np.float32), f, order=1)
         lv = ndimage.zoom(lv0[bb].astype(np.uint8), f, order=0) > 0; rv = ndimage.zoom(rv0[bb].astype(np.uint8), f, order=0) > 0
         my = ndimage.zoom(my0[bb].astype(np.uint8), f, order=0) > 0
         del lv0, rv0, my0
-        sp = np.array([res] * 3)
+        # zoom は両端の画素の中心どうしを合わせるので、本当の刻みは（入力の数−1）/（出力の数−1）。前は 1/f として計算していて、
+        # 厚いスライスの CT ほど奥の方で位置がずれた（3 mm スライスで最大 2.6 mm、5 mm で 4.6 mm。薄い CT は 0.05 mm 程度で変わらない）
+        n1 = np.array(A.shape, float); g = np.where(n1 > 1, (n0 - 1) / np.maximum(n1 - 1, 1), 1.0 / f)
+        sp = sp0 * g                                                          # 本当の格子の間隔（mm。z, y, x）
         myo = float(np.median(A[my])); bl = float(np.median(A[lv]))
         dlab = ndimage.distance_transform_edt(~lv, sampling=sp); drab = ndimage.distance_transform_edt(~rv, sampling=sp)
         near = rv & (dlab <= 10)
@@ -3441,8 +3452,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         dL = ndimage.distance_transform_edt(~BL, sampling=sp); dR = ndimage.distance_transform_edt(~BR, sampling=sp)
         thin = (~BL) & (~BR) & (dL + dR <= w) & (dL > 0) & (dR > 0)
         S = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(S); Ms = slicer.util.arrayFromVTKMatrix(S)
-        sc = np.diag([1 / f[2], 1 / f[1], 1 / f[0], 1.0]); sc[:3, 3] = [bb[2].start, bb[1].start, bb[0].start]
-        out = dict(thin=thin, M=Ms @ sc, info=dict(myo=round(myo), blood=round(bl), rv=round(rvsep)))
+        sc = np.diag([g[2], g[1], g[0], 1.0]); sc[:3, 3] = [bb[2].start, bb[1].start, bb[0].start]
+        out = dict(thin=thin, M=Ms @ sc, sp=sp, info=dict(myo=round(myo), blood=round(bl), rv=round(rvsep)))
         if hole:                                                          # 欠損: 造影された血液のつながりのうち、左室にも右室にも接しているもの（ラベルの外の所）
             thr = myo + 0.55 * (bl - myo)
             C = (A > thr) & (dlab <= 6) & (drab <= 6)
@@ -3457,6 +3468,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         from scipy import ndimage
         def chans(vol, hc):
             lv0 = self._segmentMaskArray(hc, vol, ("left ventricle",)); rv0 = self._segmentMaskArray(hc, vol, ("right ventricle",))
+            if lv0 is None or rv0 is None or not lv0.any() or not rv0.any():   # 前は下の lv0 | rv0 で落ちて、画面に英語のエラーの文が出た
+                raise RuntimeError("術前か術後の CT に、心腔のラベル（左室・右室）が無いので、位置を合わせられません")
             sp0 = np.array(vol.GetSpacing())[::-1]; step = max(1, int(round(1.5 / float(sp0.min()))))
             bb = self._bbox(lv0 | rv0, int(np.ceil(20.0 / sp0.min())))
             sl = tuple(slice(b.start, b.stop, step) for b in bb)
@@ -3491,8 +3504,35 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             dice.append(round(2.0 * float((rs & bb_).sum()) / max(float(rs.sum() + bb_.sum()), 1.0), 2))
         return best, dice
 
+    PATCH_DICE_OK = 0.6     # 術前と術後の位置合わせの重なり（Dice）がこれより低い時は、結果の文で知らせる
+    PATCH_MAX_SLICE_MM = 1.25   # これより厚いスライスの CT では、2 mm の薄い仕切りを見分けにくい（3 mm の術前 CT で試すと、薄い術前 CT の結果から 7 mm 以上離れた）
+
     def autoPatch(self, pre=None, status=lambda m: None):
         """パッチの範囲を自動で探して「パッチ」の面（1 枚）にする。pre = 術前 CT（なければ術後だけ）。戻り値: 結果の文"""
+        if getattr(self, "_patchBusy", False): return "パッチ: いま探している途中です。終わるまでお待ちください"
+        if getattr(self, "_building", False): return "パッチ: 3D を作っている途中です。終わってから押してください"
+        self._patchBusy = True                                                # 途中の文の表示で画面が動くので、もう一度押されると最初から 2 本目が走っていた
+        try: return self._autoPatch(pre, status)
+        finally: self._patchBusy = False
+
+    @staticmethod
+    def _patchClassify(labP, nP, vox, preThin, preHole, tol):
+        """術後の薄い所（labP の 1..nP のかたまり）を、術前と比べて分ける。戻り値: パッチの所（術後に新しく薄くなった所 ＋ 術前の欠損のうち術後に閉じた所）。
+        前はかたまりごとに格子全体をなめていた（数百個で数秒〜十数秒）。ここでは、まとめて数える（結果は同じ）"""
+        from scipy import ndimage
+        cnt = np.bincount(labP.ravel(), minlength=nP + 1); big = cnt * vox >= 3; big[0] = False   # 3 mm³ より小さいかたまりは使わない
+        dHole = ndimage.binary_dilation(preHole, iterations=tol); dThin = ndimage.binary_dilation(preThin, iterations=tol)
+        sz = np.maximum(cnt, 1)
+        inThin = np.bincount(labP.ravel(), weights=dThin.ravel(), minlength=nP + 1) / sz
+        inHole = np.bincount(labP.ravel(), weights=dHole.ravel(), minlength=nP + 1) / sz
+        isChg = big & (inThin < 0.5) & (inHole < 0.5)                         # 術後に新しく薄くなった所
+        chg = isChg[labP]; same = (big & ~isChg)[labP]                         # もとから薄い・欠損のまま
+        labH, nH = ndimage.label(preHole, structure=np.ones((3, 3, 3))); sameD = ndimage.binary_dilation(same, iterations=tol)
+        cH = np.maximum(np.bincount(labH.ravel(), minlength=nH + 1), 1)
+        isClosed = np.bincount(labH.ravel(), weights=sameD.ravel(), minlength=nH + 1) / cH < 0.3; isClosed[0] = False
+        return isClosed[labH] | chg                                            # 術前の欠損のうち、術後に閉じた所 ＋ 新しく薄くなった所
+
+    def _autoPatch(self, pre=None, status=lambda m: None):
         import SimpleITK as sitk
         from scipy import ndimage
         t0 = time.time()
@@ -3507,44 +3547,36 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             miss = (["元の CT"] if post is None else []) + (["AI の心腔ラベル"] if hcPost is None else [])
             raise RuntimeError(f"パッチを探すのに必要な {'・'.join(miss)} が見つかりません。上の青いボタンで 3D を作り直してください")
         status("パッチ: 術後の CT で薄い仕切りを探しています…")
+        thick = [f"{nm} CT（{max(v.GetSpacing()):.1f} mm）" for nm, v in (("術後", post), ("術前", pre)) if v is not None and max(v.GetSpacing()) > self.PATCH_MAX_SLICE_MM]
+        thickNote = (f"\n⚠ {'・'.join(thick)} のスライスが厚いので、{self.PATCH_THIN_MM:.0f} mm の薄い所を見分けにくく、結果は参考程度です（1 mm 以下の CT がおすすめ）") if thick else ""
         P = self._thinPartition(post, hcPost, w=self.PATCH_THIN_MM)
-        thin = P["thin"]; Mp = P["M"]; vox = 0.45 ** 3
+        thin = P["thin"]; Mp = P["M"]; gsp = np.asarray(P.get("sp", [0.45] * 3), float); vox = float(np.prod(gsp))
         labP, nP = ndimage.label(thin, structure=np.ones((3, 3, 3)))
-        mode = "術後のみ"; note = ""
+        cnt = np.bincount(labP.ravel(), minlength=nP + 1)                     # かたまりごとの大きさ（前はかたまりの数だけ格子全体をなめていた）
+        big = cnt * vox >= 3; big[0] = False
+        mode = "術後のみ"; note = ""; warn = ""                                # warn = 結果の後ろに出す ⚠ の文
         if pre is not None:
             hcPre = self._segFor(pre, "heartchambers")
             if hcPre is None:
                 status("パッチ: 術前 CT の心腔を自動認識しています（初回だけ・約 4 分）…")
-                hcPre = self._runTS(pre, "heartchambers", status)
+                hcPre = self._runTS(pre, "heartchambers", status, label="パッチ: 術前 CT の心腔を自動認識中")
             tx, dice = self._regPreToPost(pre, hcPre, post, hcPost, status)
             status("パッチ: 術前の欠損・もとから薄い所と比べています…")
             Q = self._thinPartition(pre, hcPre, w=self.PATCH_THIN_MM, hole=True)
             ref = self._toSitk(thin.astype(np.uint8), Mp)
             def onPost(a, M): return sitk.GetArrayFromImage(sitk.Resample(self._toSitk(a.astype(np.uint8), M), ref, tx, sitk.sitkNearestNeighbor, 0)) > 0
             preThin = onPost(Q["thin"], Q["M"]); preHole = onPost(Q["hole"], Q["M"])
-            tol = int(round(2.4 / 0.45))                                     # 位置合わせのずれを 2.4 mm まで許す
-            dHole = ndimage.binary_dilation(preHole, iterations=tol); dThin = ndimage.binary_dilation(preThin, iterations=tol)
-            chg = np.zeros_like(thin); same = np.zeros_like(thin)
-            for i in range(1, nP + 1):
-                m = labP == i; s_ = int(m.sum())
-                if s_ * vox < 3: continue
-                if (m & dThin).sum() / s_ < 0.5 and (m & dHole).sum() / s_ < 0.5: chg |= m          # 術後に新しく薄くなった所
-                else: same |= m                                                                  # もとから薄い・欠損のまま
-            labH, nH = ndimage.label(preHole, structure=np.ones((3, 3, 3))); sameD = ndimage.binary_dilation(same, iterations=tol); closed = np.zeros_like(thin)
-            for i in range(1, nH + 1):
-                m = labH == i
-                if (m & sameD).sum() / max(int(m.sum()), 1) < 0.3: closed |= m                    # 術前の欠損のうち、術後に閉じた所
-            patch = closed | chg; mode = "術前 CT あり"; note = f"（位置合わせの重なり 左室 {dice[0]:.2f}・右室 {dice[1]:.2f}）"
+            tol = max(1, int(round(2.4 / float(gsp.min()))))                 # 位置合わせのずれを 2.4 mm まで許す
+            patch = self._patchClassify(labP, nP, vox, preThin, preHole, tol); mode = "術前 CT あり"; note = f"（位置合わせの重なり 左室 {dice[0]:.2f}・右室 {dice[1]:.2f}）"
+            if min(dice) < self.PATCH_DICE_OK:                                # 前は低くてもそのまま使い、何も知らせなかった（違う場所の欠損が写る）
+                warn += f"\n⚠ 術前と術後の位置がよく合っていません（重なり {min(dice):.2f}）。術前 CT を使った結果は参考程度にしてください（「術前 CT」を「なし」にすると術後だけで探します）"
         else:
-            patch = np.zeros_like(thin)
-            for i in range(1, nP + 1):
-                m = labP == i
-                if m.sum() * vox >= 3: patch |= m
+            patch = big[labP]
         patch = ndimage.binary_closing(ndimage.binary_dilation(patch, iterations=2), iterations=7)      # 0.9 mm ふくらませて 3 mm の隙間を埋める
         patch = ndimage.binary_fill_holes(patch)
         lp, k = ndimage.label(patch, structure=np.ones((3, 3, 3))); sz = np.bincount(lp.ravel()) * vox; sz[0] = 0
         keep = np.nonzero(sz >= 20)[0]; patch = np.isin(lp, keep)
-        if not patch.any(): return f"パッチらしい所は見つかりませんでした（{mode}）"
+        if not patch.any(): return f"パッチらしい所は見つかりませんでした（{mode}）" + warn + thickNote
         status("パッチ: 面を作っています…")
         tmpv = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "cv_tmpPatch")
         try:
@@ -3568,7 +3600,9 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         node.SetAttribute("CV.patchSheet", "0"); node.SetAttribute("CV.patchStrokes", "[]"); node.SetAttribute("CV.patchMode", mode)
         node.SetAttribute("CV.vrTint", ",".join(f"{x:.2f}" for x in PATCH_COLOR))
         self.layerModels[self.PATCH_KEY] = node; self.visible[self.PATCH_KEY] = True; self._strokes = []
-        self.patchToSheet()
+        try: self.patchToSheet()
+        except Exception as e:                                                # 1 枚にできなくても、範囲（塊）のまま見せて、続きを済ませる
+            import traceback; traceback.print_exc(); warn += f"\n⚠ 1 枚の面にできなかったので、範囲のまま出しています（{e}）"
         d = node.GetDisplayNode()
         if d is not None:
             d.SetVisibility(True); d.SetColor(*PATCH_COLOR); d.SetSpecular(0.12); d.SetPower(10)
@@ -3576,7 +3610,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         if getattr(self, "vrDisplay", None) is not None and not getattr(self, "vrOn", False): self.vrDisplay = None      # 次の VR でパッチの色を塗り直す
         self._patchRemoved = []
         n = len(keep)
-        return f"パッチの範囲を自動で出しました（{mode}{note}・{n} か所・{time.time() - t0:.0f} 秒）。違う所は「違う所を外す」でクリック"
+        return f"パッチの範囲を自動で出しました（{mode}{note}・{n} か所・{time.time() - t0:.0f} 秒）。違う所は「違う所を外す」でクリック" + warn + thickNote
 
     def patchRemoveAt(self, ras, tol=12.0):
         """クリックした所に一番近いパッチのかたまりを外す。戻り値: 外せたか"""

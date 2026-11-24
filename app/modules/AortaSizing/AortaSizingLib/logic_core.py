@@ -104,8 +104,10 @@ class CoreMixin:
         crop = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))           # 血管の周りだけで計算（速さ）
         A0 = self._ijk2ras(); A = A0.copy()
         A[:3, 3] = (A0 @ np.r_[lo[2], lo[1], lo[0], 1.0])[:3]
-        A[:3, :3] = A0[:3, :3] * (ISO / sp[::-1])
         iso = self._smoothIso(vessel[crop], sp, f)
+        # 細かくした格子の本当の刻み（前は ISO / sp として計算していて、5 mm スライスの CT では面の奥の端が約 4 mm ずれ、
+        # 面全体が体軸の向きに約 1% 引き伸ばされていた。1 mm 前後のスライスでは差はほとんど無い）
+        A[:3, :3] = A0[:3, :3] * _zoomStep(vessel[crop].shape, iso.shape, f)[::-1]
         lab, n = ndimage.label(iso)
         if n > 1:
             sizes = ndimage.sum(iso, lab, range(1, n + 1)); iso = lab == (1 + int(np.argmax(sizes)))

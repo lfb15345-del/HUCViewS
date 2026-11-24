@@ -307,6 +307,14 @@ class _Overlay:
 _CT_PROTO_CACHE = {}
 
 
+def _zoomStep(n0, n1, f):
+    """ndimage.zoom で大きさを変えた格子の、本当の刻み（入力の格子の何個ぶんか。z, y, x の順）。
+    zoom は両端の画素の中心どうしを合わせるので、刻みは（入力の数−1）/（出力の数−1）。1/f とすると、厚いスライスほど奥の方で位置がずれる
+    （例: 5 mm スライスを 1 mm に細かくした時、奥の端で約 4 mm）。出力が 1 個の向きは 1/f"""
+    n0 = np.asarray(n0, float); n1 = np.asarray(n1, float); f = np.broadcast_to(np.asarray(f, float), n0.shape)
+    return np.where(n1 > 1, (n0 - 1) / np.maximum(n1 - 1, 1), 1.0 / f)
+
+
 def _ctProtocol(vol):
     """解析用: CT の撮影・再構成の条件（DICOM から自動）。[(列名, 値)]。読めなければ空欄"""
     keys = [("CT 機種", None), ("管電圧 kV", "0018,0060"), ("再構成関数", "0018,1210"), ("スライス厚 mm", "0018,0050"), ("スライス間隔 mm", None),
