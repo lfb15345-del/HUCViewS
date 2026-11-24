@@ -173,6 +173,22 @@ QWidget#cvRoot QScrollBar::handle:vertical { background:#3a404c; border-radius:4
 QWidget#cvRoot QScrollBar::add-line, QWidget#cvRoot QScrollBar::sub-line { height:0; }
 """
 
+_APP_VER = None
+
+
+def appVer():
+    """入っている版（app\\version.txt の「年月日-時分」）。性能の記録に入れて、どの PC がどの版で動いているかを離れた所から分かるようにする。読めなければ """""
+    global _APP_VER
+    if _APP_VER is None:
+        v = ""
+        for d in (os.environ.get("HEARTVIEW_HOME") or "", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))):
+            try:
+                if d and os.path.exists(os.path.join(d, "version.txt")): v = open(os.path.join(d, "version.txt"), encoding="ascii").read().strip()[:20]; break
+            except Exception: pass
+        _APP_VER = v
+    return _APP_VER
+
+
 def statusKind(msg):
     """画面の文の種類: "err"（失敗）/ "warn"（注意）/ ""（ふつう）"""
     m = str(msg or "")
@@ -2079,6 +2095,20 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         last = next((l.strip() for l in reversed(tail) if l.strip()), "")
         return (f"AI が途中で止まりました: {last[:140]}" if last else (str(e) or type(e).__name__)[:160])
 
+    @staticmethod
+    def _aiDevice():
+        """AI（TotalSegmentator）がどこで動いたか。拡張と同じ決め方: CUDA の使える NVIDIA の GPU があれば GPU、無ければ CPU
+        （拡張は「--device cpu／gpu」を自分で決めて渡す。Mac の GPU〔MPS〕は、今の拡張では使わない設定＝Mac では CPU）。
+        PyTorch は、拡張が AI を動かす前に読み込んだものを見るだけ（ここで新しく読み込まない＝重くしない）。戻り値: ("GPU"/"CPU"/"不明", GPU の名前とメモリ)"""
+        t = sys.modules.get("torch")
+        if t is None: return "不明", None
+        try:
+            if t.backends.cuda.is_built() and t.cuda.is_available():
+                pr = t.cuda.get_device_properties(t.cuda.current_device())
+                return "GPU", f"{pr.name}・{pr.total_memory / 2 ** 30:.1f} GB"
+        except Exception as e: return "不明", (str(e) or type(e).__name__)[:60]
+        return "CPU", None
+
     def _runTS(self, vol, kind, status):
         try: import TotalSegmentator
         except ImportError as e: raise RuntimeError("AI の拡張（TotalSegmentator）が入っていません。HUCViewS のインストーラーをもう一度実行してください") from e
@@ -2146,7 +2176,14 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             raise RuntimeError(self._aiFailText(e, tail, kind)) from e
         finally:
             if inp is not vol: slicer.mrmlScene.RemoveNode(inp)
-        print(f"AI {kind}: {time.time() - t0:.0f} 秒（渡した CT {tuple(round(x, 2) for x in inp.GetSpacing()) if inp is not vol else '元のまま'}）")
+        dt = time.time() - t0
+        print(f"AI {kind}: {dt:.0f} 秒（渡した CT {tuple(round(x, 2) for x in inp.GetSpacing()) if inp is not vol else '元のまま'}）")
+        try:                                                                  # 性能の記録用（秒・どこで動いたか。患者情報なし）
+            dev, gname = self._aiDevice()
+            r = {"s": round(dt), "dev": dev}
+            if gname: r["gpu"] = gname
+            self.aiRec = dict(getattr(self, "aiRec", None) or {}); self.aiRec[kind] = r
+        except Exception as e: print("ai record:", e)
         if seg.GetSegmentation().GetNumberOfSegments() == 0:
             slicer.mrmlScene.RemoveNode(seg); raise RuntimeError("結果が空でした")
         seg.SetReferenceImageGeometryParameterFromVolumeNode(vol)
@@ -2218,11 +2255,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
 
     def _autoPipeline(self, vol, specs, boneLayer, status):
         t0 = time.time()
+        tm = {}; lap = [time.time()]                                          # 段階ごとの秒数（性能の記録用）
+        def mark(k):
+            now = time.time(); tm[k] = round(now - lap[0], 1); lap[0] = now
         self._noDepthPeeling()                                                # 作る途中の描画でも剥離を使わない（AMD で固まる）
-        self.sourceVolume = vol; self.calib = {}
+        self.sourceVolume = vol; self.calib = {}; self.aiRec = {}
         if self._segFor(vol, "total") is None:
             status("1/4 臓器を自動認識中（AI）…"); slicer.app.processEvents()
-            self._runTS(vol, "total", status)
+            self._runTS(vol, "total", status); mark("ai_total")
+        lap[0] = time.time()
         if self._segFor(vol, "heartchambers") is None:
             status("2/4 心腔を自動認識中（AI）…"); slicer.app.processEvents()
             self.hcError = None
@@ -2230,6 +2271,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             except Exception as e:
                 import traceback; traceback.print_exc()
                 self.hcError = str(e) or type(e).__name__; print("heartchambers:", e)
+            mark("ai_heart")
+        lap[0] = time.time()
         spacing = self.autoSpacing(vol); self.lastSpacing = spacing
         status("3/4 造影の具合を測って閾値を調整中…"); slicer.app.processEvents()
         work = self._resample(vol, spacing); self.workVolume = work
@@ -2243,9 +2286,11 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         specs = [dict(sp) for sp in specs]
         for sp in specs:
             if sp["name"] == "血液・血管": sp["lo"] = int(round(c["blood_lo"]))
+        mark("calib")
         status("4/4 3D を作成中…"); slicer.app.processEvents()
         self.wallFill = True
         self.buildLayers(vol, specs, spacing, boneLayer, status)
+        mark("surf")
         try:                                                                  # VR もここで 1 回だけ作っておく（保存されて、開いた時に VR がすぐ出る）
             status("VR を準備中…"); slicer.app.processEvents()
             c0 = self._camera(); cst = (c0.GetPosition(), c0.GetFocalPoint(), c0.GetViewUp(), c0.GetParallelScale())
@@ -2256,11 +2301,43 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         except Exception as e:
             import traceback; traceback.print_exc()
             self.vrPrepError = str(e); print("VR 準備:", e)
+        mark("vr")
         self._hideInternalVolumes()
         rep = self.qualityReport(vol, c, time.time() - t0)
         issues = self.checkCase()
         if issues: rep += "\n⚠ 点検: " + "／".join(issues)
+        tm["all"] = round(time.time() - t0, 1)
+        try: self._buildPerfLog(vol, tm, issues)
+        except Exception as e: print("build perf log:", e)
         return rep
+
+    @staticmethod
+    def _issueCodes(issues, hcError=None):
+        """点検の結果を、性能の記録に残せる短い種類に直す（画像の名前・エラーの文そのものは残さない）"""
+        codes = []
+        for m in issues or []:
+            for key, code in (("元の CT が見つかりません", "元の CT なし"), ("作業用の画像", "作業用の画像を使用"), ("全身ラベルがありません", "全身ラベルなし"),
+                              ("心腔ラベルがありません", "心腔ラベルなし"), ("VR の準備に失敗", "VR 準備の失敗")):
+                if key in m and code not in codes: codes.append(code)
+            if m.startswith("一部が作れませんでした"):
+                parts = re.findall(r"(?:^|・|: )([^・:（]+)（", m)
+                codes.append("部品の失敗: " + "・".join(p.strip() for p in parts if p.strip())[:40])
+        if hcError and "心腔ラベルなし" in codes:
+            low = str(hcError)
+            why = "ライセンス" if "ライセンス" in low else ("メモリ" if "メモリ" in low else ("ネットワーク" if "ネットワーク" in low else "そのほか"))
+            codes[codes.index("心腔ラベルなし")] = f"心腔ラベルなし（{why}）"
+        return codes
+
+    def _buildPerfLog(self, vol, tm, issues):
+        """3D を作った時間を段階ごとに、性能の記録へ（患者情報なし: 秒・画像の大きさ・AI がどこで動いたか・PyTorch の種類・点検の種類だけ）。
+        PyTorch の種類（例 2.14.1+cpu ＝ CPU 専用）で、GPU 用の部品を入れると速くなる PC かが分かる"""
+        import importlib.metadata as md
+        try: tv = md.version("torch")
+        except Exception: tv = None
+        rec = {"kind": "3D を作る時間(秒)", "t": tm, "ai": getattr(self, "aiRec", None) or {}, "torch": tv,
+               "ct": list(vol.GetImageData().GetDimensions()) if vol is not None and vol.GetImageData() is not None else None,
+               "mm": round(float(getattr(self, "lastSpacing", 0) or 0), 2), "check": self._issueCodes(issues, getattr(self, "hcError", None))}
+        self._perfLog(rec)
 
     def adoptScene(self):
         """保存した症例（.mrb）を開いたあと、シーン中の CV モデルを引き継ぐ"""
@@ -4488,6 +4565,8 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         """性能の記録（患者情報なし: GPU 名・描画時間だけ）。PC の中と、届けば NAS の logs にも残す（離れた所から調整できるように）"""
         import json
         pc = os.environ.get("COMPUTERNAME") or __import__("socket").gethostname()
+        rec = dict(rec)                                                      # 呼んだ側の dict（self.perf など）は書き換えない
+        if appVer(): rec.setdefault("ver", appVer())                          # どの版の記録か（更新が届いたかを離れた所から確かめる）
         line = time.strftime("%Y-%m-%d %H:%M ") + pc + " " + json.dumps(rec, ensure_ascii=False) + "\n"
         home = os.path.expanduser("~")
         for d in (home, self._nasLogDir()):

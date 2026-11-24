@@ -543,7 +543,8 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         try:
             self._say(f"読み込み中…（{folder}）　CD からは 1〜3 分かかります")
             self.progressBar.setRange(0, 0); self.progressBar.show(); self.progressLabel.setText("CD から PC へ取り込み中…"); self.progressLabel.show(); slicer.app.processEvents()
-            rows, info = self.logic.importFolder(folder)
+            t0 = time.time(); rows, info = self.logic.importFolder(folder)
+            self._perf({"kind": "読み込み(秒)", "t": round(time.time() - t0, 1), "series": len(rows), "cd": bool(getattr(self.logic, "_lastCopy", False))})
             self.infoLabel.setText(info); self.infoLabel.setVisible(bool(info))
             try:
                 import CardiacView; CardiacView.paintStatus(self.infoLabel, info)  # 患者・検査日が混ざっている時（⚠）は色を変える
@@ -601,7 +602,8 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
         try:
             prog.enter("load")
             self._say("シリーズを読み込み中…")
-            vol = self.logic.loadSeries(s)
+            tim = {}; t0 = time.time()                                        # 入口の段階ごとの秒数（性能の記録用。患者情報なし）
+            vol = self.logic.loadSeries(s); tim["load"] = round(time.time() - t0, 1)
             cv = slicer.modules.cardiacview.widgetRepresentation().self()
             self.logic.resetCardiacView(cv)
             cv.volumeSelector.setCurrentNode(vol)
@@ -614,18 +616,23 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             self._say(cv.statusLabel.text)
             ph = s.get("phases") or []
             if len(ph) >= 2:                                                  # 4D: ほかの位相も読み込んで、動く心臓を準備
+                t0 = time.time()
                 try:
                     vols = [(lab, vol if uid == s["uid"] else self.logic.phaseLoader(uid, vol)) for lab, uid, _ in ph]   # 1 位相ずつ読み込み→切り出し→消す
                     cv.logic.setup4D(vols, status=lambda m: (prog.message(m), self._say(m)))
                 except Exception as e:
                     import traceback; traceback.print_exc(); self._say(f"4D の準備に失敗しました（3D はそのまま使えます）: {e}")
+                tim["d4"] = round(time.time() - t0, 1); tim["n4"] = len(ph)
             prog.enter("save")
+            t0 = time.time()
             try:
                 path = self.logic.saveCase(s); saved = f"\n症例を保存しました（{os.path.basename(path)}）。"
             except Exception as e:                                            # 3D はできている。保存の失敗だけを知らせて、そのまま見られるようにする
                 import traceback; traceback.print_exc(); saved = f"\n⚠ 症例を保存できませんでした: {e}"
                 slicer.util.warningDisplay(f"3D はできましたが、症例を保存できませんでした。\n{e}", windowTitle=APP_TITLE)
             ok = True
+            tim["save"] = round(time.time() - t0, 1); tim["slices"] = s.get("n")
+            self._perf(dict({"kind": "入口の時間(秒)"}, **tim))
             n4 = cv.logic.n4D() if hasattr(cv.logic, "n4D") else 0
             self._say(cv.statusLabel.text + saved
                       + (f"\n4D（{n4} 位相）も準備できました。操作パネルの「4D」の ▶ 再生で動きます。" if n4 >= 2 else ""))
@@ -639,6 +646,11 @@ class HeartViewWidget(ScriptedLoadableModuleWidget):
             try:
                 if cv is not None: cv.__dict__.pop("_status", None)           # CardiacView の文の出し方を元に戻す（この後の文を、入口の進み具合へ流し続けない）
             except Exception: pass
+
+    def _perf(self, rec):
+        """性能の記録（CardiacView と同じ所＝この PC と NAS の logs。患者情報なし: 秒と数だけ）。記録に失敗しても、ほかには何もしない"""
+        try: slicer.modules.cardiacview.widgetRepresentation().self().logic._perfLog(rec)
+        except Exception as e: print("[HeartView] 性能の記録:", e)
 
     # ------------------------------------------------------------------ 保存していない変更
     def _askLeave(self, exiting=False):
@@ -944,7 +956,8 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
             else: st.remove(key)
             with open(os.path.join(self._tmpDir, TMPDB_PID), "w") as f: f.write(str(os.getpid()))
         except Exception as e: print("tmpdb:", e)
-        DICOMUtils.importDicom(folder, db, copyFiles=_isRemovable(folder))   # CD/USB だけ PC 内へコピー（PC 内のフォルダはそのまま読む）
+        self._lastCopy = _isRemovable(folder)
+        DICOMUtils.importDicom(folder, db, copyFiles=self._lastCopy)          # CD/USB だけ PC 内へコピー（PC 内のフォルダはそのまま読む）
         rows = []; pid = sdate = ""
         for p in db.patients():
             for st in db.studiesForPatient(p):
