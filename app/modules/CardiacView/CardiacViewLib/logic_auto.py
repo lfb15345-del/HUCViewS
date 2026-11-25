@@ -343,6 +343,10 @@ class AutoMixin:
             w = slicer.modules.cardiacview.widgetRepresentation().self()
             w.paintButton.blockSignals(True); w.paintButton.checked = False; w.paintButton.blockSignals(False)
         except Exception: pass
+        for n in self._measureNodes():                                       # 面積の計測: 点を動かした時に面積を出し直す見張りを付け直す（見張りは保存されない）
+            if n.GetAttribute("CV.measure") == "area":
+                try: self._watchArea(n)
+                except Exception as e: print("area watch:", e)
         self._updateBounds()
         try: self.studioLighting(self._bg(), ssao=True)
         except Exception: pass

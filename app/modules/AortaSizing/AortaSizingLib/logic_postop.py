@@ -206,10 +206,17 @@ class PostOpMixin:
             from scipy import ndimage
             sp = self.vol.GetSpacing(); it = lambda mm, ax: max(1, int(round(mm / sp[ax])))
             def dil(m, mm):
+                """mm だけ広げる。頭尾（z）は z の回数まで: 6 方向に z の回数、面内がそれより多ければ残りは面内だけ
+                （前は多い方の回数を 6 方向に広げていたので、厚いスライスの術前 CT では頭尾へ 3 mm のつもりが 20 mm ほど広がった。
+                 z がいちばん細かい・等方の CT では前と 1 ビットも同じ）"""
                 if m is None: return None
                 st = np.zeros((3, 3, 3), bool); st[1, 1, :] = st[1, :, 1] = st[:, 1, 1] = True
+                nxy, nz = it(mm, 0), it(mm, 2)
                 out = m
-                for _ in range(max(it(mm, 0), it(mm, 2))): out = ndimage.binary_dilation(out, st)
+                for _ in range(max(nxy, nz) if nz >= nxy else nz): out = ndimage.binary_dilation(out, st)
+                if nxy > nz:
+                    sxy = np.zeros((3, 3, 3), bool); sxy[1, 1, :] = sxy[1, :, 1] = True
+                    for _ in range(nxy - nz): out = ndimage.binary_dilation(out, sxy)
                 return out
             ao = self._mask(("aorta",))
             bo = self._mask(("vertebra", "rib", "sternum", "clavicula", "scapula", "hip", "sacrum", "femur", "humerus", "costal"))

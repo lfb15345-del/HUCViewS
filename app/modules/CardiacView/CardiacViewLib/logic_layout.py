@@ -523,20 +523,7 @@ class LayoutMixin:
         if kind == "area":                                  # Slicer 標準の面積は 0 のままになるので、自前で計算して名前に出す
             try: n.GetMeasurement("area").SetEnabled(False); n.GetMeasurement("length").SetEnabled(True)
             except Exception: pass
-            base = n.GetName()
-            def upd(caller=None, ev=None, n=n, base=base):
-                try:
-                    P = slicer.util.arrayFromMarkupsCurvePoints(n, world=True)
-                    if P is None or len(P) < 3: return
-                    c = P.mean(0); _, _, vt = np.linalg.svd(P - c, full_matrices=False)
-                    q = (P - c) @ vt[:2].T; x, y = q[:, 0], q[:, 1]
-                    a = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))   # 当てはめた平面の上の面積（mm2）
-                    nm = f"{base}: {a / 100.0:.2f} cm2"
-                    if n.GetName() != nm: n.SetName(nm)
-                except Exception as e: print("area:", e)
-            for evn in (slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, slicer.vtkMRMLMarkupsNode.PointModifiedEvent,
-                        slicer.vtkMRMLMarkupsNode.PointRemovedEvent, slicer.vtkMRMLMarkupsNode.PointEndInteractionEvent):
-                n.AddObserver(evn, upd)
+            self._watchArea(n)
         d = n.GetDisplayNode()
         col = {"line": (1.0, 0.85, 0.2), "poly": (0.4, 1.0, 0.6), "curve": (0.4, 0.9, 1.0), "area": (1.0, 0.55, 0.9), "angle": (1.0, 0.7, 0.3)}[kind]
         d.SetSelectedColor(*col); d.SetColor(*col); d.SetActiveColor(1.0, 1.0, 1.0)
@@ -550,6 +537,27 @@ class LayoutMixin:
         inter.SetPlaceModePersistence(1 if kind in ("poly", "curve", "area") else 0)   # 多点は右クリックで終了
         inter.SetCurrentInteractionMode(inter.Place)
         return n
+
+    @staticmethod
+    def _watchArea(n):
+        """面積の計測 n: 点を置く・動かす・消すたびに、当てはめた平面の上の面積を名前に出す（「A1: 2.34 cm2」）。
+        見張り（観察者）は症例のファイルに保存されないので、保存した症例を開いた時にも付け直す（adoptScene）。
+        前は付け直していなかったので、開き直した後に点を動かすと、面積の数字が古いまま残った。ロジックはつかまない（症例を替えても残らない）"""
+        base = (n.GetName() or "").split(":")[0].strip() or (n.GetName() or "A")
+        def upd(caller=None, ev=None, n=n, base=base):
+            try:
+                P = slicer.util.arrayFromMarkupsCurvePoints(n, world=True)
+                if P is None or len(P) < 3: return
+                c = P.mean(0); _, _, vt = np.linalg.svd(P - c, full_matrices=False)
+                q = (P - c) @ vt[:2].T; x, y = q[:, 0], q[:, 1]
+                a = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))   # 当てはめた平面の上の面積（mm2）
+                nm = f"{base}: {a / 100.0:.2f} cm2"
+                if n.GetName() != nm: n.SetName(nm)
+            except Exception as e: print("area:", e)
+        for evn in (slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, slicer.vtkMRMLMarkupsNode.PointModifiedEvent,
+                    slicer.vtkMRMLMarkupsNode.PointRemovedEvent, slicer.vtkMRMLMarkupsNode.PointEndInteractionEvent):
+            n.AddObserver(evn, upd)
+        upd()
 
     def startRuler(self):
         return self.startMeasure("line")

@@ -104,7 +104,7 @@ class MeasureUIMixin:
 
     def _recenter(self, whole):
         s0 = self.logic.curS
-        self._busy(lambda: (self.logic.recenter(self.logic.path, None if whole else s0, self._say), self.logic.setPosition(min(s0, self.logic.length)), self.refreshReadout()))
+        self._busy(lambda: (self.logic.recenter(self.logic.path, None if whole else s0, self._say), self.logic.setPosition(min(self.logic.curS, self.logic.length)), self.refreshReadout()))   # 置き直した今の位置（体の同じ所）へ
 
     def _mode(self, m):
         self._busy(lambda: (self.logic.setMode(m), self.refreshReadout()))

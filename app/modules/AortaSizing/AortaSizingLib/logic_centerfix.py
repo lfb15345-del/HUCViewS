@@ -278,6 +278,7 @@ class CenterlineFixMixin:
         pl = getattr(self, "plan", None)
         if pl and pl.get("path") == name:
             for key in ("p", "d"): pl[key] = mv(pl.get(key))
+            if pl.get("adj"): pl["adj"] = [(mv(a[0]),) + tuple(a[1:]) for a in pl["adj"]]   # シミュレーションの手直し（その高さ・ずらし・太さ）も同じ所へ（前は計画の両端だけ）
         for e in getattr(self, "entries", None) or []:
             if e.get("path") == name: e["s"] = mv(e["s"])
         ac = getattr(self, "actual", None)
@@ -342,6 +343,7 @@ class CenterlineFixMixin:
         self.straight = self._straightNode(name, out)
         if wl: self.straight.GetDisplayNode().SetWindowLevel(*wl)              # 見ていたウィンドウはそのまま
         self._built[name] = dict(n=c.GetNumberOfControlPoints(), cp=slicer.util.arrayFromMarkupsControlPoints(c, world=True), frames=new, vol=self.straight)
+        self._builtRemember(name)                                             # Ctrl+Z で大きく戻す時（全部作り直しになる時）に、この形をそのまま使えるように
         self.sharedLen = self._sharedLength()
         status("断面を計算中…")
         self._profile(reuse=(oldProf, a, b, shift))
@@ -358,10 +360,11 @@ class CenterlineFixMixin:
             cx, cy = m["centroid"]
             if math.hypot(cx, cy) > 20: return None
             return cx * self.B[k] + cy * self.N[k]
+        cps0 = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
         if s is not None:
             k = self._k(s); off = offsetAt(k)
             if off is None: raise RuntimeError("この断面では輪郭が取れません")
-            cps = slicer.util.arrayFromMarkupsControlPoints(c, world=True)
+            cps = cps0
             d = np.linalg.norm(cps - self.P[k], axis=1); i = int(np.argmin(d))
             if d[i] < 6: c.SetNthControlPointPositionWorld(i, *(cps[i] + off))
             else:
@@ -382,7 +385,13 @@ class CenterlineFixMixin:
             c.RemoveAllControlPoints()
             for t, k, o in zip(ts, ks, offs):
                 if t % 10 < 1e-6 or t == ts[-1]: c.AddControlPoint(vtk.vtkVector3d(*(self.P[k] + o)))
-        self.rebuild(name, status)
+        # 「中心に寄せる」も、ほかの直し方（Ctrl+クリック・合わせるモード）と同じに: Ctrl+Z で戻せる・印・計画・エントリー・術後の範囲・計測を体の同じ所へ置き直す・回転はそのまま
+        # （前は作り直すだけで、長さが変わると先の印や計画が 1〜数 mm ずれ、Ctrl+Z でも戻せなかった）
+        self._hist = getattr(self, "_hist", []); self._hist.append(("center", (name, cps0.copy())))
+        if name == self.path: self._rebuildKeep(status)
+        else:
+            F0 = self.frames.get(name); Pold = None if F0 is None else F0["P"].copy()
+            self.rebuild(name, status); self._reprojectAfterRebuild(name, Pold)
 
     def editMode(self, on, name):
         lm = slicer.app.layoutManager(); c = self.curves.get(name)

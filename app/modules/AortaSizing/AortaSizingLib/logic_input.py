@@ -205,6 +205,7 @@ class InputMixin:
             return
         p, d = sorted((self._pickP, s))
         if d < p + 10.0: d = min(p + 10.0, self.length - 1.0)
+        p = min(p, max(d - 10.0, 0.0))                                      # 経路の端をクリックした時も 近位端 ＜ 遠位端（前は 1 mm 逆になり、グラフトが出なかった）
         self._pickP = None; self.pickPD = None; pl["p"], pl["d"] = p, d; pl["path"] = self.path
         cb = getattr(self, "onKey", None)
         if cb: qt.QTimer.singleShot(0, lambda: cb("tvplan"))
@@ -220,7 +221,7 @@ class InputMixin:
             return
         if getattr(self, "_tvDrag", None) is not None:
             self._tvDrag = None; self.rangeMode = False; pl = self.plan
-            if pl["d"] < pl["p"] + 10.0: pl["d"] = min(pl["p"] + 10.0, self.length - 1.0)
+            if pl["d"] < pl["p"] + 10.0: pl["d"] = min(pl["p"] + 10.0, self.length - 1.0); pl["p"] = min(pl["p"], max(pl["d"] - 10.0, 0.0))   # 端でも 近位端 ＜ 遠位端
             self._abort(it); cb = getattr(self, "onKey", None)
             if cb: qt.QTimer.singleShot(0, lambda: cb("tvplan"))
             return

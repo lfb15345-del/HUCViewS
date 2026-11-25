@@ -214,7 +214,7 @@ class CoreMixin:
             paths[name] = best
         for n in list(slicer.util.getNodesByClass("vtkMRMLMarkupsCurveNode")):
             if n.GetName().startswith("SA 中心線"): slicer.mrmlScene.RemoveNode(n)
-        self.curves = {}; self.frames = {}; self._built = {}; self.markers = []; self.baseS = None
+        self.curves = {}; self.frames = {}; self._built = {}; self._builtOld = {}; self.markers = []; self.baseS = None
         for name, pts in paths.items():
             c = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode", f"SA 中心線 {name}")
             s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
@@ -443,12 +443,18 @@ class CoreMixin:
         if built is not None and built["n"] == c.GetNumberOfControlPoints() and np.allclose(built["cp"], slicer.util.arrayFromMarkupsControlPoints(c, world=True)):
             self.frames[name] = built["frames"]; self._use(name); self.straight = built["vol"]
         else:
-            status("中心線をならして、伸ばした画像を作成中…")
-            self.frames[name] = self._frames(cp); self._use(name); self._reseat(c)
-            self.frames[name] = self._frames(slicer.util.arrayFromMarkupsCurvePoints(c, world=True).astype(float)); self._use(name)   # 点を置き直した曲線そのものに合わせる（後の部分修正と一致させる）
+            old = self._builtLookup(name, slicer.util.arrayFromMarkupsControlPoints(c, world=True))
+            if old is not None:                                               # 前に作った形と同じ制御点（Ctrl+Z で戻した時）: その時の中心線をそのまま使う
+                status("前の中心線に戻しています…")                               # （作り直すと、もう一度ならされて端が縮み・曲がりが丸まった。TAR の症例で全長 −6 mm・横 最大 1.2 mm）
+                self.frames[name] = old; self._use(name)
+            else:
+                status("中心線をならして、伸ばした画像を作成中…")
+                self.frames[name] = self._frames(cp); self._use(name); self._reseat(c)
+                self.frames[name] = self._frames(slicer.util.arrayFromMarkupsCurvePoints(c, world=True).astype(float)); self._use(name)   # 点を置き直した曲線そのものに合わせる（後の部分修正と一致させる）
             for key in [k for k in self.cache if name in k[:2]]: self.cache.pop(key)
             self.straight = self._straighten(name)
             self._built[name] = dict(n=c.GetNumberOfControlPoints(), cp=slicer.util.arrayFromMarkupsControlPoints(c, world=True), frames=self.frames[name], vol=self.straight)
+            self._builtRemember(name)
         self.sharedLen = self._sharedLength()
         status("断面を計算中…")
         self._profile()
@@ -457,6 +463,24 @@ class CoreMixin:
         self.curS = min(self.curS, self.length)
         self.showLayout()
         self.setRotation(0.0)
+
+    BUILT_KEEP = 8                                                            # 経路ごとに覚えておく前の中心線の数（1 つ 0.2 MB ほど）
+
+    def _builtRemember(self, name):
+        """今の中心線（制御点とフレーム）を覚える。Ctrl+Z で同じ制御点に戻った時に、作り直さずにそのまま使う（rebuild）"""
+        b = self._built.get(name)
+        if b is None: return
+        lst = self.__dict__.setdefault("_builtOld", {}).setdefault(name, [])
+        lst.append(dict(cp=np.array(b["cp"], float), frames={k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in b["frames"].items()}))
+        del lst[:-self.BUILT_KEEP]
+
+    def _builtLookup(self, name, cps):
+        """覚えた中心線のうち、制御点が同じもののフレーム（無ければ None）"""
+        cps = np.asarray(cps, float)
+        for b in reversed((getattr(self, "_builtOld", None) or {}).get(name, [])):
+            if b["cp"].shape == cps.shape and np.allclose(b["cp"], cps, rtol=0.0, atol=1e-6):
+                return {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in b["frames"].items()}
+        return None
 
     def _sharedLength(self):
         others = [k for k in self.curves if k != self.path]

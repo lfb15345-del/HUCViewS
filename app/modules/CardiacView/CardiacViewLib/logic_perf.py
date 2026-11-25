@@ -54,6 +54,9 @@ class PerfMixin:
                 try: self.colorWallEpiEndo()
                 except Exception: pass
             k += 1; ms = self._frameMs(); steps.append(f"mesh 1/{2 ** k}")
+        if k:                                                                 # 間引くと面の点の色の配列が落ちる → 心腔の血液の面（左房・左室・右房・右室の色）を塗り直す
+            try: self._colorChambersLR()                                      # （前は遅い PC で 3D を作った直後、4 部屋の色分けが消えていた。開き直すと戻った）
+            except Exception as e: print("chambers LR:", e)
         perf["surf_ms"] = round(ms, 1); perf["steps"] = steps
         self.perf = perf
         self._perfLog(perf)

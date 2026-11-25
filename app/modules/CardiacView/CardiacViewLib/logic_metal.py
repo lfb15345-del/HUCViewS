@@ -191,6 +191,7 @@ class MetalMixin:
         sh = near.shape                                         # (z, y, x)
         if np.abs(M[:3, :3] - np.diag(np.diag(M[:3, :3]))).max() > 1e-3:
             src, sarr, M = work, arr, np.eye(4)                  # 向きが違う時は作業画像で（まれ）
+            work.GetIJKToRASMatrix(S)                            # 面の置き場所（boxAt）も作業画像の行列で（前は元 CT の行列のままで、面がずれた。_srcSub は前から正しい）
         # 心臓・血管の近く（作業画像の箱）だけ元CTから切り出す
         zz, yy, xx = np.nonzero(near.any(axis=(1, 2)))[0], np.nonzero(near.any(axis=(0, 2)))[0], np.nonzero(near.any(axis=(0, 1)))[0]
         lo_w = np.array([xx.min(), yy.min(), zz.min()]) - 1; hi_w = np.array([xx.max(), yy.max(), zz.max()]) + 1

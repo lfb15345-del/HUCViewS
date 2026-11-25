@@ -236,7 +236,8 @@ class TevarPlanMixin:
         pl = getattr(self, "plan", None) or {}; tv = self.tlValid() if self.P is not None else False
         key = (round(float(lo), 2), round(float(hi), 2), round(float(Dp), 2), round(float(Dd), 2), path, self.path, id(self.straight),
                bool(pl.get("tl")), pl.get("flap"), pl.get("ends"), pl.get("axis"), tuple(tuple(float(x) for x in a) for a in (pl.get("adj") or [])),
-               tv, id(self.tl) if tv else 0, self.tl.get("ver", 0) if tv else 0, len(self.P) if self.P is not None else 0)
+               tv, id(self.tl) if tv else 0, self.tl.get("ver", 0) if tv else 0, len(self.P) if self.P is not None else 0,
+               self._stVerOf(path))                                           # 伸ばした画像の版: 中心線を直して断面の数が変わらない時も、前の形を使わない（前は古い中心線に沿ったグラフトが出ることがあった）
         mem = self.__dict__.setdefault("_ggMemo", {})
         if key in mem:
             F, ks, R, C, gr, nom = mem[key]; self._graftRad = gr; self._graftNominal = nom

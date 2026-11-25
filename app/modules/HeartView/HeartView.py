@@ -1126,13 +1126,31 @@ class HeartViewLogic(ScriptedLoadableModuleLogic):
         return load
 
     def resetCardiacView(self, cv):
-        """CardiacView の状態を新しい症例用にリセット"""
+        """CardiacView の状態を新しい症例用にリセット。
+        前の症例のロジックは中身を捨てる: タイマー（VR の画質・パッチ・一言）を止め、左下の全体図（前の症例の小さな心臓）を外し、__dict__ を空にする。
+        前は新しいロジックに替えるだけで、VR を動かした症例などは タイマー ↔ ロジック の輪（gc で回収できない）や 3D の大きさの見張り（slicer._cvSizeTag）から
+        前の CT・作業用の画像・面・VR の配列が離されず、症例を替えるたびにメモリに残った。全体図も、次の 3D を作っている間は前の症例のままだった"""
         import CardiacView
         old = cv.logic
         tag = getattr(old, "_viewObsTag", None)
         if tag is not None:
             try: old._view().interactor().RemoveObserver(tag)
             except Exception: pass
+        for t in ("_vrTimer", "_ptTimer", "_flashTimer"):
+            try: getattr(old, t).stop()
+            except Exception: pass
+        ins = getattr(old, "inset", None)
+        if ins is not None:
+            try: ins.remove(); ins.view.scheduleRender()
+            except Exception: pass
+            if getattr(slicer, "_cvInset", None) is ins: slicer._cvInset = None
+        slicer._cvInsetCache = {}                                              # 全体図の形の覚え（前の症例の面から作ったもの）
+        try:                                                                   # 3D の上の文（左上の「4D 75%」など・右上のウィンドウ）も前の症例のものを消す
+            h = CardiacView._hud()                                             # （前は 4D の症例から別の症例を開くと、左上に前の 4D の位相が出たままだった）
+            for pos in ("tl", "tr"): h.set("3d", pos, None)
+        except Exception as e: print("[HeartView] hud:", e)
+        try: old.__dict__.clear()
+        except Exception: pass
         cv.logic = CardiacView.CardiacViewLogic()
 
     def saveCase(self, s):
