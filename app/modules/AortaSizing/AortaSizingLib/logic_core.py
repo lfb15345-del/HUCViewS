@@ -407,7 +407,7 @@ class CoreMixin:
             P = PP[k0:k1, None, None, :]; Nn = NN[k0:k1, None, None, :]; Bb = BB[k0:k1, None, None, :]
             Q = P + UU[None, :, :, None] * Bb + VV[None, :, :, None] * Nn
             H = Q.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
-            out[k0:k1] = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=3, prefilter=False, mode="nearest").reshape(k1 - k0, nu, nu).astype(np.int16)
+            out[k0:k1] = _mapCoords(self.arrF, np.array([H[:, 2], H[:, 1], H[:, 0]]), 3).reshape(k1 - k0, nu, nu).astype(np.int16)   # 座標（行列の掛け算）はここで 1 つで作り、CT を読む所だけ同時に
         return out
 
     def _stVerOf(self, path=None):

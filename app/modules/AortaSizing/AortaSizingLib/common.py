@@ -318,6 +318,47 @@ def _bbox(mask, pad=0):
     return tuple(sl)
 
 
+def _nThreads():
+    """同時に走らせる数（CPU の数。多すぎても速くならないので 16 まで）"""
+    return max(1, min(16, os.cpu_count() or 1))
+
+
+def _splineCoef(arr):
+    """3 次スプラインの係数。メインのスレッドから呼ぶ（ワーカーの中では行列の掛け算＝BLAS を呼ばない。版 10 の下調べで、BLAS をワーカーで同時に呼ぶ形では Slicer が落ちた）。ndimage.spline_filter(arr, order=3, mode="nearest", output=float32) と同じ値。
+    向きごとの 1 次元の処理を、別の向きで切った塊ごとに同時に走らせる（scipy は計算の間 GIL を外すので CPU の数だけ速い。
+    前は 1 つの CPU だけで、512×512×372 の CT で約 20 秒かかっていた）"""
+    from scipy import ndimage
+    n = _nThreads()
+    if n <= 1 or arr.ndim != 3 or min(arr.shape) < 4:
+        return ndimage.spline_filter(arr, order=3, mode="nearest", output=np.float32)
+    from concurrent.futures import ThreadPoolExecutor
+    out = np.empty(arr.shape, np.float32); src = arr
+    with ThreadPoolExecutor(n) as ex:
+        for axis in range(3):
+            other = 1 if axis == 0 else 0                                     # この向きで切る（切った塊どうしは関係しない）
+            def job(ix, axis=axis, other=other, src=src):
+                sl = [slice(None)] * 3; sl[other] = slice(int(ix[0]), int(ix[-1]) + 1); sl = tuple(sl)
+                ndimage.spline_filter1d(src[sl], order=3, axis=axis, mode="nearest", output=out[sl])
+            list(ex.map(job, [p for p in np.array_split(np.arange(src.shape[other]), n) if len(p)]))
+            src = out
+    return out
+
+
+def _mapCoords(F, coords, order=3):
+    """ndimage.map_coordinates(F, coords, order, prefilter=False, mode="nearest") を、点を分けて同時に（点が多い時だけ）"""
+    from scipy import ndimage
+    coords = np.asarray(coords); m = coords.shape[1]; n = _nThreads()
+    if n <= 1 or m < 200000:
+        return ndimage.map_coordinates(F, coords, order=order, prefilter=False, mode="nearest")
+    from concurrent.futures import ThreadPoolExecutor
+    out = np.empty(m, F.dtype)
+    def job(ix):
+        a, b = int(ix[0]), int(ix[-1]) + 1
+        out[a:b] = ndimage.map_coordinates(F, coords[:, a:b], order=order, prefilter=False, mode="nearest")
+    with ThreadPoolExecutor(n) as ex: list(ex.map(job, [p for p in np.array_split(np.arange(m), n) if len(p)]))
+    return out
+
+
 def _zoomStep(n0, n1, f):
     """ndimage.zoom で大きさを変えた格子の、本当の刻み（入力の格子の何個ぶんか。z, y, x の順）。
     zoom は両端の画素の中心どうしを合わせるので、刻みは（入力の数−1）/（出力の数−1）。1/f とすると、厚いスライスほど奥の方で位置がずれる

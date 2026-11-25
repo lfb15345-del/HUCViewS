@@ -110,6 +110,17 @@ CV_LAYOUT_FOUR_XML = """
 """
 BONE_KEYWORDS = ("rib", "sternum", "vertebra", "clavicula", "scapula", "costal", "humerus", "hip", "sacrum")
 MAX_TRIS = 400000          # 1レイヤーあたりの三角形数の上限（操作の軽さ優先）
+
+
+def _bbox3(mask, pad=0):
+    """mask の 0 でない所を含む範囲（各軸を pad 個ずつ広げ、配列の中に収める）を slice の組で返す。無ければ None。
+    面づくり・ぼかしをこの範囲の中だけで行うのに使う（外はいつも 0 なので、余白がぼかしの半径より広ければ結果は 1 ビットも同じ）"""
+    sl = []
+    for ax in range(mask.ndim):
+        nz = np.flatnonzero(mask.any(axis=tuple(i for i in range(mask.ndim) if i != ax)))
+        if len(nz) == 0: return None
+        sl.append(slice(max(int(nz[0]) - pad, 0), min(int(nz[-1]) + 1 + pad, mask.shape[ax])))
+    return tuple(sl)
 CUT_MODES = [("切らない", None), ("画面の正面から", "VIEW"), ("前後（冠状断）", 1), ("左右（矢状断）", 0), ("上下（横断）", 2)]
 
 
@@ -2668,9 +2679,13 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         from vtk.util.numpy_support import numpy_to_vtk
         full = binary
         if step > 1: binary = np.ascontiguousarray(binary[::step, ::step, ::step])
-        img = vtk.vtkImageData(); img.SetDimensions(binary.shape[2], binary.shape[1], binary.shape[0])
+        img = vtk.vtkImageData(); bb = _bbox3(binary, 10)                   # マスクの範囲 + 10 だけで面を作る（同じ番号の格子のまま。点と三角形は前と 1 ビットも同じ・ずっと速く軽い）
+        if bb is None: img.SetDimensions(binary.shape[2], binary.shape[1], binary.shape[0]); sub = binary
+        else:
+            sub = binary[bb]; z0, y0, x0 = (b.start for b in bb)
+            img.SetExtent(x0, x0 + sub.shape[2] - 1, y0, y0 + sub.shape[1] - 1, z0, z0 + sub.shape[0] - 1)
         img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
-        img.GetPointData().SetScalars(numpy_to_vtk(np.ascontiguousarray(binary.ravel()), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR))
+        img.GetPointData().SetScalars(numpy_to_vtk(np.ascontiguousarray(sub.ravel()), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR))
         src = img
         if smooth >= 1:
             cast = vtk.vtkImageCast(); cast.SetInputData(img); cast.SetOutputScalarTypeToFloat(); cast.Update()
@@ -2740,10 +2755,12 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         P = vtk_to_numpy(out.GetPoints().GetData()).astype(float)
         N = vtk_to_numpy(out.GetPointData().GetNormals()).astype(np.float32).copy()
         M = vtk.vtkMatrix4x4(); vol.GetRASToIJKMatrix(M); A = np.array([[M.GetElement(r, c) for c in range(4)] for r in range(4)])
-        sm = ndimage.gaussian_filter(binary.astype(np.float32), 0.8)
+        bb = _bbox3(binary, 8)                                 # ぼかし（半径 3）はマスクの範囲 + 8 の中だけで（外は 0。結果は同じ）
+        off = np.zeros(3) if bb is None else np.array([b.start for b in bb], float)
+        sm = ndimage.gaussian_filter((binary if bb is None else binary[bb]).astype(np.float32), 0.8)
         def samp(Q):
             H = (np.c_[Q, np.ones(len(Q))] @ A.T)[:, :3]      # i, j, k
-            return ndimage.map_coordinates(sm, [H[:, 2], H[:, 1], H[:, 0]], order=1, mode="constant", cval=0.0)
+            return ndimage.map_coordinates(sm, [H[:, 2] - off[0], H[:, 1] - off[1], H[:, 0] - off[2]], order=1, mode="constant", cval=0.0)
         score = samp(P - N * dmm) - samp(P + N * dmm)          # 正しい向きなら > 0
         flipV = score < -0.02
         N[flipV] *= -1

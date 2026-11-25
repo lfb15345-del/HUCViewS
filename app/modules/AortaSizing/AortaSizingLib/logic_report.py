@@ -156,7 +156,7 @@ class ReportMixin:
         Q = P + UU[..., None] * X + VV[..., None] * Y
         A = np.linalg.inv(self._ijk2ras()); H = Q.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
         self._ensureArrF()
-        img = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=3, prefilter=False, mode="nearest").reshape(size, size)
+        img = _mapCoords(self.arrF, np.array([H[:, 2], H[:, 1], H[:, 0]]), order=3).reshape(size, size)
         win, lev = self._wl(); a8 = np.clip((img - (lev - win / 2)) / max(win, 1) * 255, 0, 255).astype(np.uint8)
         q = self._qimageGray(a8); p = qt.QPainter(q); p.setRenderHint(qt.QPainter.Antialiasing, True); p.setRenderHint(qt.QPainter.TextAntialiasing, True)
         Fk = self.frames[path]; Bk, Nk = Fk["B"][k], Fk["N"][k]

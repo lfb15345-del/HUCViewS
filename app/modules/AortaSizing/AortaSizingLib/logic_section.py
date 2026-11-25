@@ -74,7 +74,7 @@ class SectionMixin:
         if getattr(self, "arrF", None) is None or getattr(self, "_arrFor", None) is not self.vol:
             from scipy import ndimage
             self.arr = slicer.util.arrayFromVolume(self.vol)                    # 写さない（しきい値の比べにだけ使う）
-            self.arrF = ndimage.spline_filter(self.arr, order=3, mode="nearest", output=np.float32)
+            self.arrF = _splineCoef(self.arr)                                  # CPU の数だけ同時に（前は 1 つで約 16 秒。値は 1 ビットも同じ）
             self._rasToIjk = np.linalg.inv(self._ijk2ras()); self._arrFor = self.vol
 
     @staticmethod
