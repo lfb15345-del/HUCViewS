@@ -307,6 +307,17 @@ class _Overlay:
 _CT_PROTO_CACHE = {}
 
 
+def _bbox(mask, pad=0):
+    """mask の True を含む範囲（各軸を pad 個ずつ広げ、配列の中に収める）を slice の組で返す。True が無ければ None。
+    形の計算（ラベル・膨らませる・縮める・穴埋め）を、この範囲の中だけで行うのに使う（外はいつも False なので結果は同じで、ずっと速い）"""
+    sl = []
+    for ax in range(mask.ndim):
+        nz = np.flatnonzero(mask.any(axis=tuple(i for i in range(mask.ndim) if i != ax)))
+        if len(nz) == 0: return None
+        sl.append(slice(max(int(nz[0]) - pad, 0), min(int(nz[-1]) + 1 + pad, mask.shape[ax])))
+    return tuple(sl)
+
+
 def _zoomStep(n0, n1, f):
     """ndimage.zoom で大きさを変えた格子の、本当の刻み（入力の格子の何個ぶんか。z, y, x の順）。
     zoom は両端の画素の中心どうしを合わせるので、刻みは（入力の数−1）/（出力の数−1）。1/f とすると、厚いスライスほど奥の方で位置がずれる

@@ -81,7 +81,8 @@ class CoreMixin:
         return np.array([[m.GetElement(r, c) for c in range(4)] for r in range(4)])
 
     def _pts(self, mask):
-        idx = np.argwhere(mask); A = self._ijk2ras()
+        bb = _bbox(mask)                                                      # 範囲の中だけで探す（同じ点が同じ順に出る。CT 全体を探すより速い）
+        idx = np.zeros((0, 3), np.intp) if bb is None else np.argwhere(mask[bb]) + np.array([b.start for b in bb]); A = self._ijk2ras()
         return (np.c_[idx[:, 2], idx[:, 1], idx[:, 0], np.ones(len(idx))] @ A.T)[:, :3]
 
     # ---------------------------------------------------------------- ① 血管と中心線
@@ -114,7 +115,8 @@ class CoreMixin:
         sp = np.array(vol.GetSpacing())[::-1]                                 # (z, y, x) mm
         ISO = 1.0
         f = sp / ISO
-        vessel = ndimage.binary_closing(vessel, iterations=2)                 # 延長部のつなぎ目をふさぐ
+        bb = _bbox(vessel, 5)                                                 # 延長部のつなぎ目をふさぐ（2 回ふくらませて 2 回縮める）。ラベルの範囲 + 5 の中だけで足りる（結果は同じ）
+        if bb is not None: vc = np.zeros_like(vessel); vc[bb] = ndimage.binary_closing(vessel[bb], iterations=2); vessel = vc
         vessel = self._bridge(vessel, np.array(vol.GetSpacing())[::-1], status)  # ラベルの途切れ（5mm 厚で多い）を橋渡し
         ix = np.argwhere(vessel); lo = np.maximum(ix.min(0) - 4, 0); hi = np.minimum(ix.max(0) + 5, vessel.shape)
         crop = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))           # 血管の周りだけで計算（速さ）
@@ -130,10 +132,10 @@ class CoreMixin:
         self.surf = {"outer": self._surface(iso, A)}
         status("1/4 内腔（造影部分）の表面を作成中…")
         hu = slicer.util.arrayFromVolume(vol)
-        lum = vessel & (hu >= self.thr)
+        lum = vessel[crop] & (hu[crop] >= self.thr)                           # 血管の周り（crop）だけで計算（外はいつも False。前は CT 全体で計算していた。結果は同じ）
         lum = ndimage.binary_opening(lum, iterations=1)
         for k in range(lum.shape[0]): lum[k] = ndimage.binary_fill_holes(lum[k])
-        liso = self._smoothIso(lum[crop], sp, f) & iso
+        liso = self._smoothIso(lum, sp, f) & iso
         self.surf["lumen"] = self._surface(liso, A) if liso.sum() > 100 else self.surf["outer"]
         self._cutters = {}; self.cache = {}; self.override = {}
         self._models()
@@ -214,8 +216,10 @@ class CoreMixin:
         for name, pts in paths.items():
             c = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode", f"SA 中心線 {name}")
             s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+            wasMod = c.StartModify()                                          # 点を足すたびに知らせを出さない（まとめて 1 回）
             for t in np.arange(0, s[-1], 10.0).tolist() + [s[-1]]:
                 q = np.array([np.interp(t, s, pts[:, i]) for i in range(3)]); c.AddControlPoint(vtk.vtkVector3d(*q))
+            c.EndModify(wasMod)
             col = PATH_COLORS.get(name, (1.0, 0.85, 0.2))
             d = c.GetDisplayNode(); d.SetSelectedColor(*col); d.SetColor(*col); d.SetActiveColor(*col)
             d.SetGlyphScale(1.6); d.SetLineThickness(0.4); d.SetPointLabelsVisibility(False); d.SetVisibility(False)
@@ -233,13 +237,16 @@ class CoreMixin:
         """離れたラベルの破片を、一番近い点どうしを細い円柱でつないで本体に合流させる"""
         from scipy import ndimage
         from scipy.spatial import cKDTree
-        lab, n = ndimage.label(mask)
+        bb = _bbox(mask, 2)                                                   # ラベルの範囲 + 2 の中だけで調べる（結果は同じ）
+        if bb is None: return mask
+        off = np.array([b_.start for b_ in bb]); sub = mask[bb]
+        lab, n = ndimage.label(sub)
         if n <= 1: return mask
-        sizes = ndimage.sum(mask, lab, range(1, n + 1)); main = 1 + int(np.argmax(sizes))
+        sizes = ndimage.sum(sub, lab, range(1, n + 1)); main = 1 + int(np.argmax(sizes))
         out = mask.copy(); joined = 0
         def border(m):
             b = m & ~ndimage.binary_erosion(m)
-            return np.argwhere(b)
+            return np.argwhere(b) + off
         body = border(lab == main) * sp
         for c in np.argsort(-sizes):
             c = int(c) + 1
@@ -279,14 +286,17 @@ class CoreMixin:
         if k1 - k0 < 2: return None
         i0, i1 = int(max(0, c[0] - rad[0])), int(min(arr.shape[2] - 1, c[0] + rad[0]))
         j0, j1 = int(max(0, c[1] - rad[1])), int(min(arr.shape[1] - 1, c[1] + rad[1]))
-        box = np.zeros(arr.shape, bool); box[k0:k1 + 1, j0:j1 + 1, i0:i1 + 1] = True
-        blood = (arr >= thr) & (arr <= 1500) & box
-        lab, n = ndimage.label(blood | (iliac & box))
-        seeds = np.unique(lab[iliac & box]); seeds = seeds[seeds > 0]
+        bx = (slice(k0, k1 + 1), slice(j0, j1 + 1), slice(i0, i1 + 1))      # 箱の中だけで計算（箱の外はいつも False。前は CT 全体で計算していた。結果は同じ）
+        a_, il = arr[bx], iliac[bx]
+        blood = (a_ >= thr) & (a_ <= 1500)
+        lab, n = ndimage.label(blood | il)
+        seeds = np.unique(lab[il]); seeds = seeds[seeds > 0]
         if len(seeds) == 0: return None
-        grown = np.isin(lab, seeds) & ~iliac
+        grown = np.isin(lab, seeds) & ~il
         if grown.sum() < 30: return None
-        return ndimage.binary_opening(grown, iterations=1) | (grown & ndimage.binary_erosion(grown))
+        out = np.zeros(arr.shape, bool)
+        out[bx] = ndimage.binary_opening(grown, iterations=1) | (grown & ndimage.binary_erosion(grown))
+        return out
 
     def _smoothIso(self, mask, sp, f):
         """5mm 厚のマスクを、mm 単位の符号付き距離で等方アップサンプルして滑らかな面にする"""
