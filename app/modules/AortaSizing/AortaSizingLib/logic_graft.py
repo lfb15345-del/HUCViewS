@@ -329,32 +329,41 @@ class GraftMixin:
         skipK = np.zeros(K, bool)
         for a, b in skip: skipK[max(0, a - int(3 / ST)):min(K, b + int(3 / ST))] = True
         M = np.zeros(S.shape, bool)
-        for k in range(K):
-            if skipK[k]: continue
+        def cand(k):                                                         # 断面 k の膜の候補（scipy.ndimage と要素ごとの計算だけ → 同時に走らせてよい。行列の計算（SVD・polyfit）は下でメインのスレッドで）
             t = ndimage.gaussian_filter(S[k], 0.6); lum = np.percentile(S[k][rad < 12], 90)
-            if lum < 200: continue
+            if lum < 200: return None
             lo = 60 + 0.3 * (lum - 60); hi = 0.5 * (lum + 60)
             lb, n = ndimage.label((t >= lo) & (t < 600)); keep = np.zeros((nu, nu), bool)
-            for i in range(1, n + 1):
-                mm_ = lb == i
-                if mm_.sum() >= 30 and rad[mm_].min() <= 10: keep |= mm_
-            if not keep.any(): continue
+            if n:                                                            # 30 画素以上で、中心から 10 mm 以内に届く塊だけ（前は塊ごとの Python のループ。選ぶ塊は同じ）
+                idx = np.arange(1, n + 1); cnt = np.bincount(lb.ravel(), minlength=n + 1)[1:]
+                sel = idx[(cnt >= 30) & (np.asarray(ndimage.minimum(rad, lb, idx)) <= 10)]
+                if len(sel): keep = np.isin(lb, sel)
+            if not keep.any(): return None
             ins = ndimage.binary_fill_holes(ndimage.binary_closing(np.pad(keep, 10), disk(6))[10:-10, 10:-10]); ins = ndimage.binary_erosion(ins, disk(2))
             th = ndimage.grey_closing(t, footprint=disk(5)) - t
             mk = ins & (th >= 55) & (t < hi); mk &= ~ndimage.binary_opening(mk, disk(4)); mk &= ndimage.binary_erosion(ins, disk(2))
             mk &= ~ndimage.binary_dilation(t >= 500, disk(6))
             lb, nn = ndimage.label(mk, np.ones((3, 3)))
-            if nn >= 1:                                                     # 一番大きい膜に沿った曲線から 3 mm 以内だけ（血栓のふち・壁ぎわを除く）
-                sz_ = ndimage.sum(mk, lb, range(1, nn + 1)); P0 = np.argwhere(lb == 1 + int(np.argmax(sz_))).astype(float)
-                if len(P0) >= 8:
-                    mu = P0.mean(0); U = np.linalg.svd(P0 - mu, full_matrices=False)[2]; Q0 = (P0 - mu) @ U.T
-                    deg = 2 if np.ptp(Q0[:, 0]) * ST > 6 else 1; cf = np.polyfit(Q0[:, 0], Q0[:, 1], deg)
-                    for _ in range(2):
-                        inl = np.abs(Q0[:, 1] - np.polyval(cf, Q0[:, 0])) * ST <= 2.0
-                        if inl.sum() >= 8: cf = np.polyfit(Q0[inl, 0], Q0[inl, 1], deg)
-                    PA = np.argwhere(mk); QA = (PA - mu) @ U.T; ok_ = np.abs(QA[:, 1] - np.polyval(cf, QA[:, 0])) * ST <= 3.0
-                    mk = np.zeros_like(mk); mk[PA[ok_, 0], PA[ok_, 1]] = True
-            M[k] = mk
+            return mk, lb, nn
+        from concurrent.futures import ThreadPoolExecutor
+        ks = [k for k in range(K) if not skipK[k]]
+        with ThreadPoolExecutor(_nThreads()) as ex:                         # 前は 1 つずつ（約 25 秒）。値は同じ
+            for b0 in range(0, len(ks), 128):                                # 128 断面ずつ（メモリを抑える）
+                kb = ks[b0:b0 + 128]
+                for k, o in zip(kb, ex.map(cand, kb)):
+                    if o is None: continue
+                    mk, lb, nn = o
+                    if nn >= 1:                                                     # 一番大きい膜に沿った曲線から 3 mm 以内だけ（血栓のふち・壁ぎわを除く）
+                        sz_ = ndimage.sum(mk, lb, range(1, nn + 1)); P0 = np.argwhere(lb == 1 + int(np.argmax(sz_))).astype(float)
+                        if len(P0) >= 8:
+                            mu = P0.mean(0); U = np.linalg.svd(P0 - mu, full_matrices=False)[2]; Q0 = (P0 - mu) @ U.T
+                            deg = 2 if np.ptp(Q0[:, 0]) * ST > 6 else 1; cf = np.polyfit(Q0[:, 0], Q0[:, 1], deg)
+                            for _ in range(2):
+                                inl = np.abs(Q0[:, 1] - np.polyval(cf, Q0[:, 0])) * ST <= 2.0
+                                if inl.sum() >= 8: cf = np.polyfit(Q0[inl, 0], Q0[inl, 1], deg)
+                            PA = np.argwhere(mk); QA = (PA - mu) @ U.T; ok_ = np.abs(QA[:, 1] - np.polyval(cf, QA[:, 0])) * ST <= 3.0
+                            mk = np.zeros_like(mk); mk[PA[ok_, 0], PA[ok_, 1]] = True
+                    M[k] = mk
         M = ndimage.binary_opening(M, np.ones((5, 1, 1), bool)); M = ndimage.binary_closing(M, np.ones((5, 3, 3), bool))
         lab, n = ndimage.label(M)
         if n == 0: return None
