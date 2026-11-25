@@ -11,7 +11,7 @@ DEV = globals().get("REL_DEV") or os.path.join(os.environ.get("USERPROFILE", os.
 REPO_DIR = os.path.join(DEV, "HUCViewS_repo")
 REPO = "lfb15345-del/HUCViewS"
 SRC_APP = os.path.join(DEV, "HeartView", "app")
-SRC_CV = os.path.join(DEV, "tools", "CardiacView", "CardiacView.py")
+SRC_CV = os.path.join(DEV, "tools", "CardiacView")             # CardiacView.py と部品（CardiacViewLib）
 DIST = os.path.join(REPO_DIR, "dist")
 FORBID = [r"\\\\[A-Za-z0-9_-]+\\"]                       # 公開してはいけない内部情報（UNC パスなど）。個別の語は下の非公開ファイルに書く
 try: FORBID += [l.strip() for l in open(os.path.join(REPO_DIR, ".private_forbid.txt"), encoding="utf-8") if l.strip()]
@@ -28,12 +28,22 @@ def run(cmd, check=True):
     return r
 
 
+def copy_cardiacview(dst):
+    """CardiacView.py と部品（CardiacViewLib の .py）だけを写す（同じフォルダのほかのもの・__pycache__ は写さない）"""
+    os.makedirs(dst, exist_ok=True)
+    shutil.copy2(os.path.join(SRC_CV, "CardiacView.py"), os.path.join(dst, "CardiacView.py"))
+    lib = os.path.join(SRC_CV, "CardiacViewLib")
+    if os.path.isdir(lib):
+        os.makedirs(os.path.join(dst, "CardiacViewLib"), exist_ok=True)
+        for f in sorted(os.listdir(lib)):
+            if f.endswith(".py"): shutil.copy2(os.path.join(lib, f), os.path.join(dst, "CardiacViewLib", f))
+
+
 def assemble(ver):
     app = os.path.join(REPO_DIR, "app")
     if os.path.exists(app): shutil.rmtree(app)
     shutil.copytree(SRC_APP, app, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "version.txt"))
-    os.makedirs(os.path.join(app, "modules", "CardiacView"), exist_ok=True)
-    shutil.copy2(SRC_CV, os.path.join(app, "modules", "CardiacView", "CardiacView.py"))
+    copy_cardiacview(os.path.join(app, "modules", "CardiacView"))
     open(os.path.join(app, "version.txt"), "w", encoding="ascii").write(ver + "\n")
     bad = []
     for root, dirs, files in os.walk(REPO_DIR):                       # リポジトリ全体を確認（.git・dist・非公開ファイルは除く）
