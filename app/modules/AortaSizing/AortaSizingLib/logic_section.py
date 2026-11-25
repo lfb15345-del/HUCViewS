@@ -107,8 +107,8 @@ class SectionMixin:
         W = P + (c0[0] + UU)[..., None] * B + (c0[1] + VV)[..., None] * N
         A = self._rasToIjk; H = W.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
         img = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=1, prefilter=False, mode="nearest").reshape(UU.shape)
-        # 注: arrF は 3 次スプラインの係数（縁が強調された像）で、CT の値そのものではない。CT の値（self.arr）で読むと、腸骨の数断面で径が最大 0.7 mm 変わる
-        #     （2026-11-25 の試験 t_r10e）。どちらが正しいかを断面の絵で確かめるまで、今の読み方のまま（測った値を変えない）
+        # 注: arrF は 3 次スプラインの係数（縁が強調された像）で、CT の値そのものではない。CT の値（self.arr）で読む案も試した（2026-11-25）:
+        #     違いはほとんど腸骨の数断面で 1 mm 前後、大きいのは腸骨の分かれ目（測る場所ではない）だけ。輪郭を重ねた絵を見て、変えないと決めた（今の読み方のまま）
         m = ndimage.binary_opening((img > self.thr) & (img < 1200) & (UU ** 2 + VV ** 2 <= rlim ** 2), iterations=2)
         lab, n = ndimage.label(m)
         if n == 0: return None

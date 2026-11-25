@@ -53,8 +53,21 @@ class PostOpMixin:
         node.SetIJKToRASMatrix(m); node.CreateDefaultDisplayNodes()
         dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False); dn.SetWindowLevel(800, 200)
         self.post = node; self.postT = None; self.postMPR = [p for p, _ in mpr]; self._mprCache = None
+        self._forgetPost(node)
         status(f"術後 CT を読み込みました（{arr.shape[0]} 枚・{dz:.1f} mm 間隔）")
         return node
+
+    def _forgetPost(self, node=None):
+        """術後 CT を読み込み直した時: 前の術後 CT の結果（重ね合わせ・金属・手直し・広がり）を捨てる。
+        前は残っていて、手で直した重ね合わせと大動脈の外形での合わせ直しが新しい術後 CT の金属にも当たり、表・3D・広がりも「比べる」まで前のままだった"""
+        if node is not None:
+            try: node.SetAndObserveTransformNodeID(None)                         # 前の術後 CT の重ね合わせ（術後→術前）を外す
+            except Exception: pass
+        self.actual = None; self.postShift = None; self.postManual = []; self.expansion = None; self.postRms = None
+        self._regPts = None; self._segT = {}; self._segRms = None; self._alDrag = None; self.alignMode = False
+        for nm in ("TEVAR 術後（金属）", "TEVAR 術後（範囲）"):
+            m = slicer.mrmlScene.GetFirstNodeByName(nm)
+            if m is not None: slicer.mrmlScene.RemoveNode(m)
 
     @staticmethod
     def _volPts(vol, mask, stride=(1, 1, 1)):
@@ -92,6 +105,7 @@ class PostOpMixin:
         dz = best * 5.0
         zlo, zhi = T0[:, 2].min() - dz, T0[:, 2].max() - dz
         S1 = B1[(B1[:, 2] > zlo - 40) & (B1[:, 2] < zhi + 40)]
+        if len(S1) < 200: raise RuntimeError("術後 CT を術前に重ねられませんでした（術前のグラフトのまわりと同じ高さの骨が、術後 CT にありません）")
         t = np.array([np.median(T0[:, 0]) - np.median(S1[:, 0]), np.median(T0[:, 1]) - np.median(S1[:, 1]), dz])
         Rm = np.eye(3); tree = cKDTree(T0)
         if len(S1) > 60000: S1 = S1[np.random.default_rng(0).choice(len(S1), 60000, replace=False)]
@@ -106,6 +120,7 @@ class PostOpMixin:
             U, _, Vt = np.linalg.svd((A - ca).T @ (Bq - cb)); D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
             dR = Vt.T @ D @ U.T; Rm = dR @ Rm; t = dR @ (t - ca) + cb
             rms = float(np.sqrt(np.mean(d[ok] ** 2)))
+        if rms is None: raise RuntimeError("術後 CT を術前に重ねられませんでした（骨が重なりません）。同じ方の術後 CT か確かめてください")   # 前はここで「None を数字にできない」という分かりにくいエラーになった
         M = np.eye(4); M[:3, :3] = Rm; M[:3, 3] = t
         self.postT = M; self.postRms = rms
         tn = slicer.mrmlScene.GetFirstNodeByName("術後→術前") or slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "術後→術前")
@@ -172,6 +187,7 @@ class PostOpMixin:
         X = np.concatenate(keepX); s = np.concatenate(keepS)
         # 中心線に沿って 2 mm ごとに数え、すき間 20 mm 以内でつながる、いちばん点の多い範囲をグラフトとする
         b = np.floor(s / 2.0).astype(int); cnt = np.bincount(b, minlength=b.max() + 1); occ = np.where(cnt >= 3)[0]
+        if not len(occ): raise RuntimeError("術後 CT にステントの金属が見つかりませんでした")          # 金属がまばらで、どの 2 mm にも 3 点ない時（前は分かりにくいエラー）
         runs = []; st = occ[0]; pv = occ[0]
         for x in occ[1:]:
             if (x - pv) * 2.0 > 20.0: runs.append((st, pv)); st = x
@@ -387,7 +403,7 @@ class PostOpMixin:
         if cc_ is not None and cc_[0] == ck: return cc_[1]
         import pydicom
         from scipy.spatial import cKDTree
-        tree = cKDTree(self.P[::4]); Minv = np.linalg.inv(M)
+        tree = cKDTree(self.P[::4])
         from concurrent.futures import ThreadPoolExecutor
         status(f"薄い再構成（{len(files)} 枚）から金属を拾っています…")
         def rd(p):
@@ -400,7 +416,8 @@ class PostOpMixin:
                 iop = np.array([float(x) for x in d.ImageOrientationPatient]); ps = [float(x) for x in d.PixelSpacing]; o = np.array([float(x) for x in d.ImagePositionPatient])
                 X = o + cc[:, None] * iop[:3] * ps[1] + rr[:, None] * iop[3:] * ps[0]
                 X = (X * np.array([-1.0, -1.0, 1.0])).astype(np.float32)             # LPS → RAS（術後の座標）
-                Xg = X @ M[:3, :3].T + M[:3, 3]; dd, _ = tree.query(Xg, distance_upper_bound=60.0)
+                Xg = X[:, :1] * M[:3, 0] + X[:, 1:2] * M[:3, 1] + X[:, 2:3] * M[:3, 2] + M[:3, 3]   # 行列の積（BLAS）はワーカーで使わない（同時に呼ぶと Slicer が落ちることがある）
+                dd, _ = tree.query(Xg, distance_upper_bound=60.0)
                 X = X[np.isfinite(dd)]                                               # 中心線から 60 mm 以内だけ
                 return X if len(X) else None
             except Exception: return None

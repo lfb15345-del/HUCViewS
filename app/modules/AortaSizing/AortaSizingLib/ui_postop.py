@@ -9,9 +9,18 @@ class PostOpUIMixin:
     def onPostLoad(self):
         d = qt.QFileDialog.getExistingDirectory(None, "術後 CT の DICOM フォルダを選ぶ")
         if not d: return
-        n = self._busy(self.logic.loadPostFolder, d, self._say)
-        if n is not None:
-            sp = n.GetSpacing(); self.postInfo.setText(f"術後 CT: {slicer.util.arrayFromVolume(n).shape[0]} 枚・スライス間隔 {sp[2]:.1f} mm。「比べる」を押してください。")
+        self._postLoadDir(d)
+
+    def _postLoadDir(self, d):
+        L = self.logic
+        n = self._busy(L.loadPostFolder, d, self._say)
+        if n is None: return
+        # 前の術後 CT の結果は捨てた（loadPostFolder）ので、それに合わせたボタンも戻す: 手直し・同じ範囲（元の計画へ）・右の術後のストレッチ像
+        for b in (self.alignBtn, self.sameRangeBtn, self.postStretchBtn):
+            if b.checked: b.checked = False
+        try: self._tvRefresh(); self._expRefresh(); L._drawGreen(); L._showContour(exact=False)
+        except Exception as e: print("post load refresh:", e)
+        sp = n.GetSpacing(); self.postInfo.setText(f"術後 CT: {slicer.util.arrayFromVolume(n).shape[0]} 枚・スライス間隔 {sp[2]:.1f} mm。「比べる」を押してください。")
 
     def onPostCompare(self):
         L = self.logic
