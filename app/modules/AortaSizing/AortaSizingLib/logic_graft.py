@@ -230,23 +230,28 @@ class GraftMixin:
         return out
 
     # ================================================================ 頸部分枝
-    def _gBranchTrack(self, m, excl=None):
-        """枝のラベルを体軸の断面ごとにたどる: 中心の点・内腔の太さ（直交断面に補正）・起始部からの距離"""
-        a = self._gArr(); sp = np.array(self.vol.GetSpacing()); px = sp[0] * sp[1]; I2R = self._ijk2ras()
+    def _gBranchTrack(self, m, excl=None, off=(0, 0, 0)):
+        """枝のラベルを体軸の断面ごとにたどる: 中心の点・内腔の太さ（直交断面に補正）・起始部からの距離。
+        m・excl は CT 全体か、枝のまわりだけを切り出したもの（off = 切り出しの始まりの番号 z, y, x）。中心・番号・面積は CT 全体で計算した時と 1 ビットも同じ
+        （中心は ndimage.center_of_mass と同じ計算を、CT 全体の番号の格子で行う。前は 512×512 の断面全体で計算していた）"""
+        z0, y0, x0 = off; nz, ny, nx = m.shape
+        a = self._gArr()[z0:z0 + nz, y0:y0 + ny, x0:x0 + nx]; sp = np.array(self.vol.GetSpacing()); px = sp[0] * sp[1]; I2R = self._ijk2ras()
+        gy, gx = np.ogrid[y0:y0 + ny, x0:x0 + nx]; gy = gy.astype(float); gx = gx.astype(float)
         zs = np.where(m.any((1, 2)))[0]; pts = []; prev = None
         for z in zs:
             lb, n = ndimage.label(m[z])
             if n == 0: continue
-            cms = ndimage.center_of_mass(m[z], lb, range(1, n + 1)); sz = ndimage.sum(m[z], lb, range(1, n + 1))
+            idx = range(1, n + 1); sz = ndimage.sum(m[z], lb, idx)
+            cms = list(zip(ndimage.sum(m[z] * gy, lb, idx) / sz, ndimage.sum(m[z] * gx, lb, idx) / sz))   # = ndimage.center_of_mass（CT 全体の番号で）
             j = int(np.argmax(sz)) if prev is None else int(np.argmin([np.hypot(q[0] - prev[0], q[1] - prev[1]) for q in cms]))
             cy, cx = cms[j]
             if prev is not None and np.hypot(cy - prev[0], cx - prev[1]) * sp[0] > 15: continue
             prev = (cy, cx); comp = lb == j + 1
             reg = ndimage.binary_dilation(comp, iterations=2) & (a[z] > 200) & (a[z] < 1000)
             if excl is not None: reg &= ~excl[z]                         # 静脈（無名静脈・上大静脈）やとなりの枝は太さに入れない
-            l2, n2 = ndimage.label(reg); jj = l2[int(cy), int(cx)]
+            l2, n2 = ndimage.label(reg); jj = l2[int(cy) - y0, int(cx) - x0]
             if jj == 0 and n2 and comp.any(): jj = np.bincount(l2[comp]).argmax()
-            pts.append((z, cx, cy, ((l2 == jj).sum() if jj else comp.sum()) * px))
+            pts.append((z + z0, cx, cy, ((l2 == jj).sum() if jj else comp.sum()) * px))
         if len(pts) < 4: return None
         P = np.array(pts, float)
         R = (I2R @ np.c_[P[:, 1], P[:, 2], P[:, 0], np.ones(len(P))].T).T[:, :3]
@@ -295,15 +300,21 @@ class GraftMixin:
         status("頸部分枝をたどっています…")
         tr = {}; sA = {}
         vein = self._mask(("brachiocephalic vein", "superior vena cava", "subclavian vein", "jugular vein"))   # 濃く染まった無名静脈が枝に重なる
-        vein = None if vein is None else ndimage.binary_dilation(vein, iterations=1)
         ms = {key: self._mask((key,)) for key in BR_KEYS}
+        bbs = [b for b in (_bbox(m, 4) for m in ms.values() if m is not None) if b is not None]
+        if bbs:                                                             # 枝のまわり（どの枝からも 4 画素の余白）だけで計算する（前は CT 全体。結果は同じ）
+            crop = tuple(slice(min(b[i].start for b in bbs), max(b[i].stop for b in bbs)) for i in range(3)); off = tuple(c.start for c in crop)
+            if vein is not None:                                            # ふくらませるので 1 つ外まで読んでから、切り出しの範囲に戻す
+                big = tuple(slice(max(c.start - 1, 0), min(c.stop + 1, n)) for c, n in zip(crop, vein.shape))
+                vein = ndimage.binary_dilation(vein[big], iterations=1)[tuple(slice(c.start - b.start, c.stop - b.start) for c, b in zip(crop, big))]
+            ms = {key: (m[crop] if m is not None else None) for key, m in ms.items()}
         for key in BR_KEYS:
             m = ms[key]
             if m is not None and m.any():
                 ex = vein.copy() if vein is not None else np.zeros(m.shape, bool)
                 for k2, m2 in ms.items():
                     if k2 != key and m2 is not None: ex |= m2 & ~m
-                t = self._gBranchTrack(m & ~(vein if vein is not None else False), ex)
+                t = self._gBranchTrack(m & ~(vein if vein is not None else False), ex, off)
                 if t is not None: tr[key] = t
         def anast(key, **kw):
             h = None
