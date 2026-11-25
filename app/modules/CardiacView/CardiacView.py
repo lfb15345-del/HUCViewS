@@ -38,7 +38,7 @@ IMPLANT_COLOR = (0.80, 0.83, 0.90)  # 人工物（金属: 人工弁のリング�
 CALC_COLOR = (1.00, 0.92, 0.55)     # 石灰化: 明るい黄白
 WIRE_COLOR = (0.96, 0.56, 0.20)     # 胸骨ワイヤー（金属）: 銅色（骨の白と見分ける）
 PATCH_COLOR = (0.96, 0.88, 0.64)    # パッチ: 淡いクリーム（心膜・線維組織のような生体らしい色で、心臓の赤・桃・紫と見分けやすい。ミントはカビに見える。真っ白だとまぶしい・浮く。石灰化の黄白・金属の銀とは別）
-LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
+LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属・胸骨ワイヤー)", IMPLANT_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", (0.74, 0.14, 0.16)), ("肺静脈", (0.84, 0.40, 0.36)), ("心腔", (0.66, 0.28, 0.32)),
           ("肺動脈", (0.40, 0.52, 0.78)), ("上下大静脈", (0.24, 0.34, 0.60)), ("心筋・壁", (0.91, 0.80, 0.58))]
 # ---- 色合い（設定 → 見た目 → 色合い）。分け方（どの部屋・血管を何色の系統にするか）は同じで、色の濃さ・光沢だけ変える
 #   リアル: 動脈系 = 深紅（少し青みのある赤）、静脈系・右心系 = 薄紫、心筋・脂肪 = 金色。シネマティック表示に近い色（光沢やや強め）
@@ -79,7 +79,7 @@ def _setPalette(name):
     MYO_CUT_COLOR, MYO_COLOR, CALC_COLOR = p["myocut"], p["myo"], p["calc"]
     VESSEL_GROUPS = [(nm, keys, p[k]) for (nm, keys), k in zip(_VG_BASE, ("aorta", "sysvein", "pv", "heart"))]
     VESSEL_OTHER = ("血管:肺動脈ほか", p["pa"])
-    LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属)", IMPLANT_COLOR), ("胸骨ワイヤー", WIRE_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", p["aorta"]), ("肺静脈", p["pv"]),
+    LEGEND = [("石灰化", CALC_COLOR), ("人工物(金属・胸骨ワイヤー)", IMPLANT_COLOR), ("パッチの範囲（自動）", PATCH_COLOR), ("大動脈", p["aorta"]), ("肺静脈", p["pv"]),
               ("左房", p["la"]), ("左室", p["heart"]), ("右房", p["ra"]), ("右室", p["heartR"]), ("肺動脈", p["pa"]), ("上下大静脈", p["sysvein"]), ("心筋・壁", p["epi"])]
     LEGEND_WALL = [("外膜", p["epi"]), ("左心系の内膜", p["endo"]), ("右心系の内膜", p["endoR"]), ("補った壁（CT値の裏付けなし）", SYNTH_COLOR), ("心筋（AIラベル）", p["myocut"])]
     return p
@@ -534,7 +534,7 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         for k, name in enumerate(("心臓壁", "心筋", "血液・血管", "軟部組織", "骨", "人工物・石灰化", "パッチ")):
             cb = qt.QCheckBox("心筋（AI）" if name == "心筋" else name); cb.checked = True; g.addWidget(cb, k // 2, k % 2); self.layerChecks[name] = cb
             if name == "心筋": cb.setToolTip("心筋は AI（TotalSegmentator）のラベルから作っています。欠損を塗りつぶすことがあるので、外すと CT 値だけの壁が見えます")
-            if name == "人工物・石灰化": cb.setToolTip("金属（人工弁のリング・ステント・クリップ）= 銀、胸骨ワイヤー = 銅色、石灰化 = 黄白")
+            if name == "人工物・石灰化": cb.setToolTip("金属（人工弁のリング・ステント・クリップ・胸骨ワイヤー）= 銀、石灰化 = 黄白")
             if name == "パッチ": cb.setToolTip("術後の CT から自動で出したパッチの範囲（緑）。左室と右室の血液を 2 mm 以下の薄い仕切りだけで隔てている所（術前の CT があれば、術前の穴・術前から同じ所も区別）")
         _it = lambda n, cc: f'<span style="white-space:nowrap"><span style="color:rgb({int(cc[0]*255)},{int(cc[1]*255)},{int(cc[2]*255)})">■</span>{n}</span>'
         leg = " &nbsp;".join(_it(n, cc) for n, cc in LEGEND)
@@ -620,13 +620,11 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.patchFaceButton = B("正面から見る", None, "塗ったパッチを正面に向けて、その手前を切る（パッチの面で切る）"); r.addWidget(self.patchFaceButton, 1)
         self.patchUndoButton = B("1つ戻す", None, "最後のひと塗りを取り消す"); r.addWidget(self.patchUndoButton)
         self.patchClearButton = B("全部消す", None, "塗ったパッチを全部消す"); r.addWidget(self.patchClearButton)
-        self.redoMetalButton = B("胸骨ワイヤーを色分け（前に作った症例）", "ghost", "前に 3D を作った症例で、骨・胸骨ワイヤー・人工物・石灰化を作り直す（10〜30 秒）"); self._layerLay.addWidget(self.redoMetalButton)
         card.hide()                                                           # 手で塗る方式はやめる（恣意的になる）。CT の値で「似た所」をまとめて選ぶ方式に置き換える予定
         self.paintButton.connect("toggled(bool)", self._onPaint)
         self.patchFaceButton.connect("clicked()", self._onPatchFace)
         self.patchUndoButton.connect("clicked()", lambda: self._status(self.logic.patchUndo()))
         self.patchClearButton.connect("clicked()", lambda: self._status(self.logic.patchClear()))
-        self.redoMetalButton.connect("clicked()", self._onRedoMetal)
 
         # ===== 断面（画面の分け方・MPR）
         P = pages["断面"]
@@ -1343,19 +1341,6 @@ class CardiacViewWidget(ScriptedLoadableModuleWidget):
         self.cutSlider.blockSignals(True); self.cutSlider.value = L.cutFrac * 100; self.cutSlider.blockSignals(False)
         self._status("パッチを正面に向けて、手前を切りました。ホイールで切る位置。「この断面で固定」を外すと元の切り方へ")
 
-    def _onRedoMetal(self):
-        self._toSurfaces()                                                    # 作り直した面を見せる（VR・4D の途中だと隠れたままで、変わったか分からなかった）
-        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
-        try:
-            msg = self.logic.redoMetal(self._status)
-            cb = self.layerChecks.get("人工物・石灰化")
-            if cb is not None: cb.blockSignals(True); cb.checked = True; cb.blockSignals(False)
-            self._status(msg)
-        except Exception as e:
-            import traceback; traceback.print_exc(); self._status(f"作り直せませんでした: {e}")
-        finally:
-            qt.QApplication.restoreOverrideCursor()
-
     def _showOnly(self, names):
         for name, cb in self.layerChecks.items():
             on = name in names
@@ -1929,7 +1914,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         return dict(mask=wire, at=(i0, j0, k0), src=src, workMask=wW, n=int(keep.sum()), mm3=round(float(wire.sum() * vox)))
 
     def _buildBone(self, arr, work, spacing, segNode, boneMask, body):
-        """骨の面。胸骨ワイヤー（金属）は骨から抜いて、別の色（銅色）の面にする（骨の中に埋もれて見えなくなるため）"""
+        """骨の面。胸骨ワイヤー（金属）は骨から抜いて、人工物（銀）の面に入れる（骨の中に埋もれて見えなくなるため）"""
         from scipy import ndimage
         # AI の骨ラベルは 3mm 格子でカクカク → 形は CT 値（≥200HU）で取り、ラベルは「どこが骨か」の目印にだけ使う
         near = ndimage.distance_transform_edt(~boneMask, sampling=spacing) <= 3.0
@@ -1946,22 +1931,22 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         bm = ndimage.binary_closing(bm, iterations=1)
         bm = self._cleanBinary(bm.astype(np.uint8), spacing, minVox=150)
         self.layerModels["骨"] = self._surfaceFromBinary(bm, work, "骨", BONE_COLOR, 2); self.visible["骨"] = True
-        old = slicer.mrmlScene.GetFirstNodeByName("CV 胸骨ワイヤー")
+        old = slicer.mrmlScene.GetFirstNodeByName("CV 胸骨ワイヤー")             # 胸骨ワイヤーは別の層（銅色）にせず、人工物（銀）の層にまとめる（先生の判断・版 15）。前の版の層は消す
         if old: slicer.mrmlScene.RemoveNode(old)
-        self.layerModels.pop("胸骨ワイヤー", None); self.wireStats = dict(n=0, mm3=0)
+        self.layerModels.pop("胸骨ワイヤー", None); self.visible.pop("胸骨ワイヤー", None); self.wireStats = dict(n=0, mm3=0); self._wirePD = None
         if wires is not None:
             m = wires["mask"]; sl = self._bbox(m, 4); i0, j0, k0 = wires["at"]
             if max(wires["src"].GetSpacing()) > 1.25:                             # 厚いスライス（2〜5mm）では細い線が面にならず消える → 1 画素ふくらませる
                 m = m.copy(); m[sl] = ndimage.binary_dilation(m[sl], iterations=1)
             model = self._surfaceFromBinary(np.ascontiguousarray(m[sl]).astype(np.uint8), self._boxVol(wires["src"], i0 + sl[2].start, j0 + sl[1].start, k0 + sl[0].start),
                                             "胸骨ワイヤー", WIRE_COLOR, 1, keepSmall=True)
-            d = model.GetDisplayNode(); d.SetSpecular(0.9); d.SetPower(70); d.SetAmbient(0.25)
-            self.layerModels["胸骨ワイヤー"] = model; self.visible["胸骨ワイヤー"] = True
+            pd = vtk.vtkPolyData(); pd.DeepCopy(model.GetPolyData()); self._wirePD = pd   # 面だけ持っておき、人工物の面に足す（buildImplantsCalc → _withWires）
+            slicer.mrmlScene.RemoveNode(model)
             self.wireStats = dict(n=wires["n"], mm3=wires["mm3"])
         print("胸骨ワイヤー:", self.wireStats)
 
     def redoMetal(self, status=lambda m: None):
-        """前に作った症例で、骨・胸骨ワイヤー・人工物・石灰化だけ作り直す（保存してある AI ラベルを使う）"""
+        """前に作った症例で、骨・人工物（胸骨ワイヤーを含む）・石灰化だけ作り直す（保存してある AI ラベルを使う）。画面のボタンは無い（試験・保守用）"""
         work = getattr(self, "workVolume", None); segNode = self._findSegmentation()
         if work is None or work.GetImageData() is None or segNode is None:
             raise RuntimeError("AI のラベルか作業用の画像がありません。「3D を自動で作る」からやり直してください")
@@ -1973,7 +1958,7 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             self._buildBone(arr, work, spacing, segNode, boneMask, self._bodyMask(arr))
         status("人工物・石灰化を探しています…"); slicer.app.processEvents()
         self.buildImplantsCalc(arr, work, spacing, segNode, boneMask)
-        for k in ("骨", "胸骨ワイヤー", "人工物", "石灰化"):
+        for k in ("骨", "人工物", "石灰化"):
             n = self.layerModels.get(k)
             if n is None or n.GetDisplayNode() is None: continue
             on = boneVis if k == "骨" else True
@@ -1983,8 +1968,21 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         try: self.updateInset()
         except Exception: pass
         w = getattr(self, "wireStats", None) or {}; s = getattr(self, "implantStats", None) or {}
-        return (f"作り直しました: 胸骨ワイヤー {w.get('n', 0)} 個（銅色）・人工物 {s.get('metal_n', 0)} 個（銀）・石灰化 {s.get('calc_n', 0)} 個（黄白）"
-                + ("" if w.get("n") else "。胸骨ワイヤーは見つかりませんでした"))
+        return f"作り直しました: 人工物 {s.get('metal_n', 0)} 個・胸骨ワイヤー {w.get('n', 0)} 個（どちらも銀）・石灰化 {s.get('calc_n', 0)} 個（黄白）"
+
+    def _withWires(self, model):
+        """人工物の層（model。無ければ None）に、_buildBone で作って持っておいた胸骨ワイヤーの面を足す。ワイヤーだけの時は人工物の層をワイヤーで作る"""
+        wpd = getattr(self, "_wirePD", None); self._wirePD = None
+        if wpd is None or wpd.GetNumberOfPoints() == 0: return model
+        if model is None:
+            model = slicer.modules.models.logic().AddModel(wpd); model.SetName("CV 人工物"); self._styleDisplay(model.GetDisplayNode(), IMPLANT_COLOR); self._put(model)
+        else:
+            ap = vtk.vtkAppendPolyData(); ap.AddInputData(model.GetPolyData()); ap.AddInputData(wpd); ap.Update()
+            pd = vtk.vtkPolyData(); pd.DeepCopy(ap.GetOutput()); model.SetAndObservePolyData(pd)
+        return model
+
+    def _styleImplant(self, model):
+        d = model.GetDisplayNode(); d.SetSpecular(0.9); d.SetPower(70); d.SetAmbient(0.25)          # 金属らしく光らせる
 
     def buildImplantsCalc(self, arr, work, spacing, segNode, boneMask=None):
         """心臓・大血管のまわりで、金属（人工弁のリング・ステント・クリップ・ワイヤー）と石灰化を CT 値から見つけて、別の色の面にする。
@@ -1997,7 +1995,12 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
         calcT = max(650.0, blood + 250.0)
         vv = self._segmentMaskArray(segNode, work, ("heart", "aorta", "pulmonary", "atrial appendage", "brachiocephalic trunk", "subclavian artery",
                                                     "common carotid", "iliac artery", "coronary", "vena cava"))
-        if vv is None or not vv.any(): return
+        if vv is None or not vv.any():
+            if getattr(self, "_wirePD", None) is not None:                     # 心臓・血管のラベルが無くても、胸骨ワイヤーは人工物として出す
+                old = slicer.mrmlScene.GetFirstNodeByName("CV 人工物")
+                if old: slicer.mrmlScene.RemoveNode(old)
+                model = self._withWires(None); self._styleImplant(model); self.layerModels["人工物"] = model; self.visible["人工物"] = True
+            return
         near = ndimage.distance_transform_edt(~vv, sampling=spacing) <= 6.0
         if boneMask is not None and boneMask.any():
             near &= ~(ndimage.distance_transform_edt(~boneMask, sampling=spacing) <= 2.0)
@@ -2071,12 +2074,15 @@ class CardiacViewLogic(ScriptedLoadableModuleLogic):
             old = slicer.mrmlScene.GetFirstNodeByName(f"CV {name}")
             if old: slicer.mrmlScene.RemoveNode(old)
             self.layerModels.pop(name, None)
-            if not m.any(): continue
-            sl = bbox(m, 4)
-            model = self._surfaceFromBinary(np.ascontiguousarray(m[sl]).astype(np.uint8), boxAt(i0 + sl[2].start, j0 + sl[1].start, k0 + sl[0].start),
-                                            name, col, 1, keepSmall=True)
+            model = None
+            if m.any():
+                sl = bbox(m, 4)
+                model = self._surfaceFromBinary(np.ascontiguousarray(m[sl]).astype(np.uint8), boxAt(i0 + sl[2].start, j0 + sl[1].start, k0 + sl[0].start),
+                                                name, col, 1, keepSmall=True)
+            if name == "人工物": model = self._withWires(model)                 # 胸骨ワイヤーも人工物（銀）にまとめる
+            if model is None: continue
             d = model.GetDisplayNode()
-            if name == "人工物": d.SetSpecular(0.9); d.SetPower(70); d.SetAmbient(0.25)          # 金属らしく光らせる
+            if name == "人工物": self._styleImplant(model)
             else: d.SetSpecular(0.5); d.SetPower(30); d.SetAmbient(0.3)
             self.layerModels[name] = model; self.visible[name] = True
         print("人工物・石灰化:", self.implantStats)
