@@ -242,7 +242,11 @@ class CenterlineFixMixin:
         rot0, s0 = self.rot, self.curS
         try: done = self._rebuildLocal(self.path, status)
         except Exception: _err("rebuildLocal"); done = False
-        if not done: self.rebuild(self.path, status); self.curS = min(s0, self.length)
+        if not done:
+            name = self.path; F0 = self.frames.get(name); Pold = None if F0 is None else F0["P"].copy()
+            self.rebuild(name, status)
+            self._reprojectAfterRebuild(name, Pold)                              # 印・計画・エントリーなどを体の中の同じ所へ置き直す
+            self.curS = float(np.clip(self.curS, 0, self.length))
         self.setRotation(rot0)
         self._drawMarkers(); self._listsChanged()
 
@@ -252,10 +256,25 @@ class CenterlineFixMixin:
         （前は印・今の位置・基準だけで、境目も新しい番号で比べていた → 計画やエントリーの表が印と食い違った）"""
         if not shift: return
         ds = shift * STEP; lim = (b - shift) * STEP                          # 前の番号での「直した範囲の終わり」。これより先は前と同じ断面が ds ずれた所にある
-        mv = lambda v: (v + ds) if (v is not None and v > lim) else v
+        self._remapS(name, lambda v: (v + ds) if (v is not None and v > lim) else v, lambda a: np.where(a > lim, a + ds, a))
+
+    def _reprojectAfterRebuild(self, name, Pold):
+        """部分修正にならず中心線を全部作り直した時: 前の位置（中心線の mm）を、前の中心線の上の点（体の中の点）にしてから、
+        新しい中心線のいちばん近い所の mm に置き直す（前は何もずらさず、長さが変わると先の印・計画がずれた）"""
+        from scipy.spatial import cKDTree
+        F = self.frames.get(name)
+        if F is None or Pold is None or not len(Pold): return
+        tree = cKDTree(F["P"]); sN = F["s"]; K0 = len(Pold)
+        def mva(a):
+            a = np.asarray(a, float); k = np.clip(np.round(a / STEP).astype(int), 0, K0 - 1)
+            return sN[tree.query(Pold[k])[1]].astype(float)
+        self._remapS(name, lambda v: None if v is None else float(mva([v])[0]), mva)
+
+    def _remapS(self, name, mv, mva):
+        """経路 name の上の位置（中心線の mm）を mv（1 つ）・mva（配列）で写す: 印・今の位置・基準・TEVAR の計画・エントリー・術後のステントの範囲とずれの補正・計測"""
         for mk in self.markers:
             if mk.get("path") == name: mk["s"] = mv(mk["s"])
-        self.baseS = mv(self.baseS); self.curS = mv(self.curS)
+        if self.path == name: self.baseS = mv(self.baseS); self.curS = mv(self.curS)
         pl = getattr(self, "plan", None)
         if pl and pl.get("path") == name:
             for key in ("p", "d"): pl[key] = mv(pl.get(key))
@@ -264,15 +283,16 @@ class CenterlineFixMixin:
         ac = getattr(self, "actual", None)
         if ac and ac.get("path") == name:
             for key in ("lo", "hi"): ac[key] = mv(ac.get(key))
-            if ac.get("s") is not None: sa = np.asarray(ac["s"], float); ac["s"] = np.where(sa > lim, sa + ds, sa)
+            if ac.get("s") is not None: ac["s"] = mva(np.asarray(ac["s"], float))
         ps = getattr(self, "postShift", None)
-        if ps and ps.get("path") == name and ps.get("s") is not None:
-            sa = np.asarray(ps["s"], float); ps["s"] = np.where(sa > lim, sa + ds, sa)
-        if getattr(self, "postManual", None):                                 # ("s", 量) は全体を滑らせる手直し（位置を持たない）
+        if ps and ps.get("path") == name and ps.get("s") is not None: ps["s"] = mva(np.asarray(ps["s"], float))
+        if getattr(self, "postManual", None) and self.path == name:          # ("s", 量) は全体を滑らせる手直し（位置を持たない）
             self.postManual = [(s0 if isinstance(s0, str) else mv(s0), v) for s0, v in self.postManual]
         for n in self.measureNodes():
             try:
-                if n.GetAttribute("SA.path") == name and float(n.GetAttribute("SA.s") or "nan") > lim: n.SetAttribute("SA.s", f"{float(n.GetAttribute('SA.s')) + ds:.2f}")
+                if n.GetAttribute("SA.path") == name:
+                    v = float(n.GetAttribute("SA.s") or "nan")
+                    if np.isfinite(v): n.SetAttribute("SA.s", f"{mv(v):.2f}")
             except Exception: pass
 
     def _rebuildLocal(self, name, status=print):
