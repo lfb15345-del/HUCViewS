@@ -122,7 +122,12 @@ class CoreMixin:
         crop = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))           # 血管の周りだけで計算（速さ）
         A0 = self._ijk2ras(); A = A0.copy()
         A[:3, 3] = (A0 @ np.r_[lo[2], lo[1], lo[0], 1.0])[:3]
-        iso = self._smoothIso(vessel[crop], sp, f)
+        hu = slicer.util.arrayFromVolume(vol)
+        lum = vessel[crop] & (hu[crop] >= self.thr)                           # 血管の周り（crop）だけで計算（外はいつも False。前は CT 全体で計算していた。結果は同じ）
+        lum = ndimage.binary_opening(lum, iterations=1)
+        for k in range(lum.shape[0]): lum[k] = ndimage.binary_fill_holes(lum[k])
+        from concurrent.futures import ThreadPoolExecutor                     # 外形と内腔のなめらかな形を同時に作る（距離変換・ぼかし・拡大は scipy.ndimage だけ。値は 1 つずつの時と同じ）
+        with ThreadPoolExecutor(2) as ex: iso, liso0 = ex.map(lambda m_: self._smoothIso(m_, sp, f), (vessel[crop], lum))
         # 細かくした格子の本当の刻み（前は ISO / sp として計算していて、5 mm スライスの CT では面の奥の端が約 4 mm ずれ、
         # 面全体が体軸の向きに約 1% 引き伸ばされていた。1 mm 前後のスライスでは差はほとんど無い）
         A[:3, :3] = A0[:3, :3] * _zoomStep(vessel[crop].shape, iso.shape, f)[::-1]
@@ -131,11 +136,7 @@ class CoreMixin:
             sizes = ndimage.sum(iso, lab, range(1, n + 1)); iso = lab == (1 + int(np.argmax(sizes)))
         self.surf = {"outer": self._surface(iso, A)}
         status("1/4 内腔（造影部分）の表面を作成中…")
-        hu = slicer.util.arrayFromVolume(vol)
-        lum = vessel[crop] & (hu[crop] >= self.thr)                           # 血管の周り（crop）だけで計算（外はいつも False。前は CT 全体で計算していた。結果は同じ）
-        lum = ndimage.binary_opening(lum, iterations=1)
-        for k in range(lum.shape[0]): lum[k] = ndimage.binary_fill_holes(lum[k])
-        liso = self._smoothIso(lum, sp, f) & iso
+        liso = liso0 & iso
         self.surf["lumen"] = self._surface(liso, A) if liso.sum() > 100 else self.surf["outer"]
         self._cutters = {}; self.cache = {}; self.override = {}
         self._models()
