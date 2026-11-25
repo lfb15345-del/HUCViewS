@@ -83,13 +83,26 @@ class SectionMixin:
         o = np.argsort(a); a, r = a[o], r[o]
         return np.interp(th, a, r, period=2 * np.pi)
 
+    def _mapF(self, coords, order):
+        """CT の係数（arrF）を点 coords (3, m) で読む = ndimage.map_coordinates(arrF, coords, order, prefilter=False, mode="nearest")。
+        径の推移をまとめて計算している間（_profile がメインのスレッドで作ったプール）は、点を分けて同時に読む（点ごとに別の計算なので値は同じ）"""
+        from scipy import ndimage
+        pool = getattr(self, "_mapPool", None); m = coords.shape[1]; n = min(getattr(self, "_mapPoolN", 1), m // 4000)
+        if pool is None or n < 2:
+            return ndimage.map_coordinates(self.arrF, coords, order=order, prefilter=False, mode="nearest")
+        out = np.empty(m, self.arrF.dtype); edges = [m * i // n for i in range(n + 1)]
+        def job(i):                                                          # ワーカーは scipy.ndimage だけ（行列の計算はしない）
+            out[edges[i]:edges[i + 1]] = ndimage.map_coordinates(self.arrF, coords[:, edges[i]:edges[i + 1]], order=order, prefilter=False, mode="nearest")
+        list(pool.map(job, range(n)))
+        return out
+
     def _rays(self, P, B, N, c, th, R):
         from scipy import ndimage
         d = np.c_[np.cos(th), np.sin(th)]                                   # 断面内の向き
         X = c[None, None, :] + R[None, :, None] * d[:, None, :]              # (ray, r, 2)
         W = P + X[..., :1] * B + X[..., 1:] * N                              # 世界座標
         A = self._rasToIjk; H = W.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
-        prof = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=3, prefilter=False, mode="nearest").reshape(len(th), len(R))
+        prof = self._mapF(np.array([H[:, 2], H[:, 1], H[:, 0]]), 3).reshape(len(th), len(R))
         return ndimage.gaussian_filter(prof, (0.8, 1.0)), d
 
     def _cleanRadii(self, r, ref):
@@ -106,7 +119,7 @@ class SectionMixin:
         h = 0.25; u = np.arange(-rlim, rlim + 1e-6, h); UU, VV = np.meshgrid(u, u)
         W = P + (c0[0] + UU)[..., None] * B + (c0[1] + VV)[..., None] * N
         A = self._rasToIjk; H = W.reshape(-1, 3) @ A[:3, :3].T + A[:3, 3]
-        img = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=1, prefilter=False, mode="nearest").reshape(UU.shape)
+        img = self._mapF(np.array([H[:, 2], H[:, 1], H[:, 0]]), 1).reshape(UU.shape)
         # 注: arrF は 3 次スプラインの係数（縁が強調された像）で、CT の値そのものではない。CT の値（self.arr）で読む案も試した（2026-11-25）:
         #     違いはほとんど腸骨の数断面で 1 mm 前後、大きいのは腸骨の分かれ目（測る場所ではない）だけ。輪郭を重ねた絵を見て、変えないと決めた（今の読み方のまま）
         m = ndimage.binary_opening((img > self.thr) & (img < 1200) & (UU ** 2 + VV ** 2 <= rlim ** 2), iterations=2)
@@ -148,11 +161,12 @@ class SectionMixin:
         Ilum = float(np.median(center)) if center.size else float(np.median(prof[:, :5]))
         calcT = Ilum + max(150.0, 0.35 * abs(Ilum))
         rl = rgl.copy(); okL = np.zeros(len(th), bool)
+        # 探す窓: R は昇順なので、(R >= lo) & (R <= hi) の番号 = searchsorted の [左, 右) と同じ（前は光線ごとに R 全体を比べていた。値は同じ）
+        LO = np.searchsorted(R, 0.3 * rgl, "left"); HI = np.searchsorted(R, 1.35 * rgl + 3.0, "right")
         for j in range(len(th)):                                             # 内腔: 半値（内腔とすぐ外の組織の中間）を最初に下回る所
-            lo, hi = 0.3 * rgl[j], 1.35 * rgl[j] + 3.0
-            w = np.where((R >= lo) & (R <= hi))[0]
-            if len(w) < 4: continue
-            pj = prof[j, w]
+            a = int(LO[j])
+            if HI[j] - a < 4: continue
+            pj = prof[j, a:HI[j]]
             T0 = 0.5 * (Ilum + 60.0)
             cal = np.where(pj > calcT)[0]; bel = np.where(pj < T0)[0]
             if len(cal) and (not len(bel) or cal[0] < bel[0]):              # 先に石灰化に当たる → 立ち上がりの中点が内腔の縁
@@ -160,36 +174,36 @@ class SectionMixin:
                 rise = np.where(pj[:ic + 1] >= half)[0]
                 if len(rise):
                     i = rise[0]
-                    if i > 0: rl[j] = R[w[i - 1]] + (half - pj[i - 1]) / max(pj[i] - pj[i - 1], 1e-6) * dr
-                    else: rl[j] = R[w[i]]
+                    if i > 0: rl[j] = R[a + i - 1] + (half - pj[i - 1]) / max(pj[i] - pj[i - 1], 1e-6) * dr
+                    else: rl[j] = R[a + i]
                     okL[j] = True
                 continue
             if not len(bel): continue
-            ri = R[w[bel[0]]]
-            outside = prof[j, (R >= ri + 1.0) & (R <= ri + 2.5)]
-            Iout = float(min(np.median(outside), 150.0)) if outside.size else 60.0
+            ri = R[a + bel[0]]
+            outside = prof[j, np.searchsorted(R, ri + 1.0, "left"):np.searchsorted(R, ri + 2.5, "right")]
+            Iout = float(min(_median1(outside), 150.0)) if outside.size else 60.0
             if Ilum - Iout < 80.0: continue                                  # コントラストが足りない → 目安のまま
             T = 0.5 * (Ilum + Iout); b2 = np.where(pj < T)[0]
             if not len(b2): continue
             i = b2[0]
-            if i > 0: rl[j] = R[w[i - 1]] + (pj[i - 1] - T) / max(pj[i - 1] - pj[i], 1e-6) * dr   # 線形補間でサブピクセル
-            else: rl[j] = R[w[i]]
+            if i > 0: rl[j] = R[a + i - 1] + (pj[i - 1] - T) / max(pj[i - 1] - pj[i], 1e-6) * dr   # 線形補間でサブピクセル
+            else: rl[j] = R[a + i]
             okL[j] = True
         if okL.mean() < 0.4: return None if mode != "both" else None
         rl = self._cleanRadii(np.where(okL, rl, rgl), rgl)
         lum = _resample(c + rl[:, None] * d)
         if mode == "lumen": return lum
-        ro = rgo.copy(); okO = np.zeros(len(th), bool)
+        ro = rgo.copy(); okO = np.zeros(len(th), bool); n1 = int(1.0 / dr)
         for j in range(len(th)):
             lo, hi = rl[j] + 0.5, max(rgo[j], rl[j] + 1.0) + 2.5               # 目安（ラベル）から 2.5mm 以内だけ探す
-            w = np.where((R >= lo) & (R <= hi))[0]
-            if len(w) < 4: continue
-            gj = g[j, w]; pj = prof[j, w]
-            after = np.r_[pj[int(1.0 / dr):], np.full(int(1.0 / dr), pj[-1])][:len(pj)]
+            a = int(np.searchsorted(R, lo, "left")); b = int(np.searchsorted(R, hi, "right"))
+            if b - a < 4: continue
+            gj = g[j, a:b]; pj = prof[j, a:b]
+            after = np.concatenate((pj[n1:], np.full(n1, pj[-1])))[:len(pj)]   # 1 mm 先の値（前は np.r_。同じ値）
             cand = np.where((after < 20.0) & (gj < -30.0))[0]                # 外は脂肪・肺（低い CT 値）へ落ちる所
             if not len(cand): continue
-            i = cand[np.argmin(np.abs(R[w[cand]] - rgo[j]) + 0.02 * gj[cand])]  # 目安に近く、変化が急な所
-            ro[j] = R[w[i]]; okO[j] = True
+            i = cand[np.argmin(np.abs(R[a + cand] - rgo[j]) + 0.02 * gj[cand])]  # 目安に近く、変化が急な所
+            ro[j] = R[a + i]; okO[j] = True
         if okO.mean() < 0.4: out = _resample(c + np.maximum(rgo, rl + 0.5)[:, None] * d) if go is not None else None
         else:
             ro = self._cleanRadii(np.where(okO, ro, rgo), rgo)
@@ -225,9 +239,16 @@ class SectionMixin:
             old, a, b, shift = reuse
             res[:a] = old[:a]; res[b + 1:] = old[b + 1 - shift:]
             ks = np.arange(a - a % 4, b + 1, 4)
-        for k in ks:
-            m = self._metK(int(k))
-            if m: res[k] = (m["area"], m["deq"], m["dmax"], m["dmin"])
+        n = _nThreads(); pool = None
+        if n > 1 and len(ks) > 8:                                       # CT の係数を読む所（_mapF）だけ同時に。プールはここ（メインのスレッド）で作る
+            from concurrent.futures import ThreadPoolExecutor
+            pool = ThreadPoolExecutor(n); self._mapPool = pool; self._mapPoolN = n
+        try:
+            for k in ks:
+                m = self._metK(int(k))
+                if m: res[k] = (m["area"], m["deq"], m["dmax"], m["dmin"])
+        finally:
+            if pool is not None: self._mapPool = None; pool.shutdown()
         for i in range(4):                                             # 2 mm ごとの値を 0.5 mm に補間（グラフ用）
             ok = ~np.isnan(res[:, i])
             if ok.sum() > 1: res[:, i] = np.interp(self.s, self.s[ok], res[ok, i])

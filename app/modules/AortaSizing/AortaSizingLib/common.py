@@ -359,6 +359,13 @@ def _mapCoords(F, coords, order=3):
     return out
 
 
+def _median1(v):
+    """np.median(v) と同じ値（短い 1 次元の配列・NaN なし）: 並べて真ん中。偶数個なら真ん中の 2 つを同じ型で足して 2 で割る（np.median と同じ計算）。
+    np.median は 1 回ごとの手間が大きく、径の推移では 1 本の経路で約 4 万回呼んでいた"""
+    s = np.sort(v); n = len(s); h = n // 2
+    return s[h] if n % 2 else (s[h - 1] + s[h]) / s.dtype.type(2)
+
+
 def _zoomStep(n0, n1, f):
     """ndimage.zoom で大きさを変えた格子の、本当の刻み（入力の格子の何個ぶんか。z, y, x の順）。
     zoom は両端の画素の中心どうしを合わせるので、刻みは（入力の数−1）/（出力の数−1）。1/f とすると、厚いスライスほど奥の方で位置がずれる
