@@ -16,6 +16,40 @@ fail() { printf '\n\033[31mエラー: %s\033[0m\n' "$1"; echo "ネットにつ�
 json() { # json <file> <key>  （Python 不要: plutil か JavaScript で読む）
   plutil -extract "$2" raw -o - "$1" 2>/dev/null || osascript -l JavaScript -e "JSON.parse(ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError('$1', 4, null)))['$2']"
 }
+getr() { # getr <url> <file> <size>: つながりが切れたら、取れた所の続きから取り直す。取れた所までは残すので、もう一度実行しても続きから
+  # 続きの頼み方: ふつうは curl -C -（HTTP の Range）。Range に応えないサーバー（3D Slicer の配布元の Girder。curl は「続きを返さない」と言って止まる）には、
+  # 行き先（リダイレクトの後）の URL に offset= を付けて頼み、返ってきたのが続き（Content-Range が取れた所から）の時だけ足す
+  local url="$1" out="$2" size="${3:-0}" i have rc final="" off=0 noff=0 part="$2.part" hdr="$2.hdr" sep
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  for i in $(seq 1 40); do
+    have=0; [ -f "$out" ] && have=$(( $(wc -c < "$out") ))
+    if [ "$size" -gt 0 ] && [ "$have" -gt "$size" ]; then rm -f "$out"; have=0; fi   # 大きすぎる残り → 初めから
+    if [ "$size" -gt 0 ] && [ "$have" -eq "$size" ]; then return 0; fi
+    rc=0
+    if [ "$off" -eq 1 ] && [ "$have" -gt 0 ]; then
+      case "$final" in *\?*) sep='&' ;; *) sep='?' ;; esac
+      rm -f "$part" "$hdr"
+      curl -fL --progress-bar --connect-timeout 30 --speed-time 60 --speed-limit 1 -D "$hdr" -o "$part" "${final}${sep}offset=$have" || rc=$?
+      if [ -f "$part" ] && tr -d '\r' < "$hdr" 2>/dev/null | grep -qi "^content-range: bytes $have-"; then cat "$part" >> "$out"
+      elif [ "$rc" -eq 22 ]; then off=0; noff=1                                 # offset が効かない → 前のやり方（初めから）に戻す
+      elif [ "$rc" -eq 0 ]; then rc=99; fi                                     # 続きでない中身は足さない
+      rm -f "$part" "$hdr"
+    else
+      curl -fL --progress-bar --connect-timeout 30 --speed-time 60 --speed-limit 1 -C - -o "$out" "$url" || rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      [ "$size" -gt 0 ] || return 0
+      have=$(( $(wc -c < "$out") )); [ "$have" -eq "$size" ] && return 0
+    elif [ "$rc" -eq 33 ] && [ "$noff" -eq 0 ]; then                          # Range に応えない → 行き先を調べて、次は offset で（待たずに）
+      final="$(curl -fsS -o /dev/null -w '%{redirect_url}' "$url" 2>/dev/null || true)"; [ -n "$final" ] || final="$url"
+      off=1; continue
+    elif [ "$rc" -eq 33 ]; then rm -f "$out"                                    # 続きを返さないサーバー → 初めから
+    elif [ "$rc" -eq 22 ] && [ "$off" -eq 0 ] && [ "$noff" -eq 0 ]; then return 1   # 404 など（取り直しても同じ）
+    fi
+    echo "  （つながりが切れました。続きから取り直します: $i 回目）"; sleep 3
+  done
+  return 1
+}
 
 echo "HUCViewS（心臓・大動脈 3D ビューア）をインストールします。"
 echo "研究・教育用です（医療機器ではありません）。全部で 10〜30 分ほどかかります。"
@@ -31,13 +65,24 @@ SV="$(json "$TMP/latest.json" slicer 2>/dev/null || true)"; case "$SV" in [0-9]*
 
 if [ ! -d "$HV/Slicer.app" ]; then
   step "3D Slicer（公式・無料・約450MB）をダウンロードしています…"
-  SURL="https://download.slicer.org/download?os=macosx&stability=release"   # 確かめた版が無い時だけ、その日の最新の版
-  { [ -n "$SV" ] && curl -fL --progress-bar -o "$TMP/Slicer.dmg" "$SURL&version=$SV"; } || curl -fL --progress-bar -o "$TMP/Slicer.dmg" "$SURL" || fail "3D Slicer をダウンロードできませんでした"
+  FIND="https://download.slicer.org/find?os=macosx&stability=release"        # 確かめた版（latest.json の slicer）。無い時だけ、その日の最新の版
+  { [ -n "$SV" ] && curl -fsSL -o "$TMP/find.json" "$FIND&version=$SV" && [ "$(json "$TMP/find.json" version || true)" = "$SV" ]; } \
+    || curl -fsSL -o "$TMP/find.json" "$FIND" || fail "3D Slicer の情報を取得できませんでした"
+  DPATH="$(json "$TMP/find.json" download_url)" || fail "3D Slicer の情報を読めませんでした"; DURL="https://download.slicer.org$DPATH"
+  SSIZE="$(json "$TMP/find.json" size || true)"
+  S512="$(json "$TMP/find.json" sha512 || true)"; SVER="$(json "$TMP/find.json" version || true)"
+  DL="$HV/.download"; mkdir -p "$DL"; DMG="$DL/Slicer-$(printf '%s' "${SVER:-latest}" | tr -cd '0-9A-Za-z.-').dmg"   # 版ごとの名前（別の版の続きをつながない）
+  getr "$DURL" "$DMG" "$SSIZE" || fail "3D Slicer のダウンロードが何度も途中で切れました。取れた所までは残してあるので、もう一度実行すると続きから取ります。"
+  if [ -n "$S512" ]; then                                                    # 続きをつないだ所も含めて、公式の値と同じか
+    GOT="$(shasum -a 512 "$DMG" | awk '{print $1}')"
+    [ "$GOT" = "$S512" ] || { rm -f "$DMG"; fail "3D Slicer のダウンロードが壊れていました。もう一度実行してください（初めから取り直します）。"; }
+  fi
   step "3D Slicer を入れています…"
   MNT="$TMP/mnt"; mkdir -p "$MNT"
-  hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$TMP/Slicer.dmg" >/dev/null || fail "ディスクイメージを開けませんでした"
+  hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG" >/dev/null || fail "ディスクイメージを開けませんでした"
   cp -R "$MNT/Slicer.app" "$HV/Slicer.app" || { hdiutil detach "$MNT" >/dev/null; fail "コピーできませんでした"; }
   hdiutil detach "$MNT" >/dev/null || true
+  rm -rf "$DL"
 else
   step "3D Slicer は入っています"
 fi

@@ -46,8 +46,9 @@ class CoreMixin:
         if getattr(self, "vol", None) is not None and vol is not self.vol:   # 別の CT に変わった: 前の CT の計算をすべて捨てる（前は断面の計算だけで、計画・真腔・術後・印・「1つ戻す」が残った）
             self.resetCase()
         self.vol, self.seg = vol, seg
-        try:
-            cv = slicer.modules.cardiacview.widgetRepresentation().self().logic; self.thr = float(cv._cal().get("blood_lo", 180.0))
+        try:                                                                  # 血液のしきい値: 心臓の画面がこの CT で較正した値（較正は CT ごと。別の CT の較正は使わない。前は、
+            cv = slicer.modules.cardiacview.widgetRepresentation().self().logic   # 心臓の画面が別の CT を持っている時も、その較正を使っていた）。しきい値で鼠径部への延長・内腔・径が変わる
+            self.thr = float(cv._cal().get("blood_lo", 180.0)) if getattr(cv, "sourceVolume", None) is vol else 180.0
         except Exception: self.thr = 180.0
         return vol, seg
 

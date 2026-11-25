@@ -50,6 +50,69 @@ function Download($url, $out, $p0, $p1, $total) {
   if ($task.IsFaulted) { throw $task.Exception.InnerException }
   Prog $p1
 }
+function Wait-Task($t, $sec) {
+  # 非同期の処理を、画面を止めずに待つ（終われば、すぐ戻る。前は 0.1 秒ごとに見ていて、届くたびに待たされ、病院の回線で毎秒 50 KB ほどに落ちた）。
+  # $sec 秒たっても終わらなければ $false。処理が失敗した時は、その例外がそのまま出る
+  $end = [DateTime]::Now.AddSeconds($sec)
+  while (-not $t.Wait(100)) { Pump; if ([DateTime]::Now -gt $end) { return $false } }
+  return $true
+}
+function Download-Resume($url, $out, $p0, $p1, $total) {
+  # 大きなファイル（3D Slicer）: つながりが切れたら、取れた所の続きから取り直す。病院の回線では 5 分ほど（117 MB）で切れた例がある。
+  # 続きの頼み方: ふつうは HTTP の Range。Range に応えないサーバー（3D Slicer の配布元の Girder は、Range を頼んでも初めから返す）には、
+  # 行き先（リダイレクトの後）の URL に offset=（Girder の続きの指定）を付ける。返ってきた所が取れた所の続きでなければ、つながずに初めから取る（壊れたファイルを作らない）。
+  # 切れたままでも、取れた所までのファイルは残すので、もう一度インストーラーを実行すると続きから取る。60 秒なにも届かなければ、つなぎ直す
+  $have = [long]0
+  if (Test-Path $out) { $have = (Get-Item $out).Length; if ($have -gt $total) { Remove-Item $out -Force; $have = [long]0 } }
+  $tries = 0; $useOffset = $false; $noOffset = $false; $final = $null
+  while ($have -lt $total -and $tries -lt 40) {
+    $tries++; $req = $null; $resp = $null; $fs = $null; $again = $false
+    try {
+      $u = $url
+      if ($have -gt 0 -and $useOffset -and $final) { $u = $final + $(if ($final.Contains('?')) { '&' } else { '?' }) + 'offset=' + $have }
+      $req = [Net.HttpWebRequest]::Create($u); $req.UserAgent = $UA; $req.AllowAutoRedirect = $true; $req.KeepAlive = $false   # 毎回新しくつなぐ（止めたつながりを使い回して失敗しない）
+      if ($have -gt 0) { $req.AddRange([long]$have) }
+      $t = $req.GetResponseAsync()
+      if (-not (Wait-Task $t 60)) { throw 'つながりません' }
+      $resp = $t.GetAwaiter().GetResult(); $code = [int]$resp.StatusCode     # .Result は失敗しても PowerShell では空になる（例外にならない）ので、GetResult で受ける
+      if (-not $useOffset) { $final = $resp.ResponseUri.AbsoluteUri }
+      $from = [long]0; $cr = [string]$resp.Headers['Content-Range']
+      if ($code -eq 206 -and $cr -match '^bytes (\d+)-') { $from = [long]$Matches[1] }
+      if ($have -gt 0 -and -not ($code -eq 206 -and $from -eq $have)) {      # 返ってきたのが続きではない
+        if ($from -eq 0 -and -not $useOffset -and -not $noOffset) { $useOffset = $true; $again = $true; throw 'Range に応えないサーバー' }   # 次は offset で（待たずに）
+        if ($from -ne 0) { throw '思わぬ所から返ってきました' }
+        $have = [long]0                                                      # 初めから返ってきた → 初めから書く
+      }
+      if ($have -gt 0) { $mode = [IO.FileMode]::Append } else { $mode = [IO.FileMode]::Create }
+      $fs = New-Object IO.FileStream($out, $mode, [IO.FileAccess]::Write)
+      $st = $resp.GetResponseStream(); $buf = New-Object byte[] 1048576; $shown = [DateTime]::MinValue
+      while ($true) {
+        $r = $st.ReadAsync($buf, 0, $buf.Length)
+        if (-not (Wait-Task $r 60)) { throw '60 秒なにも届きません' }
+        $n = $r.GetAwaiter().GetResult(); if ($n -le 0) { break }
+        $fs.Write($buf, 0, $n); $have += $n
+        if (([DateTime]::Now - $shown).TotalMilliseconds -ge 200) {          # 画面は 0.2 秒ごとに（届くたびに描くと遅くなる）
+          $shown = [DateTime]::Now; Prog ($p0 + ($p1 - $p0) * [Math]::Min(1.0, $have / $total))
+          $detail.Text = ('{0:N0} / {1:N0} MB' -f ($have / 1MB), ($total / 1MB)) + $(if ($tries -gt 1) { "（つなぎ直し $($tries - 1) 回）" } else { '' })
+        }
+      }
+    } catch {
+      if ($script:closed) { throw }
+      $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+      $sc = 0; if ($e -is [Net.WebException] -and $e.Response) { $sc = [int]$e.Response.StatusCode }   # 止める前に読む（止めた後は読めない）
+      if ($req) { try { $req.Abort() } catch {} }
+      if ($again) { $tries--; continue }                                      # offset で、すぐ頼み直す（数えない）
+      if ($useOffset -and $sc -ge 400 -and $sc -lt 500) { $useOffset = $false; $noOffset = $true; continue }   # offset が効かない → 前のやり方（初めから）に戻す
+      if ($sc -ge 400 -and $sc -lt 500 -and $sc -ne 408 -and $sc -ne 429) { break }   # 404 など（取り直しても同じ）は、すぐやめる
+      Wait-Ms 3000
+    } finally {
+      if ($fs) { $fs.Close() }; if ($resp) { $resp.Close() }
+    }
+  }
+  $script:dlTries = $tries; $script:dlOffset = $useOffset
+  if ((Test-Path $out) -and (Get-Item $out).Length -eq $total) { Prog $p1; return $true }
+  return $false
+}
 function Wait-Proc($p, $p0, $p1, $expectSec) {
   $start = [DateTime]::Now
   while (-not $p.HasExited) { $s = ([DateTime]::Now - $start).TotalSeconds; Prog ($p0 + ($p1 - $p0) * [Math]::Min(0.97, $s / $expectSec)); Wait-Ms 300 }
@@ -88,10 +151,15 @@ try {
   if (-not (Test-Path $slicer)) {
     Step 2 '3D Slicer（公式・無料）をダウンロードしています…' ''
     $info = Find-Slicer $man.slicer
-    $exe = Join-Path $env:TEMP 'HUCViewS_SlicerSetup.exe'
-    Download ('https://download.slicer.org' + $info.download_url) $exe 2 40 ([double]$info.size)
-    if ($info.size -and ((Get-Item $exe).Length -ne [long]$info.size)) {   # 途中で切れたダウンロードを入れない（病院の回線で 5 分ほどで切れた例がある）
-      Remove-Item $exe -Force -ErrorAction SilentlyContinue; throw '3D Slicer のダウンロードが途中で切れました。ネットにつながっているか確かめて、もう一度実行してください。' }
+    $tag = ([string]$info.version -replace '[^0-9A-Za-z.\-]', ''); if (-not $tag) { $tag = [string]$info.size }
+    $exe = Join-Path $env:TEMP ('HUCViewS_SlicerSetup_' + $tag + '.exe')                  # 版ごとの名前（切れた残りに、別の版の続きをつながない）
+    $url = 'https://download.slicer.org' + $info.download_url
+    if ([long]$info.size -gt 0) {
+      if (-not (Download-Resume $url $exe 2 40 ([long]$info.size))) {               # 切れても、取れた所までは残す（次に実行すると続きから）
+        throw '3D Slicer のダウンロードが何度も途中で切れました。取れた所までは残してあるので、もう一度実行すると続きから取ります。' }
+    } else { Download $url $exe 2 40 0 }
+    if ($info.sha512 -and ((Get-FileHash $exe -Algorithm SHA512).Hash.ToLower() -ne ([string]$info.sha512).ToLower())) {   # 続きをつないだ所も含めて、公式の値と同じか
+      Remove-Item $exe -Force -ErrorAction SilentlyContinue; throw '3D Slicer のダウンロードが壊れていました。もう一度実行してください（初めから取り直します）。' }
     Step 40 '3D Slicer を入れています…' '数分かかります'
     $p = Start-Process -FilePath $exe -ArgumentList @('/S', ('/D=' + (Join-Path $HV 'Slicer'))) -PassThru
     Wait-Proc $p 40 55 150
