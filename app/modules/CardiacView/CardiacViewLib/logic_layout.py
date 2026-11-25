@@ -267,7 +267,7 @@ class LayoutMixin:
 
     def _modeLabel(self):
         try:
-            names = dict(self.RMODES); ca = self._view().cornerAnnotation()
+            ca = self._view().cornerAnnotation()
             ca.SetText(1, "")
             self._setUL("2_rmode", "")                                          # 今の機能は上のバーで分かるので画面には出さない（すっきり）
         except Exception: pass

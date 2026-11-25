@@ -284,7 +284,7 @@ def _toolIcons():
     s = "stroke='#d6dae1' stroke-width='1.7' fill='none' stroke-linecap='round' stroke-linejoin='round'"
     F = "#d6dae1"
     body = {
-        "zoom": f"<circle cx='10.5' cy='10.5' r='6.2'/><path d='M15.2 15.2L20.5 20.5M8 10.5h5M10.5 8v5'/>",
+        "zoom": "<circle cx='10.5' cy='10.5' r='6.2'/><path d='M15.2 15.2L20.5 20.5M8 10.5h5M10.5 8v5'/>",
         "window": f"<circle cx='12' cy='12' r='8'/><path d='M12 4a8 8 0 0 0 0 16z' fill='{F}'/>",
         "pan": "<path d='M12 3v18M3 12h18M9.5 5.5L12 3l2.5 2.5M9.5 18.5L12 21l2.5-2.5M5.5 9.5L3 12l2.5 2.5M18.5 9.5L21 12l-2.5 2.5'/>",
         "cut": "<path d='M3 15.5l5-4h13l-5 4z'/><path d='M12 9V3M9.8 5.2L12 3l2.2 2.2M12 17.5V21'/>",
@@ -297,7 +297,7 @@ def _toolIcons():
         "two": "<rect x='4' y='4' width='16' height='16' rx='2.5'/><path d='M12 4v16'/>",
         "four": "<rect x='4' y='4' width='16' height='16' rx='2.5'/><path d='M12 4v16M4 12h16'/>",
         "fit": "<path d='M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5'/><rect x='8.5' y='8.5' width='7' height='7' rx='1.5'/>",
-        "wl": f"<path d='M4 7h9M17 7h3M4 17h3M11 17h9'/><circle cx='15' cy='7' r='2.2'/><circle cx='9' cy='17' r='2.2'/>",
+        "wl": "<path d='M4 7h9M17 7h3M4 17h3M11 17h9'/><circle cx='15' cy='7' r='2.2'/><circle cx='9' cy='17' r='2.2'/>",
         "reset": "<path d='M4.5 12a7.5 7.5 0 1 0 2.3-5.4'/><path d='M4.5 4v4.5H9'/>",
         "camera": "<rect x='3' y='7' width='18' height='13' rx='2.5'/><path d='M8.5 7l1.8-3h3.4l1.8 3'/><circle cx='12' cy='13.5' r='3.5'/>",
         "help": f"<circle cx='12' cy='12' r='9'/><path d='M9.6 9.6a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .8-1 1.6'/><circle cx='12' cy='16.8' r='.8' fill='{F}'/>",

@@ -110,7 +110,7 @@ class _Inset:
         cam = self.ren.GetActiveCamera(); cam.ParallelProjectionOn()
         cam.SetFocalPoint(*self.center); cam.SetPosition(*(self.center + np.array([0, 1.0, 0]) * self.R * 4)); cam.SetViewUp(0, 0, 1)
         self.half = (hi - lo) / 2.0
-        vp = self.ren.GetViewport(); asp = 1.35                                    # 全体図の縦横比（だいたい）
+        asp = 1.35                                    # 全体図の縦横比（だいたい）
         cam.SetParallelScale(float(max(self.half[2], self.half[0] / asp)) * 1.18); self.ren.ResetCameraClippingRange()
         self.view.scheduleRender()
 

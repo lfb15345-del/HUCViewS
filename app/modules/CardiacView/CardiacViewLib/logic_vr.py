@@ -221,7 +221,6 @@ class VRMixin:
                 out[hit, :3] = np.clip(col * 255.0, 0, 255).astype(np.uint8)
             except Exception as e: print("VR tint2:", e)
         self._vrTintHits = []
-        spz = sp[0] * ds
         zf = int(round(sp[0] / (1.0 * ds))) if sp[0] > 1.5 else 1      # 厚いスライス（2〜5mm）は z を 1mm（粗い格子は 2mm）に曲線補間（板状の段差を消す）
         if zf > 1:
             nz = out.shape[0]

@@ -92,7 +92,7 @@ class WidgetBaseMixin:
         lv = ("なし", "ふつう", "強め")[i]
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try: msg = self.logic.setShading(lv)
-        except Exception as e: import traceback; traceback.print_exc(); msg = ""
+        except Exception: import traceback; traceback.print_exc(); msg = ""
         finally: qt.QApplication.restoreOverrideCursor()
         if msg:
             self.shadeCombo.blockSignals(True); self.shadeCombo.currentIndex = ("なし", "ふつう", "強め").index(self.logic.shadeLevel); self.shadeCombo.blockSignals(False)
@@ -105,7 +105,7 @@ class WidgetBaseMixin:
         except Exception: pass
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try: self.logic.applyPalette(name)
-        except Exception as e: import traceback; traceback.print_exc()
+        except Exception: import traceback; traceback.print_exc()
         finally: qt.QApplication.restoreOverrideCursor()
         self._makeLegend()
 

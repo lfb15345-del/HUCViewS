@@ -144,7 +144,7 @@ class LookMixin:
         self.flying = False
         vb = self._visibleBounds()
         if vb is None: return
-        lo, hi = vb; c = (lo + hi) / 2; r = float(np.linalg.norm(hi - lo) / 2); D = float(np.max(hi - lo)) / 2 / math.tan(math.radians(fov / 2)) * 1.12
+        lo, hi = vb; c = (lo + hi) / 2; D = float(np.max(hi - lo)) / 2 / math.tan(math.radians(fov / 2)) * 1.12
         dirs = {"A": (0, 1, 0), "P": (0, -1, 0), "L": (-1, 0, 0), "R": (1, 0, 0), "S": (0, 0, 1), "SURG": (0.35, 0.80, 0.50)}
         d = np.array(dirs.get(key, (0, 1, 0)), float); d /= np.linalg.norm(d)
         up = (0, 1, 0) if key == "S" else (0, 0, 1)

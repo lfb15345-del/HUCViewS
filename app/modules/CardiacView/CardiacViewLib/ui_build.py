@@ -7,21 +7,40 @@ from . import common          # 色合いで置き換わる名前は common.名�
 
 class WidgetBuildMixin:
     def setup(self):
+        """画面を組み立てる。中身は下の _build…（上から順に作る。順番を変えない: 部品を作る順・つなぐ順が、そのまま画面の並び・動きの順になる）"""
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = CardiacViewLogic()
         qt.QTimer.singleShot(0, lambda: self.logic._noDepthPeeling())          # 起動直後から深さの剥離を OFF に保つ（AMD で固まる）
         self.layerRows = []
         app = getattr(slicer, "heartviewAppMode", False)
-        B, Lb = self._btn, self._lab
+        v, root = self._buildRoot()
+        self._buildHeader(v, app)
+        self._buildCaseCard(v, app)
+        self._buildSceneCard(v)
+        self._build4DCard(v)
+        self._buildRightDragCard(v)
+        pages = self._buildTabs(v, root)
+        self._buildViewPage(pages)
+        self._buildCutPage(pages)
+        self._buildSlicePage(pages)
+        self._buildMeasurePage(pages)
+        self._buildSettingsPage(pages)
+        self._arrangeParts(v, pages)
+        self._connectSignals()
 
+    def _buildRoot(self):
+        """画面の土台（スクロールする入れ物と、縦の並び）"""
         root = qt.QWidget(); root.setObjectName("cvRoot"); root.setStyleSheet(CV_STYLE + _iconCSS()); root.setAttribute(qt.Qt.WA_StyledBackground, True)
         _sc = qt.QScrollArea(); _sc.setWidgetResizable(True); _sc.setFrameShape(qt.QFrame.NoFrame); _sc.setWidget(root)
         _sc.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)                      # 横スクロールなし（はみ出さない配置にする）
         _sc.setStyleSheet(SC_STYLE)
         self.layout.addWidget(_sc); self.layout.setContentsMargins(0, 0, 0, 0)
         v = qt.QVBoxLayout(root); v.setContentsMargins(10, 8, 10, 10); v.setSpacing(8); self.root = root
+        return v, root
 
-        # ---------------- ヘッダー
+    def _buildHeader(self, v, app):
+        """ヘッダー"""
+        B, Lb = self._btn, self._lab
         h = qt.QHBoxLayout(); h.setSpacing(4); v.addLayout(h)
         if app:
             back = B("‹ 入口", "ghost", "症例の読み込み（入口）へ戻る"); h.addWidget(back)
@@ -36,7 +55,9 @@ class WidgetBuildMixin:
                 p = HeartView.HeartViewLogic().savePNG(); self._status(f"画像を保存しました: {p}")
             png.connect("clicked()", _png)
 
-        # ---------------- 症例（CT・作成・状態）
+    def _buildCaseCard(self, v, app):
+        """症例（CT・作成・状態）"""
+        B, Lb = self._btn, self._lab
         card, c, _ = self._card(v)
         r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r)
         r.addWidget(Lb("CT", "muted"))
@@ -56,7 +77,9 @@ class WidgetBuildMixin:
             for b in (self.loadButton, self.dicomButton): b.hide()
             self.quickButton.setText("3D を作り直す（同じ CT）")
 
-        # ---------------- 見たいもの（ワンクリック。最後に選んだものが次の症例の最初の表示）
+    def _buildSceneCard(self, v):
+        """見たいもの（ワンクリック。最後に選んだものが次の症例の最初の表示）"""
+        B = self._btn
         card, c, _ = self._card(v, "見たいもの", "次の症例もこの表示から"); self._sceneLay = c
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
         self.sceneButtons = {}
@@ -66,7 +89,9 @@ class WidgetBuildMixin:
                                ("body", "骨＋血管", "骨と血管を一緒に（位置関係・術前のオリエンテーション）")):
             b = B(text, "seg", tip, checkable=True); b.setMinimumHeight(30); r.addWidget(b, 1); self.sceneButtons[key] = b
 
-        # ---------------- 4D（同じ撮影の位相が 2 つ以上ある時だけ出る）
+    def _build4DCard(self, v):
+        """4D（同じ撮影の位相が 2 つ以上ある時だけ出る）"""
+        B, Lb = self._btn, self._lab
         self.box4D, c, hd = self._card(v, "4D", None)
         self.phaseLabel = Lb("", "accent"); hd.addWidget(self.phaseLabel)
         r = qt.QHBoxLayout(); r.setSpacing(6); c.addLayout(r)
@@ -94,7 +119,9 @@ class WidgetBuildMixin:
         self.end4DButton = B("4D を終了", None, "4D をやめて、AI で作った面・色分け VR の表示に戻る"); r.addWidget(self.end4DButton)
         self.box4D.hide()
 
-        # ---------------- 右ドラッグ（マウスの機能）
+    def _buildRightDragCard(self, v):
+        """右ドラッグ（マウスの機能）"""
+        B = self._btn
         card, c, hd = self._card(v, "右ドラッグ", None)
         self.wlResetButton = B("ウィンドウを戻す", "ghost", "VR と断面のウィンドウ（濃さ・コントラスト）を最初の値に戻す"); hd.addWidget(self.wlResetButton)
         self.wlResetButton.connect("clicked()", lambda: self.logic.resetWindow())
@@ -106,7 +133,9 @@ class WidgetBuildMixin:
         self.rmodeButtons["zoom"].checked = True; self._rmodeGroup = rg
         card.hide()                                                           # 右ドラッグの切り替えは画像の上のバーへ
 
-        # ---------------- タブ
+    def _buildTabs(self, v, root):
+        """タブ"""
+        B = self._btn
         tb = qt.QHBoxLayout(); tb.setSpacing(0); v.addLayout(tb)
         self.stack = qt.QWidget(); _stl = qt.QVBoxLayout(self.stack); _stl.setContentsMargins(0, 0, 0, 0); _stl.setSpacing(0); v.addWidget(self.stack)
         self.tabBtns = []; self.pages = []; tg = qt.QButtonGroup(root); tg.setExclusive(True); self._tabGroup = tg
@@ -117,8 +146,11 @@ class WidgetBuildMixin:
             b.connect("clicked()", lambda i=i: self._showTab(i))
             p = qt.QWidget(); pl = qt.QVBoxLayout(p); pl.setContentsMargins(0, 4, 0, 0); pl.setSpacing(8)
             _stl.addWidget(p); self.pages.append(p); p.hide(); pages[name] = pl
+        return pages
 
-        # ===== 表示
+    def _buildViewPage(self, pages):
+        """表示"""
+        B, Lb = self._btn, self._lab
         P = pages["表示"]
         card, c, _ = self._card(P, "視点")
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
@@ -179,7 +211,9 @@ class WidgetBuildMixin:
         self.synthCheck.setToolTip("OFF にすると補った壁も同じ色で表示（見た目重視・発表用）。感染などの本物の穴との区別には ON で確認。")
         c.addWidget(self.synthCheck)
 
-        # ===== 切る
+    def _buildCutPage(self, pages):
+        """切る"""
+        B, Lb = self._btn, self._lab
         P = pages["切る"]
         card, c, _ = self._card(P, "切断面")
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); f.setVerticalSpacing(6); c.addLayout(f)
@@ -232,7 +266,9 @@ class WidgetBuildMixin:
         self.patchUndoButton.connect("clicked()", lambda: self._status(self.logic.patchUndo()))
         self.patchClearButton.connect("clicked()", lambda: self._status(self.logic.patchClear()))
 
-        # ===== 断面（画面の分け方・MPR）
+    def _buildSlicePage(self, pages):
+        """断面（画面の分け方・MPR）"""
+        B, Lb = self._btn, self._lab
         P = pages["断面"]
         card, c, _ = self._card(P, "画面")
         r = qt.QHBoxLayout(); r.setSpacing(4); c.addLayout(r)
@@ -269,7 +305,9 @@ class WidgetBuildMixin:
             b = B(lab, "tool"); r.addWidget(b, 1); self.rotButtons.append((b, deg))
         self.mprAngleLabel = Lb("0°", "accent"); self.mprAngleLabel.setWordWrap(True); c.addWidget(self.mprAngleLabel)
 
-        # ===== 計測
+    def _buildMeasurePage(self, pages):
+        """計測"""
+        B, Lb = self._btn, self._lab
         P = pages["計測"]
         card, c, hd = self._card(P, "計測")
         self.rulerClearButton = B("すべて消す", "ghost", "測った線・面積・角度をすべて消す（1 つだけ消す時は、その計測にマウスを乗せて Delete キー）"); hd.addWidget(self.rulerClearButton)
@@ -289,7 +327,9 @@ class WidgetBuildMixin:
         self.flySlider = ctk.ctkSliderWidget(); self.flySlider.minimum = 0; self.flySlider.maximum = 100; self.flySlider.value = 20
         self.flySlider.setToolTip("中心線上の位置"); r.addWidget(self.flySlider, 1)
 
-        # ===== 設定
+    def _buildSettingsPage(self, pages):
+        """設定"""
+        B, Lb = self._btn, self._lab
         P = pages["設定"]
         card, c, _ = self._card(P, "3D の作り方")
         f = qt.QFormLayout(); f.setHorizontalSpacing(8); c.addLayout(f)
@@ -330,7 +370,9 @@ class WidgetBuildMixin:
         for b in (self.distButton, self.angleButton, self.curveButton): r.addWidget(b, 1)
         self.saveButton = B("シーンを保存（.mrb）", None, "表示・計測をまとめて 1 ファイルに保存"); c.addWidget(self.saveButton)
 
-        # ---- 置き場所の整理（同じものを 2 か所に置かない。専門的な設定は「設定」へ）
+    def _arrangeParts(self, v, pages):
+        """置き場所の整理（同じものを 2 か所に置かない。専門的な設定は「設定」へ）"""
+        Lb = self._lab
         r = qt.QHBoxLayout(); r.setSpacing(6); self._sceneLay.addLayout(r)
         self.aortaButton.setProperty("kind", ""); self.aortaButton.setText("大動脈サイジング  ›"); r.addWidget(self.aortaButton, 1)
         self.aortaButton.style().unpolish(self.aortaButton); self.aortaButton.style().polish(self.aortaButton)
@@ -344,7 +386,8 @@ class WidgetBuildMixin:
         except Exception: t0 = 0
         self._showTab(t0 if 0 <= t0 < len(self.pages) else 0)
 
-        # ---- signals
+    def _connectSignals(self):
+        """signals"""
         self.loadButton.connect("clicked()", self.onLoad)
         self.dicomButton.connect("clicked()", self.onLoadDicom)
         self.quickButton.connect("clicked()", self.onQuick)
