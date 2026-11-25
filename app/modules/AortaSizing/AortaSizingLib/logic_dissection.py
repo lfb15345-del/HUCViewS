@@ -2,6 +2,9 @@
 """大動脈サイジング: 解離: 真腔・偽腔のたどり・らせん・解離の形の CSV
 AortaSizingLogic の一部（DissectionMixin）。元の AortaSizing.py の中身をそのまま移したもの。"""
 from .common import *
+import itertools
+
+_TL_VER = itertools.count(1)      # 真腔の版（たどり直すたびに新しい番号。前は新しい真腔も 1 から数え、仮想グラフトの形の覚えが古い真腔のものを返すことがあった）
 
 
 class DissectionMixin:
@@ -254,7 +257,8 @@ class DissectionMixin:
         for j in range(2): cen[:, j] = ndimage.gaussian_filter1d(np.interp(np.arange(K), np.where(ok)[0], cen[ok, j]), 3.0 / STEP)
         u = cen[:, 1] * STEP - HALF; v = cen[:, 0] * STEP - HALF
         deq = np.sqrt(4 * cnt * STEP * STEP / np.pi); deq[~ok] = np.nan
-        tl.update(cen2=cen, C=self.P + u[:, None] * self.B + v[:, None] * self.N, deq=deq, ver=tl.get("ver", 0) + 1); tl["_xy"] = {}
+        tl.update(cen2=cen, C=self.P + u[:, None] * self.B + v[:, None] * self.N, deq=deq, ver=next(_TL_VER)); tl["_xy"] = {}
+        self.__dict__.get("_depCache", {}).clear()                          # 真腔が変わった: 覚えておいた断面ごとのグラフトの形は使えない（前は「真腔をたどる」をやり直しても古い形が出ることがあった）
 
     def _tlSeedAt(self, sd):
         """手で直した点（3D）→ いまの中心線の断面 k と (u, v)"""
@@ -333,6 +337,9 @@ class DissectionMixin:
         r0, c0 = tl["cen2"][k] if np.isfinite(tl["cen2"][k][0]) else np.argwhere(m).mean(0)
         if not (0 <= int(r0) < m.shape[0] and 0 <= int(c0) < m.shape[1]) or not m[int(r0), int(c0)]:
             r0, c0 = np.argwhere(m).mean(0)
+            if not m[int(r0), int(c0)]:                                      # 三日月の真腔: 重心も真腔の外（くぼみ）→ 真腔のいちばん内側の点から（前は 96 点が全部中心に重なり、径 0・慢性の広がりが NaN・SINE の目安が 0 で割って止まった）
+                from scipy import ndimage
+                D = ndimage.distance_transform_edt(m); r0, c0 = (float(x) for x in np.unravel_index(int(np.argmax(D)), D.shape))
         th = np.linspace(0, 2 * np.pi, 96, endpoint=False); dr, dc = np.sin(th)[:, None], np.cos(th)[:, None]
         ss = np.arange(0.0, 2 * m.shape[0], 0.5)[None, :]                  # 中心から 0.5 画素ずつ外へ。最初に真腔を出た所がふち
         rr = np.rint(r0 + dr * (ss + 0.5)).astype(int); cc = np.rint(c0 + dc * (ss + 0.5)).astype(int)

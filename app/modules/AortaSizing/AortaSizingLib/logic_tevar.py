@@ -20,7 +20,7 @@ class TevarPlanMixin:
         p = self._mk("近位ランディング"); d = self._mk("遠位ランディング"); l = self._mk("左鎖骨下動脈")
         sp = p["s"] if p else ((l["s"] + 10.0) if l else float(self.curS))
         sd = d["s"] if d else sp + 150.0
-        sd = min(max(sd, sp + 20.0), self.length - 1.0)
+        sd = min(max(sd, sp + 20.0), self.length - 1.0); sp = min(sp, max(sd - 20.0, 0.0))   # 経路の終わりの近くでも 近位端 < 遠位端（前は逆になることがあった）
         self.plan = dict(path=self.path, p=float(sp), d=float(sd), os=self.OVERSIZE, dp=None, dd=None, on=True)
         return self.plan
 
@@ -50,7 +50,8 @@ class TevarPlanMixin:
         for k, v in kw.items():
             if k in ("p", "d") and v is not None: v = float(np.clip(v, 0.0, self.frames[pl["path"]]["length"]))
             pl[k] = v
-        if pl["d"] < pl["p"] + 10: pl["d"] = pl["p"] + 10
+        if pl["d"] < pl["p"] + 10:                                           # 10 mm 以上。遠位端は経路の終わりまで（前は終わりを越えた）
+            pl["d"] = min(pl["p"] + 10, self.frames[pl["path"]]["length"]); pl["p"] = min(pl["p"], max(pl["d"] - 10, 0.0))
         self.planDraw()
 
     def _tubePD(self, P, N, B, R, nseg=56):
@@ -127,7 +128,7 @@ class TevarPlanMixin:
         if xy is None or len(xy) < 6: return None
         key = (path, kq, id(xy))
         if key in cache: return cache[key][1]
-        if len(cache) > 3000: cache.clear()
+        if len(cache) > 3000: cache.clear(); self.__dict__.get("_depCache", {}).clear()   # 形の覚えは id(E) で引く: E を捨てる時は一緒に捨てる（捨てた E の id が別の断面に使い回されると古い形が出る）
         nu = int(round(2 * HALF / STEP)) + 1
         E = ndimage.distance_transform_edt(_rasterPoly(np.asarray(xy, float), nu)) * STEP - self.GRAFT_WALL_MM
         cache[key] = (xy, E); return E
@@ -145,12 +146,13 @@ class TevarPlanMixin:
         r = Rn; ell = None
         if useTL and flap == "chronic":
             xy = self._tlXY(k); mt = _polyMetrics(xy) if xy is not None else None
+            if mt and mt["dmax"] < 1.0: mt = None                                # 輪郭がつぶれている: 真腔の形は使わない（楕円の径 0 → NaN にしない）
             if mt and mt["dmin"] / max(mt["dmax"], 1e-6) < 0.8:                 # 三日月・楕円の真腔: 楕円のまま広がる（長軸は真腔の長径の向き）
                 a_, b_ = mt["maxLine"]; phi = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
                 A = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0); ell = (A, A * self.ELL_RATIO, phi); r = A
         elif useTL and flap == "acute":                                          # 急性: フラップがよく動いて丸くなるが、偽腔側の大動脈の真ん中までは行かない → 真腔の長径の円まで
             xy = self._tlXY(k); mt = _polyMetrics(xy) if xy is not None else None
-            if mt: r = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0)
+            if mt and mt["dmax"] >= 1.0: r = min(Rn, (mt["dmax"] + self.ELL_PLUS) / 2.0)
         r = float(max(r, 2.0))                                                   # 壁より大きい所は、壁に当たって沿う（下の放射で切る）
         key = (path, int(k), round(r, 1), useTL, id(E), axis, None if ell is None else (round(ell[1], 1), round(ell[2], 2)))
         cache = self.__dict__.setdefault("_depCache", {})
@@ -360,7 +362,7 @@ class TevarPlanMixin:
         xy = self._tlXY(k)
         if xy is None: return None
         m = _polyMetrics(xy)
-        if m is None: return None
+        if m is None or m["dmin"] <= 0 or m["area"] <= 0: return None          # 輪郭がつぶれている（SINE の目安で 0 で割らない）
         per = float(np.linalg.norm(np.diff(np.r_[xy, xy[:1]], axis=0), axis=1).sum())
         return dict(short=m["dmin"], long=m["dmax"], mean=(m["dmin"] + m["dmax"]) / 2.0, per=per, area=m["area"], s=float(s))
 

@@ -156,7 +156,7 @@ class PostOpMixin:
         Xg = Y @ M[:3, :3].T + M[:3, 3]
         dg, kg = cKDTree(F["P"]).query(Xg); sg = F["s"][kg]
         self._ensureArrF(); A = self._rasToIjk; aoD, boD = self._tvMasks(); sh = self.arr.shape
-        t0 = cKDTree(B0); B1g = B1 @ M[:3, :3].T + M[:3, 3]
+        B1g = B1 @ M[:3, :3].T + M[:3, 3]
         keepX, keepS, segs = [], [], []
         L_ = F["length"]; c = 0.0
         while c < L_:

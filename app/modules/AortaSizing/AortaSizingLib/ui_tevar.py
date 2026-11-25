@@ -202,8 +202,8 @@ class TevarUIMixin:
         if qt.QApplication.keyboardModifiers() & qt.Qt.ShiftModifier: dl *= 5.0
         pl[key] = float(np.clip(pl[key] + dl, 0.0, L.length - 1.0))
         if pl["d"] < pl["p"] + 10.0:
-            if key == "p": pl["p"] = pl["d"] - 10.0
-            else: pl["d"] = pl["p"] + 10.0
+            if key == "p": pl["p"] = max(pl["d"] - 10.0, 0.0)                 # 近位端は 0 より前へ出ない（前は遠位端が 10 mm より手前だと負になった）
+            pl["d"] = max(pl["d"], pl["p"] + 10.0)
         self._dropSameRange(); L._queue(s=pl[key]); L._drawGreen()
         self.tvRows[key][0].setText(self._tvRef(pl[key])); self._tvLenSet()
         t = getattr(self, "_nudgeT", None)
