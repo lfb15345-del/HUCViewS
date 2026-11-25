@@ -18,6 +18,7 @@ try: FORBID += [l.strip() for l in open(os.path.join(REPO_DIR, ".private_forbid.
 except Exception: pass
 ENV = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
 NOWIN = 0x08000000
+TESTED_SLICER = "5.12.4"                                  # 動作を確かめた 3D Slicer の版。インストーラーが新しく入れる時はこの版（新しい Slicer で確かめたら上げる）
 
 
 def run(cmd, check=True):
@@ -58,7 +59,7 @@ def build_zip(app, ver):
                 p = os.path.join(root, f); z.write(p, os.path.relpath(p, REPO_DIR).replace("\\", "/"))
     sha = hashlib.sha256(open(zp, "rb").read()).hexdigest()
     man = {"version": ver, "app_zip": f"https://github.com/{REPO}/releases/download/v{ver}/HUCViewS-app.zip",
-           "sha256": sha, "min_slicer": "5.8", "published": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+           "sha256": sha, "min_slicer": "5.8", "slicer": TESTED_SLICER, "published": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     json.dump(man, open(os.path.join(DIST, "latest.json"), "w", encoding="utf-8"), indent=2)
     for src, dst, eol in (("installer/windows/install.ps1", "install.ps1", b"\r\n"), ("installer/mac/install_mac.sh", "install_mac.sh", b"\n")):
         b = open(os.path.join(REPO_DIR, src), "rb").read().replace(b"\r\n", b"\n")       # Mac 用は LF、Windows 用は CRLF に必ずそろえる

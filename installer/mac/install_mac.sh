@@ -26,9 +26,13 @@ if [ "$(uname -m)" = "arm64" ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/n
   softwareupdate --install-rosetta --agree-to-license || sudo softwareupdate --install-rosetta --agree-to-license || fail "Rosetta 2 を入れられませんでした"
 fi
 
+curl -fsSL -o "$TMP/latest.json" "$MANIFEST" || fail "版の情報を取得できませんでした"
+SV="$(json "$TMP/latest.json" slicer 2>/dev/null || true)"; case "$SV" in [0-9]*) ;; *) SV="" ;; esac   # 動作を確かめた Slicer の版
+
 if [ ! -d "$HV/Slicer.app" ]; then
   step "3D Slicer（公式・無料・約450MB）をダウンロードしています…"
-  curl -fL --progress-bar -o "$TMP/Slicer.dmg" "https://download.slicer.org/download?os=macosx&stability=release" || fail "3D Slicer をダウンロードできませんでした"
+  SURL="https://download.slicer.org/download?os=macosx&stability=release"   # 確かめた版が無い時だけ、その日の最新の版
+  { [ -n "$SV" ] && curl -fL --progress-bar -o "$TMP/Slicer.dmg" "$SURL&version=$SV"; } || curl -fL --progress-bar -o "$TMP/Slicer.dmg" "$SURL" || fail "3D Slicer をダウンロードできませんでした"
   step "3D Slicer を入れています…"
   MNT="$TMP/mnt"; mkdir -p "$MNT"
   hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$TMP/Slicer.dmg" >/dev/null || fail "ディスクイメージを開けませんでした"
@@ -41,7 +45,6 @@ SLICER="$HV/Slicer.app/Contents/MacOS/Slicer"
 [ -x "$SLICER" ] || fail "3D Slicer が見つかりません"
 
 step "HUCViewS 本体を取得しています…"
-curl -fsSL -o "$TMP/latest.json" "$MANIFEST" || fail "版の情報を取得できませんでした"
 ZIPURL="$(json "$TMP/latest.json" app_zip)"; SHA="$(json "$TMP/latest.json" sha256 || true)"; VER="$(json "$TMP/latest.json" version || true)"
 curl -fsSL -o "$TMP/app.zip" "$ZIPURL" || fail "本体をダウンロードできませんでした"
 if [ -n "$SHA" ]; then

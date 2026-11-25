@@ -382,7 +382,7 @@ class PostOpMixin:
         """薄い MPR（2 mm 以下の冠状断・矢状断）から金属の点を拾う（術後の座標 RAS）。5 mm の軸位より頭尾方向がずっと細かい"""
         files = getattr(self, "postMPR", None) or []
         if not files or getattr(self, "postT", None) is None or self.P is None: return None
-        M = self.postT; ck = (id(M), self.path, len(self.P))
+        M = self.postT; ck = (np.asarray(M).tobytes(), self.path, len(self.P))   # 重ね合わせの中身で（前は id(M)。作り直した行列が同じ id になると、古い金属の点を使う恐れ）
         cc_ = getattr(self, "_mprCache", None)
         if cc_ is not None and cc_[0] == ck: return cc_[1]
         import pydicom

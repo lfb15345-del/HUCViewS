@@ -413,13 +413,22 @@ class GraftMixin:
             try: memb = self._gMembrane(skip=list(c["stent"]) + graft + wr)
             except Exception as e: print("[graft] membrane", e)
         old_ = getattr(self, "gState", None) if getattr(self, "_gStateVol", None) is self.vol else None
+        same = old_ is not None and self.graftValid()                       # 手で直した範囲（中心線の上の位置）は、同じ中心線の時だけ引き継ぐ
         self.gState = dict(f=f, c=c, wr=wr, seeds=seeds, auto=graft, tracks=tr, sAuto=sA, memb=memb,
-                           manual=getattr(self, "gState", {}).get("manual", []) if getattr(self, "gState", None) and getattr(self, "_gStateVol", None) is self.vol else [],
-                           brManual=getattr(self, "gState", {}).get("brManual", {}) if getattr(self, "gState", None) and getattr(self, "_gStateVol", None) is self.vol else {})
+                           manual=list(old_.get("manual", [])) if same else [], brManual=dict(old_.get("brManual", {})) if old_ is not None else {},
+                           path=self.path, K=len(self.P), sv=self._stVerOf())
         if old_ is not None:
-            for k_ in ("userBr", "ops"): self.gState[k_] = old_.get(k_, [])
+            self.gState["userBr"] = old_.get("userBr", []); self.gState["ops"] = [o for o in old_.get("ops", []) if same or o[0] != "manual"]
         self._gStateVol = self.vol
         return self.graftRender(status)
+
+    G_STALE = "中心線が変わったので、手術のイメージを作り直してください（「自動で色分け」）。"
+
+    def graftValid(self):
+        """手術のイメージ（gState）が今の中心線で作ったものか。中心線を選び直す・直すと、中心線の上の位置がずれるので、そのままは使えない"""
+        g = getattr(self, "gState", None)
+        return (bool(g) and getattr(self, "_gStateVol", None) is self.vol and self.P is not None and g.get("path") == self.path
+                and g.get("K") == len(self.P) and g.get("sv", -1) == self._stVerOf())
 
     def _gFinal(self):
         g = self.gState; K = len(self.P); graft = list(g["auto"])
@@ -432,6 +441,7 @@ class GraftMixin:
     def graftRender(self, status=print):
         from vtk.util.numpy_support import vtk_to_numpy
         from scipy.spatial import cKDTree
+        if not self.graftValid(): raise RuntimeError(self.G_STALE)
         g = self.gState; f, c = g["f"], g["c"]; R = f["R"]; K = len(self.P); s = self.s; mm = lambda x: int(round(x / ST))
         self.graftClear(keepState=True)
         graft = self._gFinal()
@@ -591,12 +601,14 @@ class GraftMixin:
     def graftEdit(self, s0, s1, on, status=print):
         """中心線の s0〜s1 mm を人工血管にする（on=True）／外す（on=False）"""
         if not getattr(self, "gState", None): raise RuntimeError("先に「自動で色分け」を押してください。")
+        if not self.graftValid(): raise RuntimeError(self.G_STALE)
         k0, k1 = int(round(min(s0, s1) / ST)), int(round(max(s0, s1) / ST))
         self.gState["manual"].append((k0, k1, bool(on))); self.gState.setdefault("ops", []).append(("manual",)); return self.graftRender(status)
 
     def graftUndo(self, status=print):
         g = getattr(self, "gState", None)
         if not g: return ""
+        if not self.graftValid(): raise RuntimeError(self.G_STALE)
         ops = g.get("ops") or []
         if ops:
             op = ops.pop()
@@ -613,6 +625,7 @@ class GraftMixin:
         cand = {b["name"]: b for b in (g or {}).get("userBr", [])}
         if g and getattr(self, "BRANCHES_FROM_AI", False): cand.update(g["tracks"])
         if not g or not cand: raise RuntimeError("先に「頸部分枝をたどる」で枝をたどってください。")
+        if not self.graftValid(): raise RuntimeError(self.G_STALE)
         best = None
         for key, t in cand.items():
             d = np.linalg.norm(t["R"] - np.asarray(ras)[None, :], axis=1); i = int(np.argmin(d))
@@ -653,6 +666,7 @@ class GraftMixin:
         from scipy.sparse.csgraph import dijkstra
         g = getattr(self, "gState", None)
         if not g: raise RuntimeError("先に「自動で色分け」を押してください。")
+        if not self.graftValid(): raise RuntimeError(self.G_STALE)
         status("大動脈からクリックした所まで、造影された血管をたどっています…")
         a = self._gArr(); sp = np.array(self.vol.GetSpacing())[::-1]; I2R = self._ijk2ras(); R2I = np.linalg.inv(I2R)
         q = (R2I @ np.r_[np.asarray(ras, float), 1])[:3]; tz, ty, tx = int(round(q[2])), int(round(q[1])), int(round(q[0]))

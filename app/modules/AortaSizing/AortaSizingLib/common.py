@@ -320,7 +320,9 @@ def _ctProtocol(vol):
     keys = [("CT 機種", None), ("管電圧 kV", "0018,0060"), ("再構成関数", "0018,1210"), ("スライス厚 mm", "0018,0050"), ("スライス間隔 mm", None),
             ("画素 mm", "0028,0030"), ("造影剤（DICOM）", "0018,0010"), ("管電流 mA", "0018,1151")]
     if vol is None: return [(k, "") for k, _ in keys]
-    ck = (vol.GetID(), vol.GetName())
+    try: dims = tuple(vol.GetImageData().GetDimensions())
+    except Exception: dims = None
+    ck = (vol.GetID(), vol.GetName(), (vol.GetAttribute("DICOM.instanceUIDs") or "")[:256], dims)   # 別の症例で ID と名前が同じでも取り違えない（前は ID と名前だけ）
     if ck in _CT_PROTO_CACHE: return _CT_PROTO_CACHE[ck]
     val = {}
     try:

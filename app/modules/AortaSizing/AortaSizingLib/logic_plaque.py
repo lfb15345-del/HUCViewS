@@ -168,14 +168,14 @@ class PlaqueMixin:
                     len5=float((tmaxS >= 5.0).sum() * self.PLQ_DS), circ23=bool((circFrac > 2 / 3).any()), ulcer=int(sum(q["ulcer"] for q in plaques)),
                     hosaka=float(np.nanmean(hosV)), nsec=J, spacing=tuple(float(x) for x in sp), time=time.time() - t0)
         summ["shaggyItems"] = int(summ["tMax"] > 5.0) + int(summ["circ23"]) + int(summ["ulcer"] > 0)
-        self.plaque = dict(path=self.path, K=K, vol=self.straight, secs=secs, lab=labId, plaques=plaques, summ=summ, which=which)
+        self.plaque = dict(path=self.path, K=K, vol=self.straight, secs=secs, lab=labId, plaques=plaques, summ=summ, which=which, sv=self._stVerOf())
         self._plqLastDir = None
         status(f"プラーク {len(plaques)} 個（{time.time() - t0:.0f} 秒）")
         return self.plaque
 
     def plaqueValid(self):
         q = getattr(self, "plaque", None)
-        return q is not None and q.get("path") == self.path and q.get("K") == len(self.P) and q.get("vol") is self.straight
+        return q is not None and q.get("path") == self.path and q.get("K") == len(self.P) and q.get("vol") is self.straight and q.get("sv", -1) == self._stVerOf()
 
     # ---------------------------------------------------------------- 3D: 壁を厚みで色分け・プラークの番号
     def drawPlaque(self, on=True):

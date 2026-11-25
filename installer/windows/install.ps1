@@ -55,22 +55,43 @@ function Wait-Proc($p, $p0, $p1, $expectSec) {
   while (-not $p.HasExited) { $s = ([DateTime]::Now - $start).TotalSeconds; Prog ($p0 + ($p1 - $p0) * [Math]::Min(0.97, $s / $expectSec)); Wait-Ms 300 }
   Prog $p1
 }
+function Find-Slicer($want) {
+  # 動作を確かめた版（latest.json の slicer）を入れる。見つからない時だけ、その日の最新の版
+  $find = 'https://download.slicer.org/find?os=win&stability=release'
+  if ($want) {
+    try {
+      $i = Invoke-RestMethod -Uri ($find + '&version=' + [Uri]::EscapeDataString([string]$want)) -UserAgent $UA
+      if ($i.download_url -and ((-not $i.version) -or ([string]$i.version -eq [string]$want))) { return $i }
+    } catch {}
+  }
+  Invoke-RestMethod -Uri $find -UserAgent $UA
+}
+function Log-Lines { $lg = Join-Path $HV 'setup_log.txt'; if (Test-Path $lg) { @(Get-Content $lg -Encoding UTF8) } else { @() } }
 function Run-Slicer($phase, $hidden, $p0, $p1, $expectSec) {
+  # うまくいったかは、setup_in_slicer.py が setup_log.txt の最後に書く OK / NG で見る（この回に足された行だけ）
+  $n0 = @(Log-Lines).Count
   $env:HEARTVIEW_HOME = Join-Path $HV 'app'; $env:HUCVIEWS_SETUP_PHASE = $phase
   $a = @('--no-splash'); if ($hidden) { $a += '--no-main-window' }; $a += @('--python-script', ('"' + (Join-Path $HV 'app\setup_in_slicer.py') + '"'))
   $p = Start-Process -FilePath (Join-Path $HV 'Slicer\Slicer.exe') -ArgumentList $a -PassThru
   Wait-Proc $p $p0 $p1 $expectSec
   Remove-Item Env:HUCVIEWS_SETUP_PHASE -ErrorAction SilentlyContinue
+  $l = @(Log-Lines)
+  for ($k = $l.Count - 1; $k -ge $n0; $k--) { if ($l[$k] -match ' (OK|NG)\s*$') { return ($Matches[1] -eq 'OK') } }
+  return $false
 }
 
 try {
   New-Item -ItemType Directory -Force -Path $HV | Out-Null
+  Step 1 '版の情報を確かめています…' ''
+  $man = Invoke-RestMethod -Uri $Manifest -UserAgent $UA
   $slicer = Join-Path $HV 'Slicer\Slicer.exe'
   if (-not (Test-Path $slicer)) {
     Step 2 '3D Slicer（公式・無料）をダウンロードしています…' ''
-    $info = Invoke-RestMethod -Uri 'https://download.slicer.org/find?os=win&stability=release' -UserAgent $UA
+    $info = Find-Slicer $man.slicer
     $exe = Join-Path $env:TEMP 'HUCViewS_SlicerSetup.exe'
     Download ('https://download.slicer.org' + $info.download_url) $exe 2 40 ([double]$info.size)
+    if ($info.size -and ((Get-Item $exe).Length -ne [long]$info.size)) {   # 途中で切れたダウンロードを入れない（病院の回線で 5 分ほどで切れた例がある）
+      Remove-Item $exe -Force -ErrorAction SilentlyContinue; throw '3D Slicer のダウンロードが途中で切れました。ネットにつながっているか確かめて、もう一度実行してください。' }
     Step 40 '3D Slicer を入れています…' '数分かかります'
     $p = Start-Process -FilePath $exe -ArgumentList @('/S', ('/D=' + (Join-Path $HV 'Slicer'))) -PassThru
     Wait-Proc $p 40 55 150
@@ -78,7 +99,6 @@ try {
     if (-not (Test-Path $slicer)) { throw '3D Slicer を入れられませんでした。' }
   }
   Step 55 'HUCViewS 本体を取得しています…' ''
-  $man = Invoke-RestMethod -Uri $Manifest -UserAgent $UA
   $zip = Join-Path $env:TEMP 'HUCViewS-app.zip'
   Download $man.app_zip $zip 55 58 0
   if ($man.sha256 -and ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne ([string]$man.sha256).ToLower())) { throw 'ダウンロードしたファイルが壊れています。もう一度実行してください。' }
@@ -87,10 +107,10 @@ try {
   Set-Content -Path (Join-Path $HV 'update_source.txt') -Value $Manifest -Encoding UTF8
   Copy-Item (Join-Path $HV 'app\HeartView.bat') (Join-Path $HV 'HeartView.bat') -Force
 
-  Step 58 'AI（TotalSegmentator）の機能を入れています…' '数分かかります'
-  Run-Slicer 'ext' $true 58 66 90
+  Step 58 'AI（TotalSegmentator）と中心線（VMTK）の機能を入れています…' '数分かかります'
+  $okExt = Run-Slicer 'ext' $true 58 66 90
   Step 66 'AI の部品（PyTorch など・約2GB）を入れています…' '10〜20 分かかります。途中で 3D Slicer の画面が出ても、そのままお待ちください。'
-  Run-Slicer 'py' $false 66 96 600
+  $okPy = Run-Slicer 'py' $false 66 96 600
 
   Step 96 'アイコンを作っています…' ''
   $p = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + (Join-Path $HV 'app\make_shortcut.ps1') + '"')) -WindowStyle Hidden -PassThru
@@ -107,8 +127,14 @@ try {
   New-ItemProperty -Path $key -Name 'EstimatedSize' -Value $sizeKB -PropertyType DWord -Force | Out-Null
 
   $bar.Value = 1000
-  $step.Text = 'インストールが終わりました'; $step.ForeColor = [Drawing.Color]::FromArgb(30, 130, 60)
-  $detail.Text = "デスクトップとスタートメニューの「HUCViewS」から起動できます。`n心腔の色分けを使うときは、起動後の画面で「AI ライセンスを登録する」から番号を入れてください（無料）。"
+  if ($okExt -and $okPy) {
+    $step.Text = 'インストールが終わりました'; $step.ForeColor = [Drawing.Color]::FromArgb(30, 130, 60)
+    $detail.Text = "デスクトップとスタートメニューの「HUCViewS」から起動できます。`n心腔の色分けを使うときは、起動後の画面で「AI ライセンスを登録する」から番号を入れてください（無料）。"
+  } else {
+    $miss = if (-not $okExt) { 'AI（TotalSegmentator）の拡張機能' } else { 'AI の部品（PyTorch など）' }
+    $step.Text = 'インストールは終わりましたが、AI が入っていません'; $step.ForeColor = [Drawing.Color]::DarkOrange
+    $detail.Text = ($miss + 'が入りませんでした。表示・計測は使えます。' + "`nネットにつながっている所で、もう一度このインストーラーを実行すると入ります。`n記録: " + (Join-Path $HV 'setup_log.txt'))
+  }
   $btnRun.Visible = $true; $btnClose.Visible = $true
 } catch {
   if (-not $script:closed) {

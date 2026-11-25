@@ -400,10 +400,16 @@ class CoreMixin:
             out[k0:k1] = ndimage.map_coordinates(self.arrF, [H[:, 2], H[:, 1], H[:, 0]], order=3, prefilter=False, mode="nearest").reshape(k1 - k0, nu, nu).astype(np.int16)
         return out
 
+    def _stVerOf(self, path=None):
+        """伸ばした画像の版（経路ごと）。真腔・偽腔・プラークの結果が、今の伸ばした画像から作ったものかを確かめるのに使う
+        （前は断面の数と画像のノードだけで確かめていて、中心線を一部直して長さが変わらない時は、直した所の真腔などが古いまま使われた）"""
+        return (getattr(self, "_stVer", None) or {}).get(path or self.path, 0)
+
     def _straightNode(self, name, out):
         node = slicer.mrmlScene.GetFirstNodeByName("SA stretched " + PATH_EN.get(name, name))
         if node is None: node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "SA stretched " + PATH_EN.get(name, name))
         slicer.util.updateVolumeFromArray(node, out)
+        v = self.__dict__.setdefault("_stVer", {}); v[name] = v.get(name, 0) + 1   # 伸ばした画像の版（経路ごと）。中心線を直して作り直したら、前の真腔・偽腔・プラークは使わない
         node.SetSpacing(STEP, STEP, STEP); node.SetOrigin(-HALF, -HALF, 0.0)
         m = vtk.vtkMatrix4x4(); m.Identity(); m.SetElement(2, 2, -1.0); node.SetIJKToRASDirectionMatrix(m)
         node.CreateDefaultDisplayNodes(); dn = node.GetDisplayNode(); dn.SetAutoWindowLevel(False); dn.SetWindowLevel(800, 200)

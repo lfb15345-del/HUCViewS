@@ -177,7 +177,7 @@ class DissectionMixin:
     # ================================================================ 真腔（解離）: 伸ばした画像の各断面で、中心線から造影された内腔をたどる（フラップで止まる）
     def tlValid(self):
         tl = getattr(self, "tl", None)
-        return tl is not None and tl.get("path") == self.path and tl.get("K") == len(self.P) and tl.get("vol") is self.straight
+        return tl is not None and tl.get("path") == self.path and tl.get("K") == len(self.P) and tl.get("vol") is self.straight and tl.get("sv", -1) == self._stVerOf()
 
     def _tlSlice(self, im, thr, seeds, prevMask, ref):
         """1 断面の真腔。seeds = 種の (行, 列) の候補（先が優先）。prevMask = 隣の断面の真腔。ref = 近くの真腔の面積（画素）"""
@@ -231,7 +231,7 @@ class DissectionMixin:
             if comp is None or not comp.any(): continue
             masks[k] = comp; r_, c_ = np.nonzero(comp); prev = (r_.mean(), c_.mean()); prevM = comp; lastK = k; hist.append(comp.sum())
             if k % 200 == 0: status(f"真腔をたどっています… {100 * k // K}%")
-        self.tl = dict(path=self.path, K=K, vol=self.straight, masks=masks, cen2=None, C=None, deq=None, thr=thr)
+        self.tl = dict(path=self.path, K=K, vol=self.straight, masks=masks, cen2=None, C=None, deq=None, thr=thr, sv=self._stVerOf())
         self._tlUndo = []
         nfix = 0
         for sd in list((getattr(self, "plan", None) or {}).get("tlfix", []) or []):    # 手で直した所をもう一度
@@ -361,13 +361,13 @@ class DissectionMixin:
             if k % 300 == 0: status(f"偽腔をたどっています… {100 * k // K}%")
         on = area >= 20.0; run = np.convolve(on.astype(int), np.ones(6, int), "same") >= 6
         st = int(np.argmax(run)) if run.any() else None
-        self.fl = dict(path=self.path, K=K, vol=self.straight, masks=fl, area=area, start=(float(self.s[max(st - 3, 0)]) if st is not None else None))
+        self.fl = dict(path=self.path, K=K, vol=self.straight, masks=fl, area=area, start=(float(self.s[max(st - 3, 0)]) if st is not None else None), sv=self._stVerOf())
         self._drawMask(fl, "TEVAR 偽腔", (0.72, 0.42, 0.95), 0.3)
         return self.fl
 
     def flValid(self):
         fl = getattr(self, "fl", None)
-        return fl is not None and fl.get("path") == self.path and fl.get("K") == len(self.P) and fl.get("vol") is self.straight
+        return fl is not None and fl.get("path") == self.path and fl.get("K") == len(self.P) and fl.get("vol") is self.straight and fl.get("sv", -1) == self._stVerOf()
 
     def _drawMask(self, masks, name, color, opacity):
         from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy

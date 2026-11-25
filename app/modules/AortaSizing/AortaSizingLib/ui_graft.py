@@ -86,6 +86,7 @@ class GraftUIMixin:
             if getattr(self, "_gPickMode", None) == mode: self._gPickEnd()
             return
         if not getattr(self.logic, "gState", None): self._say("先に「自動で色分け」を押してください。"); btn.checked = False; return
+        if not self.logic.graftValid(): self._say(self.logic.G_STALE); btn.checked = False; return
         if other.checked: other.blockSignals(True); other.checked = False; other.blockSignals(False); self._gPickEnd()
         self._gPickMode = mode
         n = slicer.mrmlScene.GetFirstNodeByName("手術 吻合部の点")

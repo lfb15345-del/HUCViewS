@@ -246,6 +246,35 @@ class CenterlineFixMixin:
         self.setRotation(rot0)
         self._drawMarkers(); self._listsChanged()
 
+    def _shiftAfterFix(self, name, b, shift):
+        """中心線を一部直して断面の数が shift だけ変わった時、直した範囲（新しい番号で b まで）より先の位置（中心線の mm）を同じだけずらす。
+        印・今の位置・基準・計測・TEVAR の計画（近位端・遠位端）・エントリー・術後のステントの範囲とずれの補正
+        （前は印・今の位置・基準だけで、境目も新しい番号で比べていた → 計画やエントリーの表が印と食い違った）"""
+        if not shift: return
+        ds = shift * STEP; lim = (b - shift) * STEP                          # 前の番号での「直した範囲の終わり」。これより先は前と同じ断面が ds ずれた所にある
+        mv = lambda v: (v + ds) if (v is not None and v > lim) else v
+        for mk in self.markers:
+            if mk.get("path") == name: mk["s"] = mv(mk["s"])
+        self.baseS = mv(self.baseS); self.curS = mv(self.curS)
+        pl = getattr(self, "plan", None)
+        if pl and pl.get("path") == name:
+            for key in ("p", "d"): pl[key] = mv(pl.get(key))
+        for e in getattr(self, "entries", None) or []:
+            if e.get("path") == name: e["s"] = mv(e["s"])
+        ac = getattr(self, "actual", None)
+        if ac and ac.get("path") == name:
+            for key in ("lo", "hi"): ac[key] = mv(ac.get(key))
+            if ac.get("s") is not None: sa = np.asarray(ac["s"], float); ac["s"] = np.where(sa > lim, sa + ds, sa)
+        ps = getattr(self, "postShift", None)
+        if ps and ps.get("path") == name and ps.get("s") is not None:
+            sa = np.asarray(ps["s"], float); ps["s"] = np.where(sa > lim, sa + ds, sa)
+        if getattr(self, "postManual", None):                                 # ("s", 量) は全体を滑らせる手直し（位置を持たない）
+            self.postManual = [(s0 if isinstance(s0, str) else mv(s0), v) for s0, v in self.postManual]
+        for n in self.measureNodes():
+            try:
+                if n.GetAttribute("SA.path") == name and float(n.GetAttribute("SA.s") or "nan") > lim: n.SetAttribute("SA.s", f"{float(n.GetAttribute('SA.s')) + ds:.2f}")
+            except Exception: pass
+
     def _rebuildLocal(self, name, status=print):
         """中心線の一部だけ直した時の作り直し（数秒）。変わった範囲だけ切り出し・断面を計算し、それ以外は前の結果を使う。
         下流のねじれ（フレームの回転）は修正範囲の中で少しずつ吸収して、下流は前と同じフレームのまま"""
@@ -287,11 +316,7 @@ class CenterlineFixMixin:
                 else: r[key] = v
             return r
         self.cache = remap(self.cache); self.override = remap(self.override)
-        ds = shift * STEP; lim = b * STEP
-        for mk in self.markers:
-            if mk.get("path") == name and mk["s"] > lim: mk["s"] += ds
-        if self.baseS is not None and self.baseS > lim: self.baseS += ds
-        if self.curS > lim: self.curS += ds
+        self._shiftAfterFix(name, b, shift)
         self.frames[name] = new; self._use(name)
         d0 = vol.GetDisplayNode(); wl = (d0.GetWindow(), d0.GetLevel()) if d0 is not None else None
         self.straight = self._straightNode(name, out)

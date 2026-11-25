@@ -88,6 +88,10 @@ class ReportMixin:
             if pz and dz:
                 cl, inn, o = self._curveLengths(pz["s"], dz["s"])
                 out.append(f"[長さ] 近位 → 遠位ランディング: 中心線 {cl:.1f} mm　内弯 {inn:.1f} mm　外弯 {o:.1f} mm")
+                mx = self._maxIn(pz["s"], dz["s"])                              # （前は下の「計画のグラフト」の中にあり、近位・遠位ランディングの印が無いと
+                if mx: out.append(f"[瘤] 区間内の最大径 Dmax {mx[1]['dmax']:.1f} mm（{self.rel(mx[0]):+.1f} mm）")   #  計画だけある時にまとめ・サイジングシートが作れなかった）
+                a = _angle(self._tangent(pz["s"] - 10, pz["s"] + 10), self._tangent(dz["s"] - 10, dz["s"] + 10))
+                out.append(f"[屈曲] 近位↔遠位の向きの差 {a:.0f}°")
             pl_ = getattr(self, "plan", None); lg = self.planLengths() if pl_ else None
             if lg:
                 out.append(f"[計画のグラフト] {self.rel(pl_['p']):+.1f} → {self.rel(pl_['d']):+.1f} mm　治療長 中心線 {lg['cl']:.1f} mm　内弯 {lg['inner']:.1f} mm　外弯 {lg['outer']:.1f} mm")
@@ -102,10 +106,6 @@ class ReportMixin:
                     p_ = si["pre"]; out.append(f"  オーバーサイズ（グラフト ÷ 真腔 − 1）: 平均径 {p_['mean']:.2f}・周径 {p_['per']:.2f}・面積 {p_['area']:.2f}")
                     if "emr" in si: e = si["emr"]; out.append(f"  ミスマッチ（予測の広がり ÷ 2 cm 先の真腔）: 平均径 {e['mean']:.2f}・周径 {e['per']:.2f}・面積 {e['area']:.2f}")
                     out.append("  参考値は単施設の報告の群平均で、判定の基準ではありません")
-                mx = self._maxIn(pz["s"], dz["s"])
-                if mx: out.append(f"[瘤] 区間内の最大径 Dmax {mx[1]['dmax']:.1f} mm（{self.rel(mx[0]):+.1f} mm）")
-                a = _angle(self._tangent(pz["s"] - 10, pz["s"] + 10), self._tangent(dz["s"] - 10, dz["s"] + 10))
-                out.append(f"[屈曲] 近位↔遠位の向きの差 {a:.0f}°")
             if ent:
                 m = self._dia(ent["s"]); out.append(f"[エントリー] {self.rel(ent['s']):+.1f} mm" + (f"　Dmax {m['dmax']:.1f} mm" if m else "") + (f"　{ent['clock']}" if ent.get("clock") else ""))
         out.append(""); out.append("[全マーカー]")
@@ -260,7 +260,6 @@ class ReportMixin:
     def exportImages(self, d=None, status=print):
         """高画質 PNG: 3D・ストレッチ像・各マーカーの断面（＋今の断面）"""
         d = d or self.outDir(); files = []
-        keep = (self.curS, self.path)
         status("3D を書き出し中…"); q = self.render3D(); fn = os.path.join(d, "01_3D.png"); q.save(fn); files.append(("3D", fn))
         status("ストレッチ像を書き出し中…"); q = self.renderStretched(); fn = os.path.join(d, "02_stretched.png"); q.save(fn); files.append(("ストレッチ像", fn))
         q, _ = self.renderSection(title="現在位置"); fn = os.path.join(d, "03_current_section.png"); q.save(fn); files.append(("現在の断面", fn))
@@ -294,9 +293,10 @@ class ReportMixin:
             w = csv.writer(f); w.writerow(["名前", "種類", "値", "場所", "位置"])
             for r in self.measureRows(): w.writerow([r["name"], r["kind"], r["value"], r["where"], r["pos"]])
         with open(os.path.join(d, "profile.csv"), "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f); w.writerow(["距離 mm", "ベースラインから mm", "面積", "Deq", "Dmax", "Dmin"])
+            md = "外周" if self.mode == "outer" else "内腔"                        # 径の推移は、今表示している方（外周か内腔）。前は CSV にどちらか書いていなかった
+            w = csv.writer(f); w.writerow(["距離 mm", "ベースラインから mm", "面積", "Deq", "Dmax", "Dmin", "外周/内腔"])
             if self.prof is not None:
-                for k in range(0, len(self.s), 4): w.writerow([f"{self.s[k]:.1f}", f"{self.rel(self.s[k]):.1f}"] + [f"{x:.1f}" for x in self.prof[k]])
+                for k in range(0, len(self.s), 4): w.writerow([f"{self.s[k]:.1f}", f"{self.rel(self.s[k]):.1f}"] + [f"{x:.1f}" for x in self.prof[k]] + [md])
 
     def sizingSheet(self, tpl, status=print):
         """サイジングシート（A4 の PDF）: まとめ・マーカー表・手動計測・画像。CSV と PNG も同じフォルダへ"""
@@ -362,34 +362,3 @@ class ReportMixin:
         getattr(doc, "print")(w)
         self.lastOut = d
         return pdf
-
-    def saveReport(self, tpl):
-        import csv
-        base = os.path.join(os.path.expanduser("~"), "Documents", "HeartView症例")
-        d = os.path.join(base, "サイジング_" + time.strftime("%Y%m%d_%H%M")); os.makedirs(d, exist_ok=True)
-        txt = self.summary(tpl)
-        with open(os.path.join(d, "summary.txt"), "w", encoding="utf-8") as f: f.write(txt)
-        with open(os.path.join(d, "markers.csv"), "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f); w.writerow(["マーカー", "経路", "ベースラインからの距離 mm", "Dmax", "Dmin", "Deq", "面積 mm2", "クロック", "自動"])
-            for m in self.markers:
-                mm = self.metricsAt(m["s"], m["path"]) or {}
-                w.writerow([m["name"], m["path"], f"{self.rel(m['s']):.1f}"] + [f"{mm[k]:.1f}" if k in mm else "" for k in ("dmax", "dmin", "deq", "area")] + [m.get("clock") or "", "要確認" if m.get("auto") else ""])
-        with open(os.path.join(d, "profile.csv"), "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f); w.writerow(["距離 mm", "ベースラインから mm", "面積", "Deq", "Dmax", "Dmin"])
-            if self.prof is not None:
-                for k in range(0, len(self.s), 4):
-                    w.writerow([f"{self.s[k]:.1f}", f"{self.rel(self.s[k]):.1f}"] + [f"{x:.1f}" for x in self.prof[k]])
-        slicer.util.mainWindow().grab().save(os.path.join(d, "screen.png"))
-        shots = []
-        for m in self.markers:
-            if not self._onPath(m): continue
-            self.setPosition(m["s"]); slicer.app.processEvents()
-            fn = f"marker_{len(shots) + 1}_{MARK_EN.get(m['name'], 'mk')}.png".replace(" ", "_").replace("/", "")
-            slicer.app.layoutManager().sliceWidget("Red").sliceView().grab().save(os.path.join(d, fn)); shots.append((m["name"], fn))
-        html = ["<html><head><meta charset='utf-8'><title>Sizing report</title></head><body style='font-family:sans-serif'>",
-                f"<h2>大動脈サイジング（{tpl}）</h2><p style='color:#888'>研究・教育用。最終判断は元画像で。{time.strftime('%Y-%m-%d %H:%M')}</p>",
-                "<pre>" + txt.replace("<", "&lt;") + "</pre>", "<img src='screen.png' width='900'>"]
-        for name, fn in shots: html.append(f"<h4>{name}</h4><img src='{fn}' width='400'>")
-        html.append("</body></html>")
-        with open(os.path.join(d, "report.html"), "w", encoding="utf-8") as f: f.write("\n".join(html))
-        return d

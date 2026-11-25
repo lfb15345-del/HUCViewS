@@ -12,8 +12,9 @@ class MarkerMixin:
 
     def addMarker(self, name, s=None, path=None, auto=False, clock=None):
         s = self.curS if s is None else float(s); path = path or self.path
-        if name == "マーカー":                                            # 自由なマーカーは上書きせず、番号を振って残す
-            name = "マーカー{}".format(1 + sum(1 for m in self.markers if m["name"].startswith("マーカー")))
+        if name == "マーカー":                                            # 自由なマーカーは上書きせず、番号を振って残す（今ある一番大きい番号 + 1。前は数で振っていて、途中を消すと後のマーカーを上書きした）
+            nums = [int(m["name"][4:]) for m in self.markers if m["name"].startswith("マーカー") and m["name"][4:].isdigit()]
+            name = "マーカー{}".format(max(nums, default=0) + 1)
         prev = self._mk(name)
         self.markers = [m for m in self.markers if m["name"] != name]
         self.markers.append(dict(name=name, s=s, path=path, xyz=self._xyzAt(s, path).tolist(), auto=auto, clock=clock))
