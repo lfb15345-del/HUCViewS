@@ -110,11 +110,26 @@ class WidgetBaseMixin:
         self._makeLegend()
 
     def _popup(self, anchor, html):
-        p = qt.QLabel(html); p.setWindowFlags(qt.Qt.Popup); p.setTextFormat(qt.Qt.RichText)
-        p.setStyleSheet("QLabel{background:#1e2128; color:#e6e8ec; border:1px solid #343a46; border-radius:8px; padding:12px 14px;}")
-        p.adjustSize()
-        g = anchor.mapToGlobal(qt.QPoint(anchor.width, anchor.height + 4))
-        p.move(max(0, g.x() - p.width), g.y()); p.show(); self._helpPop = p
+        """ボタンの下に出す説明の小さな窓（「操作」「色の見方」）。外をクリックするか Esc で閉じる。
+        版 25: 前は QLabel そのものを Popup にしていた。Popup は Slicer へのマウスとキーを全部受け取るが、QLabel はそれを捨てる
+        （外をクリックした時に閉じる処理が QLabel には無い）ので、外をクリックしても Esc でも閉じず、Slicer 全体が動かなくなった。
+        → 枠（QFrame）を Popup にして、中に QLabel を置く（外のクリック・Esc は枠が受けて閉じる）。画面の下にはみ出す時はボタンの上に出す"""
+        old = getattr(self, "_helpPop", None)
+        if old is not None:
+            try: old.close()
+            except Exception: pass
+        f = qt.QFrame(); f.setWindowFlags(qt.Qt.Popup); f.setObjectName("cvPopup")
+        f.setStyleSheet("QFrame#cvPopup{background:#1e2128; border:1px solid #343a46; border-radius:8px;} QLabel{color:#e6e8ec; background:transparent;}")
+        lay = qt.QVBoxLayout(f); lay.setContentsMargins(14, 12, 14, 12)
+        lb = qt.QLabel(html); lb.setTextFormat(qt.Qt.RichText); lay.addWidget(lb)
+        f.adjustSize()
+        g = anchor.mapToGlobal(qt.QPoint(anchor.width, anchor.height + 4)); x, y = g.x() - f.width, g.y()
+        try:
+            ag = qt.QApplication.desktop().availableGeometry(anchor)      # ボタンのある画面の使える範囲（タスクバーを除く）
+            if y + f.height > ag.bottom() + 1: y = max(ag.top(), anchor.mapToGlobal(qt.QPoint(0, 0)).y() - f.height - 4)
+            x = min(max(x, ag.left()), max(ag.left(), ag.right() + 1 - f.width))
+        except Exception: x = max(0, x)
+        f.move(x, y); f.show(); self._helpPop = f
 
     def _tbSync(self):
         """ツールバーの押された状態を、今のモード・画面割りに合わせる"""
